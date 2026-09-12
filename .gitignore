@@ -1,0 +1,13 @@
+# Local tooling and editor settings
+.codex/
+.idea/
+
+# Build artifacts
+log-agent.exe
+log-agent-linux-amd64
+*.test
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example

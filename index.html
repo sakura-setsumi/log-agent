@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4f6f8" />
+    <title>日志中枢 · Log Agent</title>
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <link rel="stylesheet" href="styles.css?v=ai-layout-32" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">
+            <img src="favicon.png" alt="" />
+          </div>
+          <div>
+            <div class="brand-name">日志中枢</div>
+            <div class="brand-caption">LOG AGENT / 1.0.0</div>
+          </div>
+        </div>
+
+        <div class="sidebar-label">工作台</div>
+        <nav class="primary-nav" aria-label="主导航">
+          <button class="nav-item active" data-view="overview">
+            <span class="nav-icon">⌁</span><span>实时日志流</span><span class="nav-count" id="stream-nav-count">00</span>
+          </button>
+          <button class="nav-item" data-view="rules">
+            <span class="nav-icon">◌</span><span>加工规则</span>
+          </button>
+          <button class="nav-item" data-view="connections">
+            <span class="nav-icon">⌘</span><span>连接管理</span>
+          </button>
+        </nav>
+
+        <div class="workspace-heading">
+          <div class="sidebar-label">Dozzle 节点</div>
+          <span class="node-total" id="node-total">00</span>
+        </div>
+        <div class="node-list" id="node-list"></div>
+
+        <button class="add-node-button" id="open-add-node">
+          <span>＋</span> 添加 Dozzle 节点
+        </button>
+
+        <div class="sidebar-footer">
+          <div class="system-status" id="system-status" data-state="offline"><span class="pulse-dot"></span> <span id="system-status-label">等待服务连接</span></div>
+          <div class="footer-meta"><span>上次同步</span><strong id="last-sync">未同步</strong></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumb"><span>工作台</span><b>/</b><strong id="view-breadcrumb">实时日志流</strong></div>
+          <div class="topbar-actions">
+            <div class="global-search">
+              <span class="search-glyph">⌕</span>
+              <input id="global-search" type="search" placeholder="搜索日志、容器或关键词" autocomplete="off" />
+              <kbd>/</kbd>
+            </div>
+            <button class="icon-button" id="theme-toggle" aria-label="切换到黑夜模式" title="切换到黑夜模式">☾</button>
+            <button class="icon-button" id="refresh-button" aria-label="刷新状态" title="刷新状态">↻</button>
+            <div class="avatar" title="当前用户">L</div>
+          </div>
+        </header>
+
+        <div class="page-content" id="overview-view">
+          <section class="page-intro">
+            <div>
+              <div class="eyebrow"><span class="eyebrow-line"></span> OPERATIONS CONSOLE</div>
+              <h1 id="page-title">实时日志流</h1>
+              <p id="page-subtitle">统一接入多个 Dozzle 实例，让每一行日志都可检索、可加工、可追溯。</p>
+            </div>
+            <div class="intro-actions">
+              <span class="sync-time"><span class="status-dot"></span> <span id="sync-status">等待后端连接</span></span>
+              <button class="secondary-button" id="export-button"><span>⇩</span> 导出视图</button>
+            </div>
+          </section>
+
+          <section class="metrics-grid" aria-label="运行指标">
+            <article class="metric-card accent-orange">
+              <div class="metric-top"><span>接入节点</span><span class="metric-icon">◈</span></div>
+              <div class="metric-value" id="metric-nodes">00</div>
+              <div class="metric-foot">暂无数据</div>
+            </article>
+            <article class="metric-card accent-teal">
+              <div class="metric-top"><span>活跃容器</span><span class="metric-icon">▣</span></div>
+              <div class="metric-value" id="metric-containers">—</div>
+              <div class="metric-foot">暂无数据</div>
+            </article>
+            <article class="metric-card accent-purple">
+              <div class="metric-top"><span>已接收日志</span><span class="metric-icon">✦</span></div>
+              <div class="metric-value" id="metric-processed">0</div>
+              <div class="metric-foot">暂无数据</div>
+            </article>
+            <article class="metric-card accent-blue">
+              <div class="metric-top"><span>存储占用</span><span class="metric-icon">◒</span></div>
+              <div class="metric-value" id="metric-storage">—</div>
+              <div class="metric-foot" id="metric-storage-foot">等待数据</div>
+            </article>
+          </section>
+
+          <section class="workspace-grid">
+            <div class="logs-panel panel">
+              <div class="panel-heading log-panel-heading">
+                <div>
+                  <div class="section-kicker">LIVE STREAM</div>
+                  <h2>日志流 <span class="live-pill"><i></i> LIVE</span></h2>
+                </div>
+                <div class="panel-heading-actions">
+                  <button class="text-button" id="clear-button">清空视图</button>
+                  <button class="pause-button" id="pause-button"><span>Ⅱ</span> 暂停接收</button>
+                </div>
+              </div>
+
+              <div class="log-filters">
+                <div class="filter-select-wrap">
+                  <span>时间</span>
+                  <select id="time-range-filter" aria-label="按时间范围筛选">
+                    <option value="30m">最近 30 分钟</option>
+                    <option value="2h">最近 2 小时</option>
+                    <option value="1d">最近 1 天</option>
+                    <option value="1w">最近一周</option>
+                  </select>
+                </div>
+                <div class="level-filters" role="group" aria-label="按日志级别筛选">
+                  <button class="level-chip active" data-level="all">全部 <b id="all-count">0</b></button>
+                  <button class="level-chip" data-level="info"><i class="level-dot info"></i> INFO</button>
+                  <button class="level-chip" data-level="warn"><i class="level-dot warn"></i> WARN</button>
+                  <button class="level-chip" data-level="error"><i class="level-dot error"></i> ERROR</button>
+                </div>
+                <div class="log-search-wrap">
+                  <span>⌕</span><input id="log-search" type="search" placeholder="过滤当前日志" />
+                </div>
+              </div>
+
+              <div class="stream-status-bar">
+                <span><i class="stream-indicator"></i><strong id="stream-status">等待连接</strong></span>
+                <span class="stream-caption" id="stream-caption">来自 0 个 Dozzle 节点 · 最近 30 分钟</span>
+                <span class="row-count" id="row-count">显示 0 条</span>
+              </div>
+
+              <div class="log-table-head"><span>日期</span><span>时间</span><span>级别</span><span>来源 / 容器</span><span>消息</span><span></span></div>
+              <div class="log-stream" id="log-stream" role="log" aria-live="polite">
+                <div class="empty-state hidden" id="empty-state">
+                  <div class="empty-icon">⌁</div><strong>暂无日志数据</strong><span>连接 Dozzle 节点后，日志会显示在这里。</span>
+                </div>
+              </div>
+              <div class="stream-footer"><span>按时间倒序</span><span><span class="keyboard-hint">Space</span> 暂停 / 继续</span></div>
+            </div>
+
+            <aside class="right-rail">
+              <section class="processing-panel panel">
+                <div class="panel-heading compact-heading">
+                  <div><div class="section-kicker">PROCESSING PIPELINE</div><h2>日志加工</h2></div>
+                  <div class="pipeline-actions" id="pipeline-actions"><button class="more-button" id="pipeline-more-button" type="button" aria-label="更多加工操作">•••</button><div class="pipeline-menu hidden" id="pipeline-menu"><button type="button" data-pipeline-action="enable-all">启用全部规则</button><button type="button" data-pipeline-action="disable-all">停用全部规则</button><button type="button" data-pipeline-action="reset">恢复默认设置</button></div></div>
+                </div>
+                <p class="panel-description">在日志进入存储前，按顺序执行清洗和结构化。</p>
+                <div class="pipeline-list">
+                  <div class="pipeline-item" data-rule="mask"><span class="drag-handle">⁙</span><span class="rule-icon orange">✦</span><div class="rule-copy"><strong>敏感信息脱敏</strong><span>IP、Token、邮箱</span></div><button class="toggle" data-rule-toggle="mask" aria-label="切换敏感信息脱敏"></button></div>
+                  <div class="pipeline-item" data-rule="structure"><span class="drag-handle">⁙</span><span class="rule-icon teal">⌘</span><div class="rule-copy"><strong>提取结构化字段</strong><span>level / service / trace_id</span></div><button class="toggle" data-rule-toggle="structure" aria-label="切换提取结构化字段"></button></div>
+                  <div class="pipeline-item" data-rule="noise"><span class="drag-handle">⁙</span><span class="rule-icon muted">∿</span><div class="rule-copy"><strong>过滤健康检查</strong><span>忽略 /healthz 请求</span></div><button class="toggle" data-rule-toggle="noise" aria-label="切换过滤健康检查"></button></div>
+                </div>
+                <button class="add-rule-button" id="add-rule-button" type="button"><span>＋</span> 添加加工规则</button>
+                <div class="pipeline-result"><div class="result-label"><span>加工预览</span><span class="result-badge">已生效</span></div><code id="preview-code">暂无日志数据</code></div>
+              </section>
+              <section class="node-detail-panel panel" id="node-detail-panel">
+                <div class="panel-heading compact-heading"><div><div class="section-kicker">SELECTED NODE</div><h2>节点状态</h2></div><span class="healthy-badge" id="detail-node-status"><i></i></span></div>
+                <div class="selected-node-row"><span class="node-avatar logo-avatar" aria-hidden="true"><img src="favicon.png" alt="" /></span><div><strong id="detail-node-name">未选择节点</strong><span id="detail-node-url">暂无连接</span></div><div class="selected-node-actions"><button class="secondary-button compact-button" id="edit-node-button" type="button">编辑</button><button class="danger-button compact-button" id="unbind-node-button" type="button">解绑</button></div></div>
+                <div class="detail-stats"><div><span>延迟</span><strong id="detail-latency">—</strong></div><div><span>容器</span><strong id="detail-containers">—</strong></div><div><span>版本</span><strong id="detail-version">—</strong></div></div>
+                <div class="last-heartbeat"><span class="heartbeat-bars"><i></i><i></i><i></i><i></i><i></i></span><span id="detail-heartbeat">暂无心跳数据</span></div>
+              </section>
+            </aside>
+          </section>
+        </div>
+
+    <div class="assistant-dock" id="assistant-dock">
+              <section class="assistant-panel panel" id="assistant-panel">
+                <div class="panel-heading compact-heading assistant-heading">
+                  <div><div class="section-kicker">AI LOG ASSISTANT</div><h2>AI 日志助手</h2></div>
+                  <button class="assistant-new-chat" id="assistant-clear-context" type="button" aria-label="新聊天" data-tooltip="新聊天"><span aria-hidden="true">✎</span></button>
+                </div>
+                <p class="panel-description">点击左侧日志加入上下文，让 AI 帮你定位问题、解释异常。</p>
+
+                <div class="assistant-toolbar">
+                  <div class="assistant-model-picker" id="assistant-model-picker">
+                    <button class="assistant-model-trigger" id="assistant-model-trigger" type="button" aria-haspopup="menu" aria-expanded="false"><span id="assistant-model-name">选择模型</span><span class="assistant-model-chevron" aria-hidden="true">›</span></button>
+                    <div class="assistant-model-menu hidden" id="assistant-model-menu" role="menu"><div class="assistant-model-menu-label">选择模型</div><div id="assistant-model-options"></div><div class="assistant-model-menu-footer"><button class="text-button" id="assistant-manage-models" type="button">管理模型</button></div></div>
+                  </div>
+                </div>
+                <div class="assistant-context">
+                  <div class="assistant-context-heading"><span>分析上下文 <b id="assistant-context-count">0</b></span><span class="assistant-context-hint">点击左侧日志加入</span></div>
+                  <div class="assistant-context-list" id="assistant-context-list"></div>
+                </div>
+                <div class="assistant-messages" id="assistant-messages">
+                  <div class="assistant-empty" id="assistant-empty"><strong>把日志交给 AI 分析</strong><span>点击左侧日志行加入上下文，然后输入问题。</span></div>
+                </div>
+                <form class="assistant-composer" id="assistant-form">
+                  <textarea id="assistant-input" rows="3" placeholder="例如：这条错误可能是什么原因？"></textarea>
+                  <div class="assistant-composer-footer"><span id="assistant-status">AI 未配置</span><button class="primary-button compact-button" id="assistant-send" type="submit">发送</button></div>
+                </form>
+              </section>
+              <button class="assistant-launcher" id="assistant-launcher" type="button" aria-label="打开 AI 日志助手" title="打开 AI 日志助手"><span>◔</span></button>
+            </div>
+
+        <div class="page-content page-view hidden" id="rules-view">
+          <section class="page-intro">
+            <div>
+              <div class="eyebrow"><span class="eyebrow-line"></span> PROCESSING RULES</div>
+              <h1>加工规则</h1>
+              <p>配置日志进入缓存前的脱敏、结构化和噪声过滤规则。</p>
+            </div>
+            <button class="primary-button" id="rules-add-rule" type="button"><span>＋</span> 添加加工规则</button>
+          </section>
+          <section class="rules-overview panel">
+            <div class="panel-heading compact-heading"><div><div class="section-kicker">RULE PIPELINE</div><h2>当前规则</h2></div><span class="healthy-badge"><i></i> 实时生效</span></div>
+            <div class="rule-settings-list">
+              <article class="rule-setting" data-rule-card="mask"><div class="rule-icon orange">✦</div><div class="rule-setting-copy"><strong>敏感信息脱敏</strong><span>隐藏 IP、Token、邮箱、用户标识等敏感字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="mask" aria-label="切换敏感信息脱敏"></button></article>
+              <article class="rule-setting" data-rule-card="structure"><div class="rule-icon teal">⌘</div><div class="rule-setting-copy"><strong>提取结构化字段</strong><span>从日志中提取 level、service、trace_id 等字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="structure" aria-label="切换提取结构化字段"></button></article>
+              <article class="rule-setting" data-rule-card="noise"><div class="rule-icon muted">∿</div><div class="rule-setting-copy"><strong>过滤健康检查</strong><span>忽略 /healthz 等周期性探活请求，减少日志噪声。</span></div><button class="toggle rule-toggle" data-rule-toggle="noise" aria-label="切换过滤健康检查"></button></article>
+            </div>
+          </section>
+          <section class="rule-note panel"><strong>处理顺序</strong><span>日志接收 → 敏感信息脱敏 → 结构化字段提取 → 健康检查过滤 → 日志缓存</span></section>
+        </div>
+
+        <div class="page-content page-view hidden" id="connections-view">
+          <section class="page-intro">
+            <div>
+              <div class="eyebrow"><span class="eyebrow-line"></span> DOZZLE CONNECTIONS</div>
+              <h1>连接管理</h1>
+              <p>管理 Dozzle 实例连接，查看节点状态、容器数量和实时同步情况。</p>
+            </div>
+            <button class="primary-button" id="connections-add-node" type="button"><span>＋</span> 添加 Dozzle 节点</button>
+          </section>
+          <section class="connections-grid" id="connections-list"></section>
+        </div>
+      </main>
+    </div>
+
+    <div class="modal-backdrop hidden" id="add-node-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-card">
+        <div class="modal-header"><div><div class="section-kicker" id="modal-kicker">NEW CONNECTION</div><h2 id="modal-title">添加 Dozzle 节点</h2></div><button class="close-button" data-close-modal>×</button></div>
+        <p class="modal-description">录入一个 Dozzle 实例后，日志流会自动纳入统一视图。</p>
+        <form id="add-node-form">
+          <label>节点名称<input name="name" required placeholder="例如：预发集群" /></label>
+          <label>Dozzle 地址<input name="url" type="url" required placeholder="https://logs.staging.internal" /></label>
+          <div class="form-grid"><label>连接方式<select name="protocol"><option>HTTP / WebSocket</option><option>HTTPS / WebSocket</option><option>HTTP / SSE</option><option>HTTPS / SSE</option></select></label><label>刷新频率<select name="interval"><option>实时</option></select></label></div>
+          <div class="form-note"><span>⌁</span> 服务端会连接 Dozzle 并读取容器日志；节点配置会保存到数据库。</div>
+          <div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>取消</button><button class="primary-button" id="node-submit-button" type="submit">连接并添加</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
+      <div class="modal-card ai-settings-card">
+        <div class="modal-header"><div><div class="section-kicker">AI PROVIDERS</div><h2 id="ai-settings-title">模型设置</h2></div><button class="close-button" data-close-ai-modal type="button">×</button></div>
+        <p class="modal-description">管理自定义模型供应商，配置后可在聊天框中快速切换。</p>
+        <div class="ai-settings-layout">
+          <aside class="ai-provider-list" id="ai-provider-list"></aside>
+          <section class="ai-provider-editor">
+            <form id="ai-profile-form">
+              <input name="profileId" type="hidden" />
+              <div class="ai-provider-editor-heading"><div><strong id="ai-editor-provider-name">新供应商</strong><span id="ai-editor-provider-status">未启用</span></div><label class="ai-enabled-toggle"><input name="enabled" type="checkbox" checked /><span>已启用</span></label></div>
+              <label>供应商名称<input name="profileName" required placeholder="例如：DeepSeek" /></label>
+              <label>连接方式<select name="connectionType"><option value="openai">OpenAI 接口协议</option><option value="anthropic">Anthropic 接口协议</option></select></label>
+              <label>Base URL<input name="baseURL" type="url" required placeholder="https://api.openai.com/v1" /></label>
+              <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="sk-..." /></label>
+              <div class="ai-models-heading"><span>模型列表</span><span>可添加多个模型</span></div>
+              <div class="ai-model-list" id="ai-model-list"></div>
+              <div class="ai-add-model-row"><input id="ai-new-model-name" name="modelName" type="text" placeholder="模型名称，例如：gpt-4o-mini" /><button class="secondary-button compact-button" id="ai-add-model-button" type="button">＋ 添加模型</button></div>
+              <div class="modal-actions"><button type="button" class="danger-button compact-button" id="delete-ai-profile">删除供应商</button><button type="button" class="secondary-button" data-close-ai-modal>取消</button><button class="primary-button" type="submit">保存并切换</button></div>
+            </form>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop ai-admin-token-modal hidden" id="ai-admin-token-modal" role="dialog" aria-modal="true" aria-labelledby="ai-admin-token-title">
+      <div class="modal-card ai-admin-token-card">
+        <div class="modal-header"><div><div class="section-kicker">ADMIN ACCESS</div><h2 id="ai-admin-token-title">输入管理令牌</h2></div><button class="close-button" data-close-ai-token type="button">×</button></div>
+        <p class="modal-description">保存或删除模型配置需要管理员令牌。</p>
+        <form id="ai-admin-token-form">
+          <label>管理令牌<input id="ai-admin-token-input" type="password" autocomplete="off" required placeholder="LOG_AGENT_ADMIN_TOKEN" /></label>
+          <div class="modal-actions"><button type="button" class="secondary-button" data-close-ai-token>取消</button><button class="primary-button" type="submit">确定</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="toast hidden" id="toast"><span class="toast-icon">✓</span><span id="toast-message">已更新</span></div>
+    <script src="app.js?v=ai-layout-21"></script>
+  </body>
+</html>
