@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f4f6f8" />
     <title>日志中枢 · Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
-    <link rel="stylesheet" href="styles.css?v=ai-layout-32" />
+    <link rel="stylesheet" href="styles.css?v=assistant-composer-gap-75" />
   </head>
   <body>
     <div class="app-shell">
@@ -59,6 +59,7 @@
               <input id="global-search" type="search" placeholder="搜索日志、容器或关键词" autocomplete="off" />
               <kbd>/</kbd>
             </div>
+            <button class="icon-button" id="settings-button" aria-label="打开设置" title="设置">⚙</button>
             <button class="icon-button" id="theme-toggle" aria-label="切换到黑夜模式" title="切换到黑夜模式">☾</button>
             <button class="icon-button" id="refresh-button" aria-label="刷新状态" title="刷新状态">↻</button>
             <div class="avatar" title="当前用户">L</div>
@@ -82,17 +83,17 @@
             <article class="metric-card accent-orange">
               <div class="metric-top"><span>接入节点</span><span class="metric-icon">◈</span></div>
               <div class="metric-value" id="metric-nodes">00</div>
-              <div class="metric-foot">暂无数据</div>
+              <div class="metric-foot" id="metric-nodes-foot">等待节点状态</div>
             </article>
             <article class="metric-card accent-teal">
               <div class="metric-top"><span>活跃容器</span><span class="metric-icon">▣</span></div>
               <div class="metric-value" id="metric-containers">—</div>
-              <div class="metric-foot">暂无数据</div>
+              <div class="metric-foot" id="metric-containers-foot">等待容器状态</div>
             </article>
             <article class="metric-card accent-purple">
               <div class="metric-top"><span>已接收日志</span><span class="metric-icon">✦</span></div>
               <div class="metric-value" id="metric-processed">0</div>
-              <div class="metric-foot">暂无数据</div>
+              <div class="metric-foot" id="metric-processed-foot">等待日志流</div>
             </article>
             <article class="metric-card accent-blue">
               <div class="metric-top"><span>存储占用</span><span class="metric-icon">◒</span></div>
@@ -119,7 +120,7 @@
                   <span>时间</span>
                   <select id="time-range-filter" aria-label="按时间范围筛选">
                     <option value="30m">最近 30 分钟</option>
-                    <option value="2h">最近 2 小时</option>
+                    <option value="5h">最近 5 小时</option>
                     <option value="1d">最近 1 天</option>
                     <option value="1w">最近一周</option>
                   </select>
@@ -190,19 +191,28 @@
                   </div>
                 </div>
                 <div class="assistant-context">
-                  <div class="assistant-context-heading"><span>分析上下文 <b id="assistant-context-count">0</b></span><span class="assistant-context-hint">点击左侧日志加入</span></div>
+                  <div class="assistant-context-heading"><span>结合前后三条日志分析上下文 <b id="assistant-context-count">0</b></span><span class="assistant-context-hint">点击左侧日志加入</span></div>
                   <div class="assistant-context-list" id="assistant-context-list"></div>
                 </div>
                 <div class="assistant-messages" id="assistant-messages">
                   <div class="assistant-empty" id="assistant-empty"><strong>把日志交给 AI 分析</strong><span>点击左侧日志行加入上下文，然后输入问题。</span></div>
                 </div>
                 <form class="assistant-composer" id="assistant-form">
-                  <textarea id="assistant-input" rows="3" placeholder="例如：这条错误可能是什么原因？"></textarea>
-                  <div class="assistant-composer-footer"><span id="assistant-status">AI 未配置</span><button class="primary-button compact-button" id="assistant-send" type="submit">发送</button></div>
+                  <input class="assistant-file-input" id="assistant-file-input" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/xml,.log,.yaml,.yml" />
+                  <div class="assistant-input-shell">
+                    <div class="assistant-attachment-list hidden" id="assistant-attachment-list" aria-live="polite"></div>
+                    <textarea id="assistant-input" rows="3" placeholder="例如：这条错误可能是什么原因？"></textarea>
+                  </div>
+                  <div class="assistant-composer-footer"><span id="assistant-status">AI 未配置</span><span class="assistant-composer-actions"><button class="assistant-attach-button" id="assistant-attach-button" type="button" aria-label="添加图片或文件" title="添加图片或文件，也可将图片粘贴到输入框"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20.1 11.3-7.5 7.5a5 5 0 0 1-7.1-7.1l8.2-8.2a3.5 3.5 0 1 1 5 5l-8.2 8.2a2 2 0 0 1-2.8-2.8l7.5-7.5" /></svg></button><button class="primary-button compact-button" id="assistant-send" type="submit">发送</button></span></div>
                 </form>
               </section>
-              <button class="assistant-launcher" id="assistant-launcher" type="button" aria-label="打开 AI 日志助手" title="打开 AI 日志助手"><span>◔</span></button>
+              <button class="assistant-launcher" id="assistant-launcher" type="button" aria-label="打开 AI 日志助手" title="打开 AI 日志助手"><img class="assistant-launcher-image" src="ai-icon.png" alt="" aria-hidden="true" /></button>
             </div>
+
+    <div class="assistant-attachment-preview-modal hidden" id="assistant-attachment-preview-modal" role="dialog" aria-modal="true" aria-label="图片预览">
+      <button class="assistant-attachment-preview-close" id="assistant-attachment-preview-close" type="button" aria-label="关闭图片预览">×</button>
+      <figure><img id="assistant-attachment-preview-image" alt="" /><figcaption id="assistant-attachment-preview-name"></figcaption></figure>
+    </div>
 
         <div class="page-content page-view hidden" id="rules-view">
           <section class="page-intro">
@@ -221,7 +231,7 @@
               <article class="rule-setting" data-rule-card="noise"><div class="rule-icon muted">∿</div><div class="rule-setting-copy"><strong>过滤健康检查</strong><span>忽略 /healthz 等周期性探活请求，减少日志噪声。</span></div><button class="toggle rule-toggle" data-rule-toggle="noise" aria-label="切换过滤健康检查"></button></article>
             </div>
           </section>
-          <section class="rule-note panel"><strong>处理顺序</strong><span>日志接收 → 敏感信息脱敏 → 结构化字段提取 → 健康检查过滤 → 日志缓存</span></section>
+          <section class="rule-note panel"><strong>处理顺序</strong><span id="rule-order-summary">日志接收 → 敏感信息脱敏 → 结构化字段提取 → 健康检查过滤 → 日志缓存</span></section>
         </div>
 
         <div class="page-content page-view hidden" id="connections-view">
@@ -276,6 +286,34 @@
       </div>
     </div>
 
+    <div class="modal-backdrop hidden" id="app-settings-modal" role="dialog" aria-modal="true" aria-labelledby="app-settings-title">
+      <div class="modal-card app-settings-card">
+        <div class="modal-header"><div><div class="section-kicker">APPLICATION SETTINGS</div><h2 id="app-settings-title">系统设置</h2></div><button class="close-button" data-close-app-settings type="button">×</button></div>
+        <p class="modal-description">配置运行环境、数据库持久化和管理员 key。保存数据库配置前会先测试连接。</p>
+        <form id="app-settings-form">
+          <label>运行环境<select name="environment"><option value="development">开发环境</option><option value="test">测试环境</option><option value="staging">预发布环境</option><option value="production">生产环境</option></select></label>
+          <div class="settings-section">
+            <div class="settings-section-heading"><strong>数据库持久化</strong><span id="settings-db-status">未配置</span></div>
+            <label class="settings-checkbox"><input name="dbEnabled" type="checkbox" /><span>启用 MySQL 节点和模型配置持久化</span></label>
+            <label>MySQL DSN（可选）<input name="dbDsn" type="text" autocomplete="off" placeholder="已配置时留空可保持不变" /></label>
+            <div class="form-grid"><label>数据库地址<input name="dbHost" type="text" placeholder="127.0.0.1" /></label><label>端口<input name="dbPort" type="text" inputmode="numeric" placeholder="3306" /></label></div>
+            <label>用户名<input name="dbUser" type="text" autocomplete="username" /></label>
+            <label>数据库密码<input name="dbPassword" type="password" autocomplete="new-password" placeholder="留空保持已保存的密码" /></label>
+            <div class="form-note"><span>⌁</span> 节点表 <code>vps_info</code>、AI 供应商表 <code>model_info</code> 为固定表名，默认数据库为 <code>log_agent</code>。</div>
+            <div class="settings-actions"><button type="button" class="secondary-button compact-button" id="settings-db-test">测试连接</button><button type="button" class="primary-button compact-button" id="settings-db-save">保存数据库</button></div>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-heading"><strong>管理员 key</strong><span id="settings-admin-status">未配置</span></div>
+            <label>当前管理员 key（修改已有设置时填写）<input name="currentAdminToken" type="password" autocomplete="current-password" placeholder="首次配置可留空" /></label>
+            <label>新的管理员 key<input name="adminToken" type="password" autocomplete="new-password" placeholder="留空保持不变" /></label>
+            <div class="settings-actions"><button type="button" class="primary-button compact-button" id="settings-admin-save">保存管理员 key</button></div>
+          </div>
+          <div class="form-note"><span>⌁</span> 密码和 key 不会回显；配置保存在服务端本地文件中。</div>
+          <div class="modal-actions"><button type="button" class="secondary-button" data-close-app-settings>取消</button><button class="primary-button" type="submit">保存运行环境</button></div>
+        </form>
+      </div>
+    </div>
+
     <div class="modal-backdrop ai-admin-token-modal hidden" id="ai-admin-token-modal" role="dialog" aria-modal="true" aria-labelledby="ai-admin-token-title">
       <div class="modal-card ai-admin-token-card">
         <div class="modal-header"><div><div class="section-kicker">ADMIN ACCESS</div><h2 id="ai-admin-token-title">输入管理令牌</h2></div><button class="close-button" data-close-ai-token type="button">×</button></div>
@@ -288,6 +326,6 @@
     </div>
 
     <div class="toast hidden" id="toast"><span class="toast-icon">✓</span><span id="toast-message">已更新</span></div>
-    <script src="app.js?v=ai-layout-21"></script>
+    <script src="app.js?v=assistant-first-click-30"></script>
   </body>
 </html>

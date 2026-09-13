@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,18 +30,22 @@ import (
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
 //
-//go:embed index.html styles.css app.js favicon.png
+//go:embed index.html styles.css app.js favicon.png ai-icon.png
 var frontend embed.FS
 
 const (
 	defaultMaxStoredLogs = 100000
 	maxAllowedStoredLogs = 1000000
 	maxContainerLogs     = 5000
+	defaultDatabaseName  = "log_agent"
 )
 
 var maxStoredLogs = defaultMaxStoredLogs
 
-const dozzleHistoryPageSize = 500
+const (
+	dozzleHistoryPageSize = 500
+	historyFetchTimeout   = 90 * time.Second
+)
 
 type Node struct {
 	ID         string          `json:"id"`
@@ -90,6 +96,7 @@ type ruleUpdateRequest struct {
 	Rule    string          `json:"rule"`
 	Enabled *bool           `json:"enabled"`
 	Rules   map[string]bool `json:"rules"`
+	Order   []string        `json:"order"`
 }
 
 type aiMessage struct {
@@ -98,17 +105,60 @@ type aiMessage struct {
 }
 
 type aiProfile struct {
-	Name    string `json:"name"`
-	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
-	Model   string `json:"model"`
-	Type    string `json:"type"`
+	ProfileID int64  `json:"profile_id,omitempty"`
+	Name      string `json:"name"`
+	BaseURL   string `json:"base_url"`
+	APIKey    string `json:"api_key"`
+	Model     string `json:"model"`
+	Type      string `json:"type"`
 }
 
 type aiChatRequest struct {
-	Messages []aiMessage `json:"messages"`
-	Logs     []LogEntry  `json:"logs"`
-	Config   *aiProfile  `json:"config,omitempty"`
+	Messages    []aiMessage    `json:"messages"`
+	Logs        []LogEntry     `json:"logs"`
+	Attachments []aiAttachment `json:"attachments,omitempty"`
+	Config      *aiProfile     `json:"config,omitempty"`
+}
+
+type aiAttachment struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Data string `json:"data"`
+}
+
+type aiProviderMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+type databaseSettings struct {
+	Enabled  bool   `json:"enabled"`
+	DSN      string `json:"dsn,omitempty"`
+	Host     string `json:"host,omitempty"`
+	Port     string `json:"port,omitempty"`
+	User     string `json:"user,omitempty"`
+	Password string `json:"password,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+type appSettings struct {
+	Environment string           `json:"environment"`
+	Database    databaseSettings `json:"database"`
+	AdminToken  string           `json:"admin_token,omitempty"`
+}
+
+type settingsResponse struct {
+	Environment string `json:"environment"`
+	Database    struct {
+		Enabled       bool   `json:"enabled"`
+		Configured    bool   `json:"configured"`
+		DSNConfigured bool   `json:"dsnConfigured"`
+		DSN           string `json:"dsn,omitempty"`
+		Host          string `json:"host,omitempty"`
+		Port          string `json:"port,omitempty"`
+		User          string `json:"user,omitempty"`
+	} `json:"database"`
+	AdminTokenConfigured bool `json:"adminTokenConfigured"`
 }
 
 type aiChatResponse struct {
@@ -118,23 +168,28 @@ type aiChatResponse struct {
 }
 
 type server struct {
-	mu                sync.RWMutex
-	db                *sql.DB
-	nodes             []Node
-	logs              []LogEntry
-	processed         int
-	nextLogID         int64
-	historyRange      string
-	historyGeneration uint64
-	historyPending    int
-	rules             map[string]bool
-	subscribers       map[chan LogEntry]struct{}
-	containerNames    map[string]map[string]string
-	containerLogs     map[string][]LogEntry
-	historyCoverage   map[string]time.Time
-	streams           map[string]struct{}
-	nodeContexts      map[string]context.Context
-	nodeCancels       map[string]context.CancelFunc
+	mu                    sync.RWMutex
+	db                    *sql.DB
+	nodes                 []Node
+	logs                  []LogEntry
+	processed             int
+	nextLogID             int64
+	historyRange          string
+	historyNodeScope      string
+	historyGeneration     uint64
+	historyPending        int
+	rules                 map[string]bool
+	ruleOrder             []string
+	subscribers           map[chan LogEntry]struct{}
+	containerNames        map[string]map[string]string
+	containerLogs         map[string][]LogEntry
+	historyCoverage       map[string]time.Time
+	historyLoads          map[string]struct{}
+	historyLoadGeneration map[string]uint64
+	streams               map[string]struct{}
+	nodeContexts          map[string]context.Context
+	nodeCancels           map[string]context.CancelFunc
+	settings              appSettings
 }
 
 type dozzleConfig struct {
@@ -175,7 +230,13 @@ type bootstrapResponse struct {
 	Range          string          `json:"range"`
 	HistoryLoading bool            `json:"historyLoading"`
 	Rules          map[string]bool `json:"rules"`
+	RuleOrder      []string        `json:"ruleOrder"`
 	Storage        storageStats    `json:"storage"`
+}
+
+type containerLogsResponse struct {
+	Logs    []LogEntry `json:"logs"`
+	Loading bool       `json:"loading,omitempty"`
 }
 
 type storageStats struct {
@@ -196,6 +257,11 @@ func main() {
 	mux.HandleFunc("/api/ai/status", s.handleAIStatus)
 	mux.HandleFunc("/api/ai/chat", s.handleAIChat)
 	mux.HandleFunc("/api/ai/profiles", s.handleAIProfiles)
+	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/settings/database/test", s.handleDatabaseSettingsTest)
+	mux.HandleFunc("/api/settings/database", s.handleDatabaseSettings)
+	mux.HandleFunc("/api/settings/admin", s.handleAdminSettings)
+	mux.HandleFunc("/api/settings/environment", s.handleEnvironmentSettings)
 	mux.HandleFunc("/api/nodes", s.handleNodes)
 	mux.HandleFunc("/api/nodes/", s.handleNode)
 	mux.HandleFunc("/api/stream", s.handleStream)
@@ -212,26 +278,31 @@ func main() {
 }
 
 func newServer() *server {
+	settings := loadAppSettings()
 	maxStoredLogs = configuredLogCacheCapacity()
 	s := &server{
-		nodes:          []Node{},
-		logs:           []LogEntry{},
-		processed:      0,
-		historyRange:   "30m",
-		rules:          map[string]bool{"mask": true, "structure": true, "noise": false},
-		subscribers:    make(map[chan LogEntry]struct{}),
-		containerNames: make(map[string]map[string]string),
-		containerLogs:  make(map[string][]LogEntry),
-		historyCoverage: make(map[string]time.Time),
-		streams:        make(map[string]struct{}),
-		nodeContexts:   make(map[string]context.Context),
-		nodeCancels:    make(map[string]context.CancelFunc),
+		nodes:                 []Node{},
+		logs:                  []LogEntry{},
+		processed:             0,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              settings,
 	}
-	if !databaseConfigured() {
+	if !databaseConfigured(settings) {
 		log.Printf("node database is not configured; using memory-only node storage")
 		return s
 	}
-	db, err := openNodeDatabase()
+	db, err := openNodeDatabase(settings)
 	if err != nil {
 		log.Fatalf("open node database: %v", err)
 	}
@@ -239,7 +310,9 @@ func newServer() *server {
 	if err := s.loadNodes(); err != nil {
 		log.Fatalf("load nodes from database: %v", err)
 	}
-	if err := s.ensureAIProfileTable(); err != nil { log.Fatalf("ensure model_info table: %v", err) }
+	if err := s.ensureAIProfileTable(); err != nil {
+		log.Fatalf("ensure model_info table: %v", err)
+	}
 	s.startPersistedNodes()
 	return s
 }
@@ -263,31 +336,117 @@ func configuredLogCacheCapacity() int {
 }
 
 func (s *server) ensureAIProfileTable() error {
-	if s.db == nil { return nil }
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS model_info (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(200) NOT NULL, base_url VARCHAR(500) NOT NULL, api_key VARCHAR(1000) NOT NULL, type TINYINT NOT NULL DEFAULT 2, model_name VARCHAR(200) NOT NULL, create_time DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+	if s.db == nil {
+		return nil
+	}
+	return ensureAIProfileTable(s.db)
+}
+
+func ensureAIProfileTable(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS model_info (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(200) NOT NULL, base_url VARCHAR(500) NOT NULL, api_key VARCHAR(1000) NOT NULL, type TINYINT NOT NULL DEFAULT 2, model_name VARCHAR(200) NOT NULL, create_time DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 	return err
 }
 
-func databaseConfigured() bool {
-	return strings.TrimSpace(os.Getenv("DOZZLE_DB_DSN")) != "" || strings.TrimSpace(os.Getenv("DOZZLE_DB_HOST")) != ""
+func settingsFilePath() string {
+	if path := strings.TrimSpace(os.Getenv("LOG_AGENT_SETTINGS_FILE")); path != "" {
+		return path
+	}
+	return "log-agent-settings.json"
 }
 
-func openNodeDatabase() (*sql.DB, error) {
-	dsn := strings.TrimSpace(os.Getenv("DOZZLE_DB_DSN"))
+func defaultAppSettings() appSettings {
+	environment := firstNonEmptyEnv("LOG_AGENT_ENVIRONMENT", "LOG_AGENT_ENV", "APP_ENV")
+	if environment == "" {
+		environment = "production"
+	}
+	databaseName := strings.TrimSpace(os.Getenv("DOZZLE_DB_NAME"))
+	if databaseName == "" {
+		databaseName = defaultDatabaseName
+	}
+	return appSettings{
+		Environment: environment,
+		Database: databaseSettings{
+			Enabled:  strings.TrimSpace(os.Getenv("DOZZLE_DB_DSN")) != "" || strings.TrimSpace(os.Getenv("DOZZLE_DB_HOST")) != "",
+			DSN:      strings.TrimSpace(os.Getenv("DOZZLE_DB_DSN")),
+			Host:     strings.TrimSpace(os.Getenv("DOZZLE_DB_HOST")),
+			Port:     strings.TrimSpace(os.Getenv("DOZZLE_DB_PORT")),
+			User:     strings.TrimSpace(os.Getenv("DOZZLE_DB_USER")),
+			Password: os.Getenv("DOZZLE_DB_PASSWORD"),
+			Name:     databaseName,
+		},
+		AdminToken: os.Getenv("LOG_AGENT_ADMIN_TOKEN"),
+	}
+}
+
+func firstNonEmptyEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func loadAppSettings() appSettings {
+	settings := defaultAppSettings()
+	content, err := os.ReadFile(settingsFilePath())
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("read settings file failed: %v; using environment settings", err)
+		}
+		return settings
+	}
+	var saved appSettings
+	if err := json.Unmarshal(content, &saved); err != nil {
+		log.Printf("parse settings file failed: %v; using environment settings", err)
+		return settings
+	}
+	if strings.TrimSpace(saved.Environment) != "" {
+		settings.Environment = strings.TrimSpace(saved.Environment)
+	}
+	settings.Database = saved.Database
+	if !settings.Database.Enabled && (strings.TrimSpace(settings.Database.DSN) != "" || strings.TrimSpace(settings.Database.Host) != "") {
+		settings.Database.Enabled = true
+	}
+	if saved.AdminToken != "" {
+		settings.AdminToken = saved.AdminToken
+	} else {
+		settings.AdminToken = ""
+	}
+	return settings
+}
+
+func saveAppSettings(settings appSettings) error {
+	content, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(settingsFilePath(), append(content, '\n'), 0600)
+}
+
+func databaseConfigured(settings appSettings) bool {
+	return settings.Database.Enabled && (strings.TrimSpace(settings.Database.DSN) != "" || strings.TrimSpace(settings.Database.Host) != "")
+}
+
+func openNodeDatabase(settings appSettings) (*sql.DB, error) {
+	dsn := strings.TrimSpace(settings.Database.DSN)
 	if dsn == "" {
-		host := strings.TrimSpace(os.Getenv("DOZZLE_DB_HOST"))
-		port := strings.TrimSpace(os.Getenv("DOZZLE_DB_PORT"))
-		user := strings.TrimSpace(os.Getenv("DOZZLE_DB_USER"))
-		database := strings.TrimSpace(os.Getenv("DOZZLE_DB_NAME"))
-		if host == "" || user == "" || database == "" {
-			return nil, fmt.Errorf("DOZZLE_DB_HOST, DOZZLE_DB_USER and DOZZLE_DB_NAME are required")
+		host := strings.TrimSpace(settings.Database.Host)
+		port := strings.TrimSpace(settings.Database.Port)
+		user := strings.TrimSpace(settings.Database.User)
+		database := strings.TrimSpace(settings.Database.Name)
+		if database == "" {
+			database = defaultDatabaseName
+		}
+		if host == "" || user == "" {
+			return nil, fmt.Errorf("database host and user are required")
 		}
 		if port == "" {
 			port = "3306"
 		}
 		config := mysql.Config{
 			User:      user,
-			Passwd:    os.Getenv("DOZZLE_DB_PASSWORD"),
+			Passwd:    settings.Database.Password,
 			Net:       "tcp",
 			Addr:      net.JoinHostPort(host, port),
 			DBName:    database,
@@ -311,11 +470,22 @@ func openNodeDatabase() (*sql.DB, error) {
 }
 
 func (s *server) loadNodes() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, address, style FROM vps_info ORDER BY id`)
+	loaded, err := loadNodesFromDatabase(s.db)
 	if err != nil {
 		return err
+	}
+	s.mu.Lock()
+	s.nodes = loaded
+	s.mu.Unlock()
+	return nil
+}
+
+func loadNodesFromDatabase(db *sql.DB) ([]Node, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, `SELECT id, name, address, style FROM vps_info ORDER BY id`)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -325,7 +495,7 @@ func (s *server) loadNodes() error {
 		var name, address string
 		var style sql.NullString
 		if err := rows.Scan(&dbID, &name, &address, &style); err != nil {
-			return err
+			return nil, err
 		}
 		name = strings.TrimSpace(name)
 		address = normalizeNodeAddress(address)
@@ -353,12 +523,9 @@ func (s *server) loadNodes() error {
 		loaded = append(loaded, node)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	s.mu.Lock()
-	s.nodes = loaded
-	s.mu.Unlock()
-	return nil
+	return loaded, nil
 }
 
 func (s *server) startPersistedNodes() {
@@ -474,7 +641,7 @@ func (s *server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, bootstrapResponse{
 		Nodes: append([]Node{}, s.nodes...), Logs: logs, Processed: s.processed, Range: s.historyRange,
-		HistoryLoading: s.historyPending > 0, Rules: copyRules(s.rules), Storage: storage,
+		HistoryLoading: s.historyPending > 0, Rules: copyRules(s.rules), RuleOrder: copyRuleOrder(s.ruleOrder), Storage: storage,
 	})
 }
 
@@ -496,8 +663,8 @@ func (s *server) handleRules(w http.ResponseWriter, r *http.Request) {
 		}
 		updates = map[string]bool{request.Rule: *request.Enabled}
 	}
-	if len(updates) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rule and enabled are required"})
+	if len(updates) == 0 && len(request.Order) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rule update or order is required"})
 		return
 	}
 	for rule := range updates {
@@ -506,14 +673,25 @@ func (s *server) handleRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if len(request.Order) > 0 && !isValidRuleOrder(request.Order) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "order must contain every rule exactly once"})
+		return
+	}
 
 	s.mu.Lock()
 	for rule, enabled := range updates {
 		s.rules[rule] = enabled
 	}
+	if len(request.Order) > 0 {
+		s.ruleOrder = copyRuleOrder(request.Order)
+	}
 	rules := copyRules(s.rules)
+	order := copyRuleOrder(s.ruleOrder)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]map[string]bool{"rules": rules})
+	writeJSON(w, http.StatusOK, struct {
+		Rules map[string]bool `json:"rules"`
+		Order []string        `json:"order"`
+	}{Rules: rules, Order: order})
 }
 
 func isKnownRule(rule string) bool {
@@ -533,6 +711,34 @@ func copyRules(rules map[string]bool) map[string]bool {
 	return copy
 }
 
+func defaultRuleOrder() []string {
+	return []string{"mask", "structure", "noise"}
+}
+
+func isValidRuleOrder(order []string) bool {
+	if len(order) != len(defaultRuleOrder()) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(order))
+	for _, rule := range order {
+		if !isKnownRule(rule) {
+			return false
+		}
+		if _, duplicate := seen[rule]; duplicate {
+			return false
+		}
+		seen[rule] = struct{}{}
+	}
+	return true
+}
+
+func copyRuleOrder(order []string) []string {
+	if !isValidRuleOrder(order) {
+		return defaultRuleOrder()
+	}
+	return append([]string{}, order...)
+}
+
 func (s *server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -545,10 +751,37 @@ func (s *server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	key := containerLogKey(nodeID, containerID)
 	s.mu.RLock()
-	logs := append([]LogEntry{}, s.containerLogs[containerLogKey(nodeID, containerID)]...)
+	logs := append([]LogEntry{}, s.containerLogs[key]...)
 	s.mu.RUnlock()
-	writeJSON(w, http.StatusOK, map[string][]LogEntry{"logs": logs})
+
+	loading := false
+	if len(logs) == 0 {
+		loading = s.ensureContainerHistory(nodeID, containerID)
+	}
+	writeJSON(w, http.StatusOK, containerLogsResponse{Logs: logs, Loading: loading})
+}
+
+func (s *server) ensureContainerHistory(nodeID, containerID string) bool {
+	key := containerLogKey(nodeID, containerID)
+	s.mu.RLock()
+	node, nodeOK := s.nodeByIDLocked(nodeID)
+	ctx := s.nodeContexts[nodeID]
+	rangeKey := s.historyRange
+	generation := s.historyGeneration
+	_, alreadyLoading := s.historyLoads[key]
+	s.mu.RUnlock()
+	if !nodeOK || node.hostID == "" || ctx == nil {
+		return false
+	}
+	if !alreadyLoading {
+		s.launchHistoryFetch(ctx, node, node.hostID, containerID, rangeKey, generation)
+	}
+	s.mu.RLock()
+	_, loading := s.historyLoads[key]
+	s.mu.RUnlock()
+	return loading
 }
 
 func containerLogKey(nodeID, containerID string) string {
@@ -562,32 +795,70 @@ func (s *server) handleLogRange(w http.ResponseWriter, r *http.Request) {
 	}
 	rangeKey, ok := normalizeLogRange(r.URL.Query().Get("range"))
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be one of 30m, 2h, 1d, 1w"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be one of 30m, 5h, 1d, 1w"})
 		return
 	}
 
 	duration, _ := logRangeDuration(rangeKey)
 	now := time.Now().UTC()
+	requestedNodeIDs := make(map[string]struct{})
+	for _, nodeID := range r.URL.Query()["node"] {
+		if nodeID = strings.TrimSpace(nodeID); nodeID != "" {
+			requestedNodeIDs[nodeID] = struct{}{}
+		}
+	}
 
 	s.mu.Lock()
-	if s.historyRange == rangeKey {
+	nodes := append([]Node{}, s.nodes...)
+	scopedNodeIDs := make(map[string]struct{})
+	for _, node := range nodes {
+		if _, requested := requestedNodeIDs[node.ID]; requested {
+			scopedNodeIDs[node.ID] = struct{}{}
+		}
+	}
+	scopeIDs := make([]string, 0, len(scopedNodeIDs))
+	for nodeID := range scopedNodeIDs {
+		scopeIDs = append(scopeIDs, nodeID)
+	}
+	sort.Strings(scopeIDs)
+	scopeKey := strings.Join(scopeIDs, ",")
+	scopeChanged := s.historyNodeScope != scopeKey
+	if s.historyRange == rangeKey && !scopeChanged {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "unchanged", "range": rangeKey})
 		return
 	}
 	previousDuration, previousDurationOK := logRangeDuration(s.historyRange)
-	loadOlderLogs := !previousDurationOK || duration > previousDuration
+	// Expanding the window can safely reuse the cache and fetch only the
+	// missing older segment. Narrowing normally only changes the view, unless
+	// the wider request is still loading: that partial cache is discarded and
+	// the smaller window starts from a clean, exact snapshot.
+	strictReload := previousDurationOK && duration < previousDuration && s.historyPending > 0
+	loadOlderLogs := scopeChanged || !previousDurationOK || duration > previousDuration || strictReload
 	s.historyRange = rangeKey
+	s.historyNodeScope = scopeKey
 	s.historyGeneration++
 	generation := s.historyGeneration
-	// A newer range request invalidates any older in-flight request, but the
-	// logs already collected by that request remain useful and are retained.
 	s.historyPending = 0
-	nodes := append([]Node{}, s.nodes...)
+	if strictReload {
+		s.logs = []LogEntry{}
+		s.containerLogs = make(map[string][]LogEntry)
+		s.historyCoverage = make(map[string]time.Time)
+		// Stale fetches carry the previous generation and cannot add data to the
+		// new cache. Track load ownership so their deferred cleanup also cannot
+		// remove a fresh load for the same container.
+		s.historyLoads = make(map[string]struct{})
+		s.historyLoadGeneration = make(map[string]uint64)
+	}
 	targets := make([]historyTarget, 0)
 	if loadOlderLogs {
 		from := now.Add(-duration)
 		for _, node := range nodes {
+			if len(scopedNodeIDs) > 0 {
+				if _, selected := scopedNodeIDs[node.ID]; !selected {
+					continue
+				}
+			}
 			if node.hostID == "" {
 				continue
 			}
@@ -615,7 +886,9 @@ func (s *server) handleLogRange(w http.ResponseWriter, r *http.Request) {
 		s.launchHistoryFetchWindow(target.ctx, target.node, target.node.hostID, target.containerID, target.from, target.to, generation)
 	}
 	status := "filtered"
-	if loadOlderLogs && len(targets) > 0 {
+	if strictReload {
+		status = "reloading"
+	} else if loadOlderLogs && len(targets) > 0 {
 		status = "loading"
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": status, "range": rangeKey})
@@ -699,11 +972,32 @@ func (s *server) launchHistoryFetchWindow(parent context.Context, node Node, hos
 		s.mu.Unlock()
 		return
 	}
+	key := containerLogKey(node.ID, containerID)
+	if s.historyLoads == nil {
+		s.historyLoads = make(map[string]struct{})
+	}
+	if s.historyLoadGeneration == nil {
+		s.historyLoadGeneration = make(map[string]uint64)
+	}
+	if _, exists := s.historyLoads[key]; exists {
+		s.mu.Unlock()
+		return
+	}
+	s.historyLoads[key] = struct{}{}
+	s.historyLoadGeneration[key] = generation
 	s.historyPending++
 	s.mu.Unlock()
 
 	go func() {
 		defer s.completeHistoryFetch(generation)
+		defer func() {
+			s.mu.Lock()
+			if s.historyLoadGeneration[key] == generation {
+				delete(s.historyLoads, key)
+				delete(s.historyLoadGeneration, key)
+			}
+			s.mu.Unlock()
+		}()
 		s.fetchDozzleHistory(parent, node, hostID, containerID, from, to, generation)
 	}()
 }
@@ -721,6 +1015,371 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "healthy", "service": "dozzle-ops"})
 }
 
+type settingsUpdateRequest struct {
+	Environment string           `json:"environment"`
+	Database    databaseSettings `json:"database"`
+	AdminToken  string           `json:"adminToken"`
+}
+
+func (s *server) currentAdminToken() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return strings.TrimSpace(s.settings.AdminToken)
+}
+
+func authorizedAdminRequest(r *http.Request, token string) bool {
+	provided := []byte(r.Header.Get("X-Log-Agent-Admin-Token"))
+	expected := []byte(strings.TrimSpace(token))
+	return len(expected) > 0 && len(provided) == len(expected) && subtle.ConstantTimeCompare(provided, expected) == 1
+}
+
+func settingsView(settings appSettings) settingsResponse {
+	var response settingsResponse
+	response.Environment = settings.Environment
+	response.Database.Enabled = settings.Database.Enabled
+	response.Database.Configured = databaseConfigured(settings)
+	response.Database.DSNConfigured = strings.TrimSpace(settings.Database.DSN) != ""
+	response.Database.Host = strings.TrimSpace(settings.Database.Host)
+	response.Database.Port = strings.TrimSpace(settings.Database.Port)
+	response.Database.User = strings.TrimSpace(settings.Database.User)
+	response.Database.DSN = ""
+	response.AdminTokenConfigured = strings.TrimSpace(settings.AdminToken) != ""
+	return response
+}
+
+func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.mu.RLock()
+		settings := s.settings
+		s.mu.RUnlock()
+		writeJSON(w, http.StatusOK, settingsView(settings))
+		return
+	}
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	currentToken := s.currentAdminToken()
+	if currentToken != "" && !authorizedAdminRequest(r, currentToken) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var request settingsUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid settings"})
+		return
+	}
+
+	s.mu.RLock()
+	previous := s.settings
+	s.mu.RUnlock()
+	settings := previous
+	settings.Environment = strings.TrimSpace(request.Environment)
+	if settings.Environment == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "environment is required"})
+		return
+	}
+	if len([]rune(settings.Environment)) > 50 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "environment is too long"})
+		return
+	}
+	if strings.TrimSpace(request.AdminToken) != "" {
+		settings.AdminToken = strings.TrimSpace(request.AdminToken)
+	}
+
+	database := request.Database
+	database.DSN = strings.TrimSpace(database.DSN)
+	database.Host = strings.TrimSpace(database.Host)
+	database.Port = strings.TrimSpace(database.Port)
+	database.User = strings.TrimSpace(database.User)
+	database.Name = strings.TrimSpace(database.Name)
+	if database.Name == "" {
+		database.Name = previous.Database.Name
+		if database.Name == "" {
+			database.Name = defaultDatabaseName
+		}
+	}
+	if !database.Enabled {
+		database = databaseSettings{}
+	} else if database.DSN == "" && database.Host == "" && database.User == "" && database.Name == "" {
+		// An empty form keeps the existing connection, including its secret.
+		database = previous.Database
+	} else {
+		if database.Password == "" && database.Host == previous.Database.Host && database.User == previous.Database.User && database.Name == previous.Database.Name {
+			database.Password = previous.Database.Password
+		}
+		if database.Port == "" {
+			database.Port = "3306"
+		}
+	}
+	settings.Database = database
+	if settings.Database.Enabled && strings.TrimSpace(settings.Database.DSN) == "" && strings.TrimSpace(settings.Database.Host) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "database DSN or host is required"})
+		return
+	}
+
+	var nextDB *sql.DB
+	var loaded []Node
+	if databaseConfigured(settings) {
+		var err error
+		nextDB, err = openNodeDatabase(settings)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("database connection failed: %v", err)})
+			return
+		}
+		if err := ensureAIProfileTable(nextDB); err != nil {
+			_ = nextDB.Close()
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("database initialization failed: %v", err)})
+			return
+		}
+		loaded, err = loadNodesFromDatabase(nextDB)
+		if err != nil {
+			_ = nextDB.Close()
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("load nodes failed: %v", err)})
+			return
+		}
+	}
+	if err := saveAppSettings(settings); err != nil {
+		if nextDB != nil {
+			_ = nextDB.Close()
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save settings failed: %v", err)})
+		return
+	}
+
+	s.replaceDatabase(settings, nextDB, loaded)
+	writeJSON(w, http.StatusOK, settingsView(settings))
+}
+
+func normalizeDatabaseUpdate(previous, database databaseSettings) (databaseSettings, error) {
+	database.DSN = strings.TrimSpace(database.DSN)
+	database.Host = strings.TrimSpace(database.Host)
+	database.Port = strings.TrimSpace(database.Port)
+	database.User = strings.TrimSpace(database.User)
+	database.Name = strings.TrimSpace(database.Name)
+	if !database.Enabled {
+		return databaseSettings{}, nil
+	}
+	if database.DSN == "" && database.Host == "" && database.User == "" && database.Name == "" {
+		return previous, nil
+	}
+	if database.Name == "" {
+		database.Name = previous.Name
+		if database.Name == "" {
+			database.Name = defaultDatabaseName
+		}
+	}
+	if database.Password == "" && database.Host == previous.Host && database.User == previous.User && database.Name == previous.Name {
+		database.Password = previous.Password
+	}
+	if database.Port == "" {
+		database.Port = "3306"
+	}
+	if database.DSN == "" && database.Host == "" {
+		return databaseSettings{}, fmt.Errorf("database DSN or host is required")
+	}
+	return database, nil
+}
+
+func decodeDatabaseSettings(w http.ResponseWriter, r *http.Request) (databaseSettings, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var request struct {
+		Database databaseSettings `json:"database"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid database settings"})
+		return databaseSettings{}, false
+	}
+	return request.Database, true
+}
+
+func (s *server) replaceDatabase(settings appSettings, nextDB *sql.DB, loaded []Node) {
+	s.mu.Lock()
+	oldDB := s.db
+	oldCancels := make([]context.CancelFunc, 0, len(s.nodeCancels))
+	for _, cancel := range s.nodeCancels {
+		if cancel != nil {
+			oldCancels = append(oldCancels, cancel)
+		}
+	}
+	s.settings = settings
+	s.db = nextDB
+	if nextDB != nil {
+		s.nodes = loaded
+	}
+	s.nodeContexts = make(map[string]context.Context)
+	s.nodeCancels = make(map[string]context.CancelFunc)
+	s.containerNames = make(map[string]map[string]string)
+	s.containerLogs = make(map[string][]LogEntry)
+	s.historyCoverage = make(map[string]time.Time)
+	s.historyLoads = make(map[string]struct{})
+	s.historyLoadGeneration = make(map[string]uint64)
+	s.streams = make(map[string]struct{})
+	s.mu.Unlock()
+	for _, cancel := range oldCancels {
+		cancel()
+	}
+	if oldDB != nil && oldDB != nextDB {
+		_ = oldDB.Close()
+	}
+	if nextDB != nil {
+		s.startPersistedNodes()
+	}
+}
+
+func (s *server) handleDatabaseSettingsTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if token := s.currentAdminToken(); token != "" && !authorizedAdminRequest(r, token) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
+		return
+	}
+	database, ok := decodeDatabaseSettings(w, r)
+	if !ok {
+		return
+	}
+	s.mu.RLock()
+	previous := s.settings
+	s.mu.RUnlock()
+	database, err := normalizeDatabaseUpdate(previous.Database, database)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if !databaseConfigured(appSettings{Database: database}) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先启用数据库并填写 DSN 或数据库地址"})
+		return
+	}
+	testSettings := previous
+	testSettings.Database = database
+	db, err := openNodeDatabase(testSettings)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("database connection failed: %v", err)})
+		return
+	}
+	_ = db.Close()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "数据库连接测试成功"})
+}
+
+func (s *server) handleDatabaseSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if token := s.currentAdminToken(); token != "" && !authorizedAdminRequest(r, token) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
+		return
+	}
+	database, ok := decodeDatabaseSettings(w, r)
+	if !ok {
+		return
+	}
+	s.mu.RLock()
+	previous := s.settings
+	s.mu.RUnlock()
+	database, err := normalizeDatabaseUpdate(previous.Database, database)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	settings := previous
+	settings.Database = database
+	var nextDB *sql.DB
+	var loaded []Node
+	if databaseConfigured(settings) {
+		nextDB, err = openNodeDatabase(settings)
+		if err == nil {
+			err = ensureAIProfileTable(nextDB)
+		}
+		if err == nil {
+			loaded, err = loadNodesFromDatabase(nextDB)
+		}
+		if err != nil {
+			if nextDB != nil {
+				_ = nextDB.Close()
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("database initialization failed: %v", err)})
+			return
+		}
+	}
+	if err := saveAppSettings(settings); err != nil {
+		if nextDB != nil {
+			_ = nextDB.Close()
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save database settings failed: %v", err)})
+		return
+	}
+	s.replaceDatabase(settings, nextDB, loaded)
+	writeJSON(w, http.StatusOK, settingsView(settings))
+}
+
+func (s *server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if token := s.currentAdminToken(); token != "" && !authorizedAdminRequest(r, token) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var request struct {
+		AdminToken string `json:"adminToken"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid admin settings"})
+		return
+	}
+	s.mu.RLock()
+	settings := s.settings
+	s.mu.RUnlock()
+	if token := strings.TrimSpace(request.AdminToken); token != "" {
+		settings.AdminToken = token
+	}
+	if err := saveAppSettings(settings); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save admin settings failed: %v", err)})
+		return
+	}
+	s.mu.Lock()
+	s.settings = settings
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, settingsView(settings))
+}
+
+func (s *server) handleEnvironmentSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if token := s.currentAdminToken(); token != "" && !authorizedAdminRequest(r, token) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var request struct {
+		Environment string `json:"environment"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || strings.TrimSpace(request.Environment) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "environment is required"})
+		return
+	}
+	s.mu.RLock()
+	settings := s.settings
+	s.mu.RUnlock()
+	settings.Environment = strings.TrimSpace(request.Environment)
+	if err := saveAppSettings(settings); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save environment settings failed: %v", err)})
+		return
+	}
+	s.mu.Lock()
+	s.settings = settings
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, settingsView(settings))
+}
+
 func (s *server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -734,28 +1393,179 @@ func (s *server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAIProfiles(w http.ResponseWriter, r *http.Request) {
-	if s.db == nil { writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database is not configured"}); return }
-	if r.Method != http.MethodPost && r.Method != http.MethodDelete { writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}); return }
-	if token := strings.TrimSpace(os.Getenv("LOG_AGENT_ADMIN_TOKEN")); token == "" || r.Header.Get("X-Log-Agent-Admin-Token") != token { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"}); return }
+	if r.Method == http.MethodGet {
+		if s.db == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"profiles": []any{}})
+			return
+		}
+		profiles, err := loadAIProfilesFromDatabase(s.db)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load AI profiles failed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"profiles": profiles})
+		return
+	}
+	if s.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database is not configured"})
+		return
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !authorizedAdminRequest(r, s.currentAdminToken()) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
+		return
+	}
 	if r.Method == http.MethodDelete {
 		var id int64
-		if _, err := fmt.Sscanf(r.URL.Query().Get("id"), "%d", &id); err != nil || id <= 0 { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid profile id"}); return }
-		if _, err := s.db.Exec(`DELETE FROM model_info WHERE id = ?`, id); err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete AI profile failed"}); return }
-		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"}); return
+		if _, err := fmt.Sscanf(r.URL.Query().Get("id"), "%d", &id); err != nil || id <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid profile id"})
+			return
+		}
+		if _, err := s.db.Exec(`DELETE FROM model_info WHERE id = ?`, id); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete AI profile failed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-	var request struct { ID string `json:"id"`; Name string `json:"name"`; BaseURL string `json:"baseURL"`; APIKey string `json:"apiKey"`; Type string `json:"type"`; Models []struct { Name string `json:"name"` } `json:"models"` }
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid AI profile"}); return }
+	var request struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		BaseURL string `json:"baseURL"`
+		APIKey  string `json:"apiKey"`
+		Type    string `json:"type"`
+		Models  []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid AI profile"})
+		return
+	}
 	request.Name, request.BaseURL = strings.TrimSpace(request.Name), strings.TrimRight(strings.TrimSpace(request.BaseURL), "/")
-	modelNames := make([]string, 0, len(request.Models)); for _, model := range request.Models { if name := strings.TrimSpace(model.Name); name != "" { modelNames = append(modelNames, name) } }
-	profileType := int64(2); if strings.EqualFold(request.Type, "anthropic") { profileType = 1 }
-	if request.Name == "" || request.BaseURL == "" || len(modelNames) == 0 { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name, base URL and model are required"}); return }
-	var id int64; _, scanErr := fmt.Sscanf(request.ID, "ai-profile-db-%d", &id); var err error
+	modelNames := make([]string, 0, len(request.Models))
+	for _, model := range request.Models {
+		if name := strings.TrimSpace(model.Name); name != "" {
+			modelNames = append(modelNames, name)
+		}
+	}
+	profileType := int64(2)
+	if strings.EqualFold(request.Type, "anthropic") {
+		profileType = 1
+	}
+	if request.Name == "" || request.BaseURL == "" || len(modelNames) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name, base URL and model are required"})
+		return
+	}
+	var id int64
+	_, scanErr := fmt.Sscanf(request.ID, "ai-profile-db-%d", &id)
+	var err error
 	if scanErr == nil && id > 0 {
-		if strings.TrimSpace(request.APIKey) == "" { _, err = s.db.Exec(`UPDATE model_info SET name=?, base_url=?, type=?, model_name=? WHERE id=?`, request.Name, request.BaseURL, profileType, strings.Join(modelNames, ","), id) } else { _, err = s.db.Exec(`UPDATE model_info SET name=?, base_url=?, api_key=?, type=?, model_name=? WHERE id=?`, request.Name, request.BaseURL, strings.TrimSpace(request.APIKey), profileType, strings.Join(modelNames, ","), id) }
-	} else { var result sql.Result; result, err = s.db.Exec(`INSERT INTO model_info (name, base_url, api_key, type, model_name, create_time) VALUES (?, ?, ?, ?, ?, ?)`, request.Name, request.BaseURL, strings.TrimSpace(request.APIKey), profileType, strings.Join(modelNames, ","), time.Now()); if err == nil { id, err = result.LastInsertId() } }
-	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save AI profile failed"}); return }
+		if strings.TrimSpace(request.APIKey) == "" {
+			_, err = s.db.Exec(`UPDATE model_info SET name=?, base_url=?, type=?, model_name=? WHERE id=?`, request.Name, request.BaseURL, profileType, strings.Join(modelNames, ","), id)
+		} else {
+			_, err = s.db.Exec(`UPDATE model_info SET name=?, base_url=?, api_key=?, type=?, model_name=? WHERE id=?`, request.Name, request.BaseURL, strings.TrimSpace(request.APIKey), profileType, strings.Join(modelNames, ","), id)
+		}
+	} else {
+		var result sql.Result
+		result, err = s.db.Exec(`INSERT INTO model_info (name, base_url, api_key, type, model_name, create_time) VALUES (?, ?, ?, ?, ?, ?)`, request.Name, request.BaseURL, strings.TrimSpace(request.APIKey), profileType, strings.Join(modelNames, ","), time.Now())
+		if err == nil {
+			id, err = result.LastInsertId()
+		}
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save AI profile failed"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": fmt.Sprintf("ai-profile-db-%d", id)})
+}
+
+type aiModelView struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type aiProfileView struct {
+	ID      string        `json:"id"`
+	Name    string        `json:"name"`
+	BaseURL string        `json:"baseURL"`
+	Type    string        `json:"type"`
+	Enabled bool          `json:"enabled"`
+	Models  []aiModelView `json:"models"`
+}
+
+func loadAIProfilesFromDatabase(db *sql.DB) ([]aiProfileView, error) {
+	rows, err := db.Query(`SELECT id, name, base_url, type, model_name FROM model_info ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	profiles := make([]aiProfileView, 0)
+	for rows.Next() {
+		var id int64
+		var name, baseURL, modelNames string
+		var profileType int
+		if err := rows.Scan(&id, &name, &baseURL, &profileType, &modelNames); err != nil {
+			return nil, err
+		}
+		profile := aiProfileView{
+			ID:      fmt.Sprintf("ai-profile-db-%d", id),
+			Name:    strings.TrimSpace(name),
+			BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+			Type:    "openai",
+			Enabled: true,
+		}
+		if profileType == 1 {
+			profile.Type = "anthropic"
+		}
+		for index, modelName := range strings.Split(modelNames, ",") {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				continue
+			}
+			profile.Models = append(profile.Models, aiModelView{
+				ID:   fmt.Sprintf("db-model-%d-%d", id, index),
+				Name: modelName,
+			})
+		}
+		if profile.Name != "" && profile.BaseURL != "" && len(profile.Models) > 0 {
+			profiles = append(profiles, profile)
+		}
+	}
+	return profiles, rows.Err()
+}
+
+func (s *server) loadAIProfileSecret(id int64, modelName string) (aiProfile, error) {
+	if s.db == nil || id <= 0 {
+		return aiProfile{}, errors.New("AI profile is not available")
+	}
+	var profile aiProfile
+	var profileType int
+	var modelNames string
+	err := s.db.QueryRow(`SELECT name, base_url, api_key, type, model_name FROM model_info WHERE id = ?`, id).
+		Scan(&profile.Name, &profile.BaseURL, &profile.APIKey, &profileType, &modelNames)
+	if err != nil {
+		return aiProfile{}, err
+	}
+	profile.Type = "openai"
+	if profileType == 1 {
+		profile.Type = "anthropic"
+	}
+	profile.Model = strings.TrimSpace(modelName)
+	if profile.Model == "" {
+		for _, name := range strings.Split(modelNames, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				profile.Model = name
+				break
+			}
+		}
+	}
+	return normalizeAIProfile(profile), nil
 }
 
 func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
@@ -764,7 +1574,7 @@ func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
 	var request aiChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid AI chat request"})
@@ -777,10 +1587,24 @@ func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	if len(request.Logs) > 20 {
 		request.Logs = request.Logs[:20]
 	}
+	attachments, err := normalizeAIAttachments(request.Attachments)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 
 	profile := configuredAIProfile()
 	if request.Config != nil {
-		profile = normalizeAIProfile(*request.Config)
+		if request.Config.ProfileID > 0 {
+			loadedProfile, err := s.loadAIProfileSecret(request.Config.ProfileID, request.Config.Model)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "load AI profile failed"})
+				return
+			}
+			profile = loadedProfile
+		} else {
+			profile = normalizeAIProfile(*request.Config)
+		}
 	}
 	if profile.BaseURL == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "AI provider is not configured"})
@@ -817,13 +1641,30 @@ func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload := struct {
-		Model     string      `json:"model"`
-		Messages  []aiMessage `json:"messages"`
-		MaxTokens int         `json:"max_tokens,omitempty"`
-	}{Model: profile.Model, Messages: messages}
-	if profile.Type == "anthropic" { payload.MaxTokens = 4096 }
-	body, err := json.Marshal(payload)
+	var body []byte
+	if profile.Type == "anthropic" {
+		// Anthropic Messages API expects the system instruction at the top level,
+		// not as a message with role=system.
+		systemPrompt := ""
+		anthropicMessages := messages
+		if len(messages) > 0 && messages[0].Role == "system" {
+			systemPrompt = messages[0].Content
+			anthropicMessages = messages[1:]
+		}
+		payload := struct {
+			Model     string              `json:"model"`
+			System    string              `json:"system,omitempty"`
+			Messages  []aiProviderMessage `json:"messages"`
+			MaxTokens int                 `json:"max_tokens"`
+		}{Model: profile.Model, System: systemPrompt, Messages: anthropicProviderMessages(anthropicMessages, attachments), MaxTokens: 4096}
+		body, err = json.Marshal(payload)
+	} else {
+		payload := struct {
+			Model    string              `json:"model"`
+			Messages []aiProviderMessage `json:"messages"`
+		}{Model: profile.Model, Messages: openAIProviderMessages(messages, attachments)}
+		body, err = json.Marshal(payload)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encode AI request failed"})
 		return
@@ -832,7 +1673,9 @@ func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	endpoint := strings.TrimRight(profile.BaseURL, "/") + "/chat/completions"
 	if profile.Type == "anthropic" {
 		baseURL := strings.TrimRight(profile.BaseURL, "/")
-		if strings.HasSuffix(baseURL, "/v1") {
+		if strings.HasSuffix(baseURL, "/messages") {
+			endpoint = baseURL
+		} else if strings.HasSuffix(baseURL, "/v1") {
 			endpoint = baseURL + "/messages"
 		} else {
 			endpoint = baseURL + "/v1/messages"
@@ -852,7 +1695,7 @@ func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	} else if profile.APIKey != "" {
 		providerRequest.Header.Set("Authorization", "Bearer "+profile.APIKey)
 	}
-	providerResponse, err := (&http.Client{Timeout: 90 * time.Second}).Do(providerRequest)
+	providerResponse, err := (&http.Client{Timeout: 180 * time.Second}).Do(providerRequest)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("AI provider request failed: %v", err)})
 		return
@@ -873,13 +1716,30 @@ func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 	var answer string
 	if profile.Type == "anthropic" {
-		var response struct { Content []struct { Type string `json:"type"`; Text string `json:"text"` } `json:"content"` }
-		if err := json.Unmarshal(providerBody, &response); err != nil { writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Anthropic response"}); return }
-		for _, item := range response.Content { if item.Type == "text" { answer += item.Text } }
+		var response struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(providerBody, &response); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Anthropic response"})
+			return
+		}
+		for _, item := range response.Content {
+			if item.Type == "text" {
+				answer += item.Text
+			}
+		}
 	} else {
 		var response aiChatResponse
-		if err := json.Unmarshal(providerBody, &response); err != nil { writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid AI provider response"}); return }
-		if len(response.Choices) > 0 { answer = response.Choices[0].Message.Content }
+		if err := json.Unmarshal(providerBody, &response); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid AI provider response"})
+			return
+		}
+		if len(response.Choices) > 0 {
+			answer = response.Choices[0].Message.Content
+		}
 	}
 	if strings.TrimSpace(answer) == "" {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "AI provider returned no answer"})
@@ -906,7 +1766,9 @@ func normalizeAIProfile(profile aiProfile) aiProfile {
 	profile.APIKey = strings.TrimSpace(profile.APIKey)
 	profile.Model = strings.TrimSpace(profile.Model)
 	profile.Type = strings.ToLower(strings.TrimSpace(profile.Type))
-	if profile.Type != "anthropic" { profile.Type = "openai" }
+	if profile.Type != "anthropic" {
+		profile.Type = "openai"
+	}
 	if profile.Model == "" {
 		profile.Model = "gpt-4o-mini"
 	}
@@ -927,6 +1789,131 @@ func formatAIContext(logs []LogEntry) string {
 		fmt.Fprintf(&builder, "\n[%d] time=%s level=%s node=%s container=%s\n%s\n", index+1, entry.Time, entry.Level, entry.Node, entry.Container, message)
 	}
 	return builder.String()
+}
+
+const (
+	maxAIAttachmentCount = 5
+	maxAIAttachmentBytes = 2 * 1024 * 1024
+)
+
+func isAIImageAttachment(contentType string) bool {
+	switch contentType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAITextAttachment(contentType string) bool {
+	return strings.HasPrefix(contentType, "text/") || contentType == "application/json" || contentType == "application/xml" || contentType == "application/x-yaml" || contentType == "application/x-yml"
+}
+
+func normalizeAIAttachments(attachments []aiAttachment) ([]aiAttachment, error) {
+	if len(attachments) > maxAIAttachmentCount {
+		return nil, fmt.Errorf("at most %d attachments are allowed", maxAIAttachmentCount)
+	}
+	normalized := make([]aiAttachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		attachment.Name = strings.TrimSpace(attachment.Name)
+		if attachment.Name == "" {
+			attachment.Name = "attachment"
+		}
+		attachment.Type = strings.ToLower(strings.TrimSpace(strings.Split(attachment.Type, ";")[0]))
+		if !isAIImageAttachment(attachment.Type) && !isAITextAttachment(attachment.Type) {
+			return nil, fmt.Errorf("unsupported attachment type: %s", attachment.Name)
+		}
+		prefix := "data:" + attachment.Type + ";base64,"
+		if !strings.HasPrefix(attachment.Data, prefix) {
+			return nil, fmt.Errorf("invalid attachment data: %s", attachment.Name)
+		}
+		data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(attachment.Data, prefix))
+		if err != nil || len(data) == 0 || len(data) > maxAIAttachmentBytes {
+			return nil, fmt.Errorf("invalid or oversized attachment: %s", attachment.Name)
+		}
+		attachment.Data = base64.StdEncoding.EncodeToString(data)
+		normalized = append(normalized, attachment)
+	}
+	return normalized, nil
+}
+
+func aiTextAttachmentContext(attachments []aiAttachment) string {
+	var builder strings.Builder
+	for _, attachment := range attachments {
+		if !isAITextAttachment(attachment.Type) {
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(attachment.Data)
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		if len([]rune(text)) > 12000 {
+			text = string([]rune(text)[:12000]) + "…"
+		}
+		fmt.Fprintf(&builder, "\n\n附件文件：%s\n%s", attachment.Name, text)
+	}
+	return builder.String()
+}
+
+func openAIProviderMessages(messages []aiMessage, attachments []aiAttachment) []aiProviderMessage {
+	providerMessages := make([]aiProviderMessage, 0, len(messages))
+	for _, message := range messages {
+		providerMessages = append(providerMessages, aiProviderMessage{Role: message.Role, Content: message.Content})
+	}
+	if len(attachments) == 0 {
+		return providerMessages
+	}
+	target := -1
+	for index := len(providerMessages) - 1; index >= 0; index-- {
+		if providerMessages[index].Role == "user" {
+			target = index
+			break
+		}
+	}
+	if target < 0 {
+		providerMessages = append(providerMessages, aiProviderMessage{Role: "user"})
+		target = len(providerMessages) - 1
+	}
+	text, _ := providerMessages[target].Content.(string)
+	parts := []map[string]any{{"type": "text", "text": text + aiTextAttachmentContext(attachments)}}
+	for _, attachment := range attachments {
+		if isAIImageAttachment(attachment.Type) {
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]string{"url": "data:" + attachment.Type + ";base64," + attachment.Data}})
+		}
+	}
+	providerMessages[target].Content = parts
+	return providerMessages
+}
+
+func anthropicProviderMessages(messages []aiMessage, attachments []aiAttachment) []aiProviderMessage {
+	providerMessages := make([]aiProviderMessage, 0, len(messages))
+	for _, message := range messages {
+		providerMessages = append(providerMessages, aiProviderMessage{Role: message.Role, Content: message.Content})
+	}
+	if len(attachments) == 0 {
+		return providerMessages
+	}
+	target := -1
+	for index := len(providerMessages) - 1; index >= 0; index-- {
+		if providerMessages[index].Role == "user" {
+			target = index
+			break
+		}
+	}
+	if target < 0 {
+		providerMessages = append(providerMessages, aiProviderMessage{Role: "user"})
+		target = len(providerMessages) - 1
+	}
+	text, _ := providerMessages[target].Content.(string)
+	parts := []map[string]any{{"type": "text", "text": text + aiTextAttachmentContext(attachments)}}
+	for _, attachment := range attachments {
+		if isAIImageAttachment(attachment.Type) {
+			parts = append(parts, map[string]any{"type": "image", "source": map[string]string{"type": "base64", "media_type": attachment.Type, "data": attachment.Data}})
+		}
+	}
+	providerMessages[target].Content = parts
+	return providerMessages
 }
 
 func (s *server) handleNodes(w http.ResponseWriter, r *http.Request) {
@@ -1494,7 +2481,10 @@ func (s *server) releaseContainerStream(streamKey string) {
 }
 
 func (s *server) fetchDozzleHistory(parent context.Context, node Node, hostID, containerID string, from, to time.Time, generation uint64) {
-	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
+	// A single unavailable or very busy container must not keep the page in a
+	// loading state indefinitely. Normal pagination remains unbounded so the
+	// selected node's requested range is complete whenever it fits the cache.
+	ctx, cancel := context.WithTimeout(parent, historyFetchTimeout)
 	defer cancel()
 	completed := false
 	defer func() {
@@ -1504,9 +2494,18 @@ func (s *server) fetchDozzleHistory(parent context.Context, node Node, hostID, c
 	}()
 	pageTo := to
 	for {
+		// Once the shared cache is full, older pages would immediately be
+		// discarded by insertNewestLog. Finish the task instead of keeping the
+		// dashboard in a perpetual “loading history” state.
+		if s.historyCacheAtCapacity() {
+			completed = true
+			return
+		}
 		oldest, count, err := s.fetchDozzleHistoryPage(ctx, node, hostID, containerID, from, pageTo, generation)
 		if err != nil {
-			if !errors.Is(err, context.Canceled) {
+			// Exhausting the bounded history-query budget is normal for a noisy
+			// container; it is not a node failure.
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				s.setNodeStatus(node.ID, "error", err.Error())
 			}
 			return
@@ -1522,6 +2521,10 @@ func (s *server) fetchDozzleHistory(parent context.Context, node Node, hostID, c
 			completed = true
 			return
 		}
+		if s.historyCacheAtCapacity() {
+			completed = true
+			return
+		}
 		nextTo := oldest.Add(-time.Millisecond)
 		if !nextTo.After(from) || !nextTo.Before(pageTo) {
 			completed = true
@@ -1529,6 +2532,12 @@ func (s *server) fetchDozzleHistory(parent context.Context, node Node, hostID, c
 		}
 		pageTo = nextTo
 	}
+}
+
+func (s *server) historyCacheAtCapacity() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return maxStoredLogs > 0 && len(s.logs) >= maxStoredLogs
 }
 
 func (s *server) fetchDozzleHistoryPage(ctx context.Context, node Node, hostID, containerID string, from, to time.Time, generation uint64) (time.Time, int, error) {
@@ -1591,7 +2600,7 @@ func (s *server) isHistoryGenerationCurrent(generation uint64) bool {
 
 func normalizeLogRange(value string) (string, bool) {
 	switch value {
-	case "30m", "2h", "1d", "1w":
+	case "30m", "5h", "1d", "1w":
 		return value, true
 	default:
 		return "", false
@@ -1602,8 +2611,8 @@ func logRangeDuration(value string) (time.Duration, bool) {
 	switch value {
 	case "30m":
 		return 30 * time.Minute, true
-	case "2h":
-		return 2 * time.Hour, true
+	case "5h":
+		return 5 * time.Hour, true
 	case "1d":
 		return 24 * time.Hour, true
 	case "1w":
@@ -1617,6 +2626,9 @@ func (s *server) consumeDozzleLogs(ctx context.Context, node Node, hostID, conta
 	query := url.Values{}
 	query.Set("stdout", "1")
 	query.Set("stderr", "1")
+	for _, level := range []string{"debug", "info", "warn", "error", "fatal", "trace", "unknown"} {
+		query.Add("levels", level)
+	}
 	endpoint := fmt.Sprintf("%s/api/hosts/%s/containers/%s/logs/stream?%s", node.baseURL, url.PathEscape(hostID), url.PathEscape(containerID), query.Encode())
 	for {
 		if ctx.Err() != nil {
@@ -1707,7 +2719,7 @@ func (s *server) ingestDozzleEventWithAppend(nodeID string, data []byte, appendL
 		}
 		grouped := make([]string, 0, len(lines))
 		for _, line := range lines {
-			if message := strings.TrimRight(html.UnescapeString(line.Message), "\r\n"); message != "" {
+			if message := stripTerminalControlCodes(strings.TrimRight(html.UnescapeString(line.Message), "\r\n")); message != "" {
 				grouped = append(grouped, message)
 			}
 		}
@@ -1727,10 +2739,58 @@ func (s *server) ingestDozzleEventWithAppend(nodeID string, data []byte, appendL
 	if message == "" {
 		message = event.Raw
 	}
-	message = html.UnescapeString(message)
+	message = stripTerminalControlCodes(html.UnescapeString(message))
 	if message != "" {
 		appendLog(event, message)
 	}
+}
+
+func stripTerminalControlCodes(message string) string {
+	var cleaned strings.Builder
+	cleaned.Grow(len(message))
+	for index := 0; index < len(message); {
+		if message[index] == 0x1b {
+			index++
+			if index >= len(message) {
+				break
+			}
+			switch message[index] {
+			case '[':
+				// CSI sequences include colors, cursor movement and reset codes.
+				index++
+				for index < len(message) && (message[index] < 0x40 || message[index] > 0x7e) {
+					index++
+				}
+				if index < len(message) {
+					index++
+				}
+			case ']':
+				// OSC sequences end with BEL or ESC followed by a backslash.
+				index++
+				for index < len(message) {
+					if message[index] == 0x07 {
+						index++
+						break
+					}
+					if message[index] == 0x1b && index+1 < len(message) && message[index+1] == '\\' {
+						index += 2
+						break
+					}
+					index++
+				}
+			default:
+				index++
+			}
+			continue
+		}
+		if message[index] < 0x20 && message[index] != '\n' && message[index] != '\r' && message[index] != '\t' {
+			index++
+			continue
+		}
+		cleaned.WriteByte(message[index])
+		index++
+	}
+	return cleaned.String()
 }
 
 func (s *server) appendRemoteLog(nodeID string, event dozzleLogEvent, message string, broadcast bool) {

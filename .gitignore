@@ -11,3 +11,4 @@ log-agent-linux-amd64
 .env
 .env.*
 !.env.example
+log-agent-settings.json

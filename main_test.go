@@ -1,14 +1,78 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestRuleOrderUpdateValidatesAndReturnsNewOrder(t *testing.T) {
+	s := &server{rules: map[string]bool{"mask": true, "structure": true, "noise": false}, ruleOrder: defaultRuleOrder()}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/rules", bytes.NewBufferString(`{"order":["noise","mask","structure"]}`))
+	request.Header.Set("Content-Type", "application/json")
+	s.handleRules(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected successful rule order update, got %d", response.Code)
+	}
+	var payload struct {
+		Order []string `json:"order"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode rule order response: %v", err)
+	}
+	if got, want := fmt.Sprint(payload.Order), "[noise mask structure]"; got != want {
+		t.Fatalf("rule order = %s, want %s", got, want)
+	}
+
+	invalidResponse := httptest.NewRecorder()
+	invalidRequest := httptest.NewRequest(http.MethodPut, "/api/rules", bytes.NewBufferString(`{"order":["mask","mask","noise"]}`))
+	s.handleRules(invalidResponse, invalidRequest)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid duplicate order to be rejected, got %d", invalidResponse.Code)
+	}
+}
+
+func TestStripTerminalControlCodes(t *testing.T) {
+	input := "\x1b[38;5;160mERROR\x1b[0m\nplain\x1b]0;title\x07"
+	want := "ERROR\nplain"
+	if got := stripTerminalControlCodes(input); got != want {
+		t.Fatalf("stripTerminalControlCodes() = %q, want %q", got, want)
+	}
+}
+
+func TestAIAttachmentsBuildMultimodalProviderMessage(t *testing.T) {
+	textData := base64.StdEncoding.EncodeToString([]byte("trace_id=abc"))
+	imageData := base64.StdEncoding.EncodeToString([]byte("image-bytes"))
+	attachments, err := normalizeAIAttachments([]aiAttachment{
+		{Name: "trace.log", Type: "text/plain", Data: "data:text/plain;base64," + textData},
+		{Name: "error.png", Type: "image/png", Data: "data:image/png;base64," + imageData},
+	})
+	if err != nil {
+		t.Fatalf("normalize attachments: %v", err)
+	}
+	messages := openAIProviderMessages([]aiMessage{{Role: "user", Content: "请分析附件"}}, attachments)
+	if len(messages) != 1 || messages[0].Role != "user" {
+		t.Fatalf("unexpected provider messages: %#v", messages)
+	}
+	parts, ok := messages[0].Content.([]map[string]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("expected text and image content parts, got %#v", messages[0].Content)
+	}
+	if parts[0]["type"] != "text" || !strings.Contains(parts[0]["text"].(string), "trace_id=abc") {
+		t.Fatalf("text attachment content missing: %#v", parts[0])
+	}
+	if parts[1]["type"] != "image_url" {
+		t.Fatalf("image attachment content missing: %#v", parts[1])
+	}
+}
 
 func TestLogRangeReportsHistoryLoadingUntilAllTargetsFinish(t *testing.T) {
 	releaseHistory := make(chan struct{})
@@ -135,6 +199,50 @@ func TestLogRangeKeepsCacheAndLoadsOnlyMissingOlderInterval(t *testing.T) {
 	}
 }
 
+func TestLogRangeLoadsOnlyRequestedNodeScope(t *testing.T) {
+	requests := make(map[string]int)
+	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests[r.URL.Path]++
+		w.Header().Set("Content-Type", "application/x-jsonl")
+		_, _ = fmt.Fprintln(w, `{"t":"single","m":"history","rm":"history","ts":1700000000000,"id":1,"l":"info","c":"container"}`)
+	}))
+	defer dozzle.Close()
+
+	s := &server{
+		nodes: []Node{
+			{ID: "node-1", Name: "one", baseURL: dozzle.URL, hostID: "host-1", Containers: []containerInfo{{ID: "container-1", Name: "one", State: "running"}}},
+			{ID: "node-2", Name: "two", baseURL: dozzle.URL, hostID: "host-2", Containers: []containerInfo{{ID: "container-2", Name: "two", State: "running"}}},
+		},
+		historyRange:   "30m",
+		rules:          map[string]bool{},
+		containerNames: map[string]map[string]string{},
+		containerLogs:  map[string][]LogEntry{},
+		nodeContexts:   map[string]context.Context{"node-1": context.Background(), "node-2": context.Background()},
+		subscribers:    map[chan LogEntry]struct{}{},
+		streams:        map[string]struct{}{},
+		nodeCancels:    map[string]context.CancelFunc{},
+	}
+
+	response := httptest.NewRecorder()
+	s.handleLogRange(response, httptest.NewRequest(http.MethodPost, "/api/logs/range?range=1d&node=node-1", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted range response, got %d", response.Code)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && s.historyLoading() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.historyLoading() {
+		t.Fatal("scoped history loading did not finish")
+	}
+	if requests["/api/hosts/host-1/containers/container-1/logs"] != 1 {
+		t.Fatalf("expected selected node history request, got %#v", requests)
+	}
+	if requests["/api/hosts/host-2/containers/container-2/logs"] != 0 {
+		t.Fatalf("unselected node must not be queried, got %#v", requests)
+	}
+}
+
 func TestLogRangeNarrowsWithoutClearingCache(t *testing.T) {
 	now := time.Now().UnixMilli()
 	existing := LogEntry{ID: 1, Timestamp: now, Message: "current log", Level: "info", Node: "node", Container: "api", nodeID: "node-1"}
@@ -169,6 +277,67 @@ func TestLogRangeNarrowsWithoutClearingCache(t *testing.T) {
 	}
 }
 
+func TestLogRangeNarrowsWithPendingHistoryReloadsCleanly(t *testing.T) {
+	now := time.Now().UnixMilli()
+	existing := LogEntry{ID: 1, Timestamp: now, Message: "partial week log", Level: "info", Node: "node", Container: "api", nodeID: "node-1"}
+	key := containerLogKey("node-1", "container-1")
+	s := &server{
+		nodes:                 []Node{{ID: "node-1", Name: "node"}},
+		logs:                  []LogEntry{existing},
+		processed:             7,
+		historyRange:          "1w",
+		historyPending:        1,
+		rules:                 map[string]bool{},
+		containerNames:        map[string]map[string]string{},
+		containerLogs:         map[string][]LogEntry{key: {existing}},
+		historyCoverage:       map[string]time.Time{key: time.Now().Add(-7 * 24 * time.Hour)},
+		historyLoads:          map[string]struct{}{key: {}},
+		historyLoadGeneration: map[string]uint64{key: 0},
+		nodeContexts:          map[string]context.Context{},
+		subscribers:           map[chan LogEntry]struct{}{},
+		streams:               map[string]struct{}{},
+		nodeCancels:           map[string]context.CancelFunc{},
+	}
+
+	response := httptest.NewRecorder()
+	s.handleLogRange(response, httptest.NewRequest(http.MethodPost, "/api/logs/range?range=1d", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted range response, got %d", response.Code)
+	}
+	if len(s.logs) != 0 || len(s.containerLogs) != 0 || len(s.historyCoverage) != 0 {
+		t.Fatalf("narrowing an unfinished load should clear partial cache, got logs=%#v caches=%#v coverage=%#v", s.logs, s.containerLogs, s.historyCoverage)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode range response: %v", err)
+	}
+	if payload["status"] != "reloading" {
+		t.Fatalf("expected strict reload status, got %#v", payload)
+	}
+}
+
+func TestFetchDozzleHistoryStopsWhenCacheIsFull(t *testing.T) {
+	previousCapacity := maxStoredLogs
+	maxStoredLogs = 1
+	defer func() { maxStoredLogs = previousCapacity }()
+
+	requests := 0
+	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatal("history request should not start when the shared cache is full")
+	}))
+	defer dozzle.Close()
+
+	s := &server{
+		logs:            []LogEntry{{ID: 1, Message: "cached"}},
+		historyCoverage: make(map[string]time.Time),
+	}
+	s.fetchDozzleHistory(context.Background(), Node{ID: "node-1", baseURL: dozzle.URL}, "host-1", "container-1", time.Now().Add(-time.Hour), time.Now(), 0)
+	if requests != 0 {
+		t.Fatalf("expected no history request at capacity, got %d", requests)
+	}
+}
+
 func TestFetchDozzleHistoryPaginatesFullPages(t *testing.T) {
 	now := time.Now().UTC()
 	from := now.Add(-24 * time.Hour)
@@ -189,17 +358,17 @@ func TestFetchDozzleHistoryPaginatesFullPages(t *testing.T) {
 	defer dozzle.Close()
 
 	s := &server{
-		nodes:          []Node{{ID: "node-1", Name: "node", baseURL: dozzle.URL}},
-		logs:           []LogEntry{},
-		historyRange:   "1d",
+		nodes:             []Node{{ID: "node-1", Name: "node", baseURL: dozzle.URL}},
+		logs:              []LogEntry{},
+		historyRange:      "1d",
 		historyGeneration: 0,
-		rules:          map[string]bool{},
-		containerNames: map[string]map[string]string{"node-1": {"container-1": "api"}},
-		containerLogs:  map[string][]LogEntry{},
-		subscribers:    map[chan LogEntry]struct{}{},
-		streams:        map[string]struct{}{},
-		nodeContexts:   map[string]context.Context{},
-		nodeCancels:    map[string]context.CancelFunc{},
+		rules:             map[string]bool{},
+		containerNames:    map[string]map[string]string{"node-1": {"container-1": "api"}},
+		containerLogs:     map[string][]LogEntry{},
+		subscribers:       map[chan LogEntry]struct{}{},
+		streams:           map[string]struct{}{},
+		nodeContexts:      map[string]context.Context{},
+		nodeCancels:       map[string]context.CancelFunc{},
 	}
 
 	s.fetchDozzleHistory(context.Background(), s.nodes[0], "host-1", "container-1", from, now, 0)

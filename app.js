@@ -3,6 +3,7 @@ const logPageSize = 50;
 const initialLogPreviewSize = 50;
 const logVirtualRowHeight = 74;
 const logVirtualOverscan = 60;
+const adaptiveLogRenderLimit = 10000;
 let maxBufferedLogs = 100000;
 const selectionStorageKey = 'log-agent-selection';
 const aiProfilesStorageKey = 'log-agent-ai-profiles';
@@ -18,15 +19,18 @@ const state = {
   globalQuery: '',
   paused: false,
   selectedLog: 0,
+  activeAnalysisLogId: '',
   range: '30m',
   historyLoading: false,
   visibleLogs: logPageSize,
   logs: [],
   processed: 0,
   ruleState: { mask: true, structure: true, noise: false },
+  ruleOrder: ['mask', 'structure', 'noise'],
   containerLogCache: {},
   assistantContext: [],
   assistantMessages: [],
+  assistantAttachments: [],
   assistantBusy: false,
   aiProfiles: [],
   activeAIProfileId: '',
@@ -38,6 +42,10 @@ const state = {
 
 let goServerConnected = false;
 let eventStream;
+let assistantRequestController = null;
+let assistantRequestId = 0;
+let loadedContainerSelectionKey = '';
+let containerLogRetryTimer;
 let backendRefreshTimer;
 let historySyncTimer;
 let historyRequestVersion = 0;
@@ -48,10 +56,12 @@ let initialLogPreviewLimit = 0;
 let initialLogPreviewTimer;
 let aiAdminToken = '';
 let aiAdminTokenResolver = null;
+let appSettingsDatabaseDraft = null;
 let logRenderTimer;
 let logScrollFrame;
 let lastFilteredLogs = [];
 let lastVirtualWindowKey = '';
+let logTextSelectionActive = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -191,6 +201,30 @@ function loadAIProfiles() {
   }
 }
 
+async function loadAIProfilesFromDatabase() {
+  try {
+    const response = await fetch('/api/ai/profiles', { headers: { Accept: 'application/json' } });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const databaseProfiles = Array.isArray(payload.profiles) ? payload.profiles.map(normalizeAIProvider).filter(Boolean) : [];
+    if (!databaseProfiles.length) return;
+    const localProfiles = state.aiProfiles.filter((profile) => !/^ai-profile-db-\d+$/.test(profile.id));
+    state.aiProfiles = [...localProfiles, ...databaseProfiles];
+    if (!state.aiProfiles.some((profile) => profile.id === state.activeAIProfileId)) {
+      state.activeAIProfileId = databaseProfiles[0]?.id || '';
+      state.activeAIModelId = databaseProfiles[0]?.models[0]?.id || '';
+    } else if (!activeAIModel()) {
+      state.activeAIModelId = activeAIProfile()?.models[0]?.id || '';
+    }
+    persistAIProfiles();
+    renderAIProviderList();
+    renderAIModelList();
+    renderAssistant();
+  } catch (error) {
+    // Database-backed models are optional; keep local and environment models usable.
+  }
+}
+
 function persistAIProfiles() {
   try {
     localStorage.setItem(aiProfilesStorageKey, JSON.stringify(state.aiProfiles));
@@ -294,9 +328,15 @@ function renderAssistant() {
   const panel = $('#assistant-panel');
   if (!panel) return;
   renderAIModelPicker();
-  $('#assistant-context-count').textContent = String(state.assistantContext.length);
+  renderAssistantAttachments();
+  // Keep neighboring rows available to the model, while showing only the log
+  // the user explicitly selected in the assistant header.
+  const visibleContext = state.activeAnalysisLogId
+    ? state.assistantContext.filter((log) => String(log.id) === state.activeAnalysisLogId).slice(0, 1)
+    : state.assistantContext.slice(0, 1);
+  $('#assistant-context-count').textContent = String(visibleContext.length);
   const contextList = $('#assistant-context-list');
-  contextList.innerHTML = state.assistantContext.length ? state.assistantContext.map((log) => `
+  contextList.innerHTML = visibleContext.length ? visibleContext.map((log) => `
     <div class="assistant-context-item" data-assistant-context-id="${escapeHtml(log.id)}">
       <span class="assistant-context-level ${escapeHtml(log.level)}">${escapeHtml(log.level || 'log').toUpperCase()}</span>
       <span class="assistant-context-copy" title="${escapeHtml(`${log.node} / ${log.container}\n${log.message}`)}">${escapeHtml(log.node)} / ${escapeHtml(log.container)}: ${escapeHtml(log.message)}</span>
@@ -317,7 +357,11 @@ function renderAssistant() {
     messages.appendChild(item);
   });
   if (state.assistantBusy) {
-    $('#assistant-status').textContent = 'AI 请求中…';
+    const loading = document.createElement('div');
+    loading.className = 'assistant-message assistant assistant-loading';
+    loading.innerHTML = '<span class="assistant-loading-spinner" aria-hidden="true"></span><span>正在分析日志…</span>';
+    messages.appendChild(loading);
+    $('#assistant-status').textContent = '正在分析中…';
   } else if (currentAIConfigured()) {
     const provider = activeAIProfile();
     const selectedModel = activeAIModel();
@@ -326,25 +370,138 @@ function renderAssistant() {
     $('#assistant-status').textContent = 'AI 未配置 · 点击选择模型';
   }
   $('#assistant-send').disabled = state.assistantBusy;
+  $('#assistant-send').textContent = state.assistantBusy ? '分析中…' : '发送';
   $('#assistant-input').disabled = state.assistantBusy;
   if (state.assistantMessages.length) messages.scrollTop = messages.scrollHeight;
 }
 
+const maxAssistantAttachmentCount = 5;
+const maxAssistantAttachmentBytes = 2 * 1024 * 1024;
+const maxAssistantAttachmentTotalBytes = 5 * 1024 * 1024;
+const assistantAttachmentAccept = /^(image\/(png|jpeg|gif|webp)|text\/|application\/(json|xml)|application\/x-(yaml|yml))$/i;
+
+function renderAssistantAttachments() {
+  const list = $('#assistant-attachment-list');
+  const attachButton = $('#assistant-attach-button');
+  if (!list || !attachButton) return;
+  list.innerHTML = state.assistantAttachments.map((attachment, index) => `
+    <span class="assistant-attachment ${attachment.type.startsWith('image/') ? 'image' : 'file'}" title="${escapeHtml(`${attachment.name} · ${Math.ceil(attachment.size / 1024)} KB`)}">
+      ${attachment.type.startsWith('image/')
+        ? `<button class="assistant-attachment-preview" type="button" data-preview-assistant-attachment="${index}" aria-label="放大预览 ${escapeHtml(attachment.name)}"><img src="${escapeHtml(attachment.data)}" alt="${escapeHtml(attachment.name)}" /></button>`
+        : '<span class="assistant-attachment-file-icon" aria-hidden="true">FILE</span>'}
+      <span class="assistant-attachment-name">${escapeHtml(attachment.name)}</span>
+      <button class="assistant-attachment-remove" type="button" data-remove-assistant-attachment="${index}" aria-label="移除附件 ${escapeHtml(attachment.name)}">×</button>
+    </span>
+  `).join('');
+  list.classList.toggle('hidden', state.assistantAttachments.length === 0);
+  attachButton.disabled = state.assistantBusy || state.assistantAttachments.length >= maxAssistantAttachmentCount;
+  attachButton.setAttribute('aria-label', state.assistantAttachments.length >= maxAssistantAttachmentCount ? '最多添加 5 个附件' : '添加图片或文件');
+}
+
+function openAssistantAttachmentPreview(index) {
+  const attachment = state.assistantAttachments[index];
+  if (!attachment?.type.startsWith('image/')) return;
+  $('#assistant-attachment-preview-image').src = attachment.data;
+  $('#assistant-attachment-preview-image').alt = attachment.name;
+  $('#assistant-attachment-preview-name').textContent = attachment.name;
+  $('#assistant-attachment-preview-modal').classList.remove('hidden');
+}
+
+function closeAssistantAttachmentPreview() {
+  const modal = $('#assistant-attachment-preview-modal');
+  modal.classList.add('hidden');
+  $('#assistant-attachment-preview-image').removeAttribute('src');
+}
+
+function readAssistantAttachment(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`无法读取附件：${file.name}`));
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.readAsDataURL(file);
+  });
+}
+
+function assistantAttachmentType(file) {
+  const declared = String(file.type || '').toLowerCase();
+  if (declared) return declared;
+  const extension = String(file.name || '').split('.').pop().toLowerCase();
+  return ({ log: 'text/plain', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json', xml: 'application/xml', yaml: 'application/x-yaml', yml: 'application/x-yaml' })[extension] || '';
+}
+
+async function addAssistantAttachments(files) {
+  const slots = maxAssistantAttachmentCount - state.assistantAttachments.length;
+  const candidates = Array.from(files || []).slice(0, Math.max(0, slots));
+  if (!candidates.length) return;
+  const accepted = [];
+  let totalBytes = state.assistantAttachments.reduce((total, attachment) => total + attachment.size, 0);
+  for (const file of candidates) {
+    const type = assistantAttachmentType(file);
+    if (!assistantAttachmentAccept.test(type)) {
+      showToast(`暂支持图片和文本类文件：${file.name}`);
+      continue;
+    }
+    if (file.size > maxAssistantAttachmentBytes) {
+      showToast(`附件不能超过 2 MB：${file.name}`);
+      continue;
+    }
+    if (totalBytes + file.size > maxAssistantAttachmentTotalBytes) {
+      showToast('本次附件总大小不能超过 5 MB');
+      continue;
+    }
+    try {
+      const data = (await readAssistantAttachment(file)).replace(/^data:[^;]+;base64,/i, `data:${type};base64,`);
+      accepted.push({ name: file.name || '未命名附件', type, size: file.size, data });
+      totalBytes += file.size;
+    } catch (error) {
+      showToast(error.message || '读取附件失败');
+    }
+  }
+  if (!accepted.length) return;
+  state.assistantAttachments = [...state.assistantAttachments, ...accepted].slice(0, maxAssistantAttachmentCount);
+  renderAssistant();
+}
+
 function renderAssistantMarkdown(content) {
-  return String(content).split(/\r?\n/).map((line) => {
-    const escaped = escapeHtml(line);
-    if (!escaped.trim()) return '<div class="markdown-spacer"></div>';
-    let rendered = escaped
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*([^*]+)\*/g, '<em>$1</em>');
-    if (/^###\s+/.test(rendered)) return `<h4>${rendered.slice(4)}</h4>`;
-    if (/^##\s+/.test(rendered)) return `<h3>${rendered.slice(3)}</h3>`;
-    if (/^#\s+/.test(rendered)) return `<h2>${rendered.slice(2)}</h2>`;
-    if (/^[-*]\s+/.test(rendered)) return `<div class="markdown-list-item"><span>•</span><span class="markdown-list-copy">${rendered.slice(2)}</span></div>`;
-    if (/^\d+\.\s+/.test(rendered)) return `<div class="markdown-list-item"><span>${rendered.match(/^\d+/)[0]}.</span><span class="markdown-list-copy">${rendered.replace(/^\d+\.\s+/, '')}</span></div>`;
-    return `<div>${rendered}</div>`;
-  }).join('');
+  const lines = String(content ?? '').split(/\r?\n/);
+  const renderInline = (value) => escapeHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  const tableCells = (line) => String(line).trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim());
+  const isTableSeparator = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+  const rendered = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.includes('|') && isTableSeparator(lines[index + 1] || '')) {
+      const headers = tableCells(line);
+      const rows = [];
+      index += 2;
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+        const cells = tableCells(lines[index]);
+        if (cells.length !== headers.length) break;
+        rows.push(cells);
+        index += 1;
+      }
+      index -= 1;
+      rendered.push(`<div class="markdown-table-wrap"><table class="markdown-table"><thead><tr>${headers.map((cell) => `<th>${renderInline(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map((cells) => `<tr>${cells.map((cell) => `<td>${renderInline(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+      continue;
+    }
+
+    const escaped = renderInline(line);
+    if (!escaped.trim()) {
+      rendered.push('<div class="markdown-spacer"></div>');
+      continue;
+    }
+    if (/^###\s+/.test(escaped)) { rendered.push(`<h4>${escaped.slice(4)}</h4>`); continue; }
+    if (/^##\s+/.test(escaped)) { rendered.push(`<h3>${escaped.slice(3)}</h3>`); continue; }
+    if (/^#\s+/.test(escaped)) { rendered.push(`<h2>${escaped.slice(2)}</h2>`); continue; }
+    if (/^[-*]\s+/.test(escaped)) { rendered.push(`<div class="markdown-list-item"><span>•</span><span class="markdown-list-copy">${escaped.slice(2)}</span></div>`); continue; }
+    if (/^\d+\.\s+/.test(escaped)) { rendered.push(`<div class="markdown-list-item"><span>${escaped.match(/^\d+/)[0]}.</span><span class="markdown-list-copy">${escaped.replace(/^\d+\.\s+/, '')}</span></div>`); continue; }
+    rendered.push(`<div>${escaped}</div>`);
+  }
+  return rendered.join('');
 }
 
 function addAssistantContext(log) {
@@ -360,14 +517,67 @@ function addAssistantContext(log) {
 
 function removeAssistantContext(id) {
   state.assistantContext = state.assistantContext.filter((log) => String(log.id) !== String(id));
+  if (state.activeAnalysisLogId === String(id)) {
+    state.activeAnalysisLogId = '';
+    state.assistantContext = [];
+    renderLogs();
+  }
   renderAssistant();
 }
 
 function clearAssistantContext() {
+  assistantRequestId += 1;
+  if (assistantRequestController) {
+    assistantRequestController.abort();
+    assistantRequestController = null;
+  }
+  state.assistantBusy = false;
   state.assistantContext = [];
   state.assistantMessages = [];
+  state.assistantAttachments = [];
+  state.activeAnalysisLogId = '';
+  renderLogs();
   renderAssistant();
   showToast('已开始新聊天');
+}
+
+function beginLogAnalysis(log) {
+  const orderedLogs = logsForActiveContainer();
+  const selectedIndex = orderedLogs.findIndex((item) => item.id === log.id);
+  if (selectedIndex < 0) return;
+
+  // The stream is newest-first. Keep the three rows visible above and below
+  // the selected log, without reordering the surrounding sequence.
+  const contextStart = Math.max(0, selectedIndex - 3);
+  const contextEnd = Math.min(orderedLogs.length, selectedIndex + 4);
+  if (assistantRequestController) assistantRequestController.abort();
+  assistantRequestController = null;
+  assistantRequestId += 1;
+  state.assistantBusy = false;
+  state.activeAnalysisLogId = String(log.id);
+  state.assistantContext = orderedLogs.slice(contextStart, contextEnd);
+  state.assistantMessages = [];
+  $('#assistant-dock').classList.add('open');
+  $('#assistant-input').value = `请重点分析选中的这条日志有什么问题。请结合前后各 3 条日志，说明异常现象、可能原因和建议的排查步骤。\n\n选中日志：${log.time} · ${String(log.level || '').toUpperCase()} · ${log.node} / ${log.container}`;
+  renderAssistant();
+  sendAssistantMessage({ preventDefault() {} });
+}
+
+function analyzeLogFromButton(button) {
+  const log = logsForActiveContainer().find((item) => item.id === Number(button.dataset.analyzeLog));
+  if (!log) return;
+  state.selectedLog = log.id;
+  state.activeAnalysisLogId = String(log.id);
+  // Update the clicked control before opening the assistant. Any later
+  // virtualized render restores this same state from activeAnalysisLogId.
+  $$('#log-stream .row-ai-button.active').forEach((item) => {
+    item.classList.remove('active');
+    item.setAttribute('aria-pressed', 'false');
+  });
+  button.classList.add('active');
+  button.setAttribute('aria-pressed', 'true');
+  updatePreview();
+  beginLogAnalysis(log);
 }
 
 function openAISettings(profileId = '') {
@@ -537,23 +747,31 @@ async function sendAssistantMessage(event) {
   event.preventDefault();
   if (state.assistantBusy) return;
   const input = $('#assistant-input');
-  const content = input.value.trim();
-  if (!content) return;
+  const typedContent = input.value.trim();
+  const attachments = state.assistantAttachments.slice();
+  if (!typedContent && !attachments.length) return;
+  const content = typedContent || `请分析已附加的文件：${attachments.map((attachment) => attachment.name).join('、')}`;
   const profile = activeAIProfile();
   const model = activeAIModel();
+  const requestId = ++assistantRequestId;
+  const requestController = new AbortController();
+  assistantRequestController = requestController;
   state.assistantMessages.push({ role: 'user', content });
   state.assistantMessages = state.assistantMessages.slice(-12);
   input.value = '';
+  state.assistantAttachments = [];
   state.assistantBusy = true;
   renderAssistant();
   try {
     const response = await fetch('/api/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      signal: requestController.signal,
       body: JSON.stringify({
         messages: state.assistantMessages.slice(-12),
         logs: state.assistantContext.slice(0, 20),
-        config: profile && model ? { name: profile.name, base_url: profile.baseURL, api_key: profile.apiKey, model: model.name, type: profile.type } : null
+        attachments,
+        config: profile && model ? { profile_id: Number(profile.id.match(/^ai-profile-db-(\d+)$/)?.[1] || 0), name: profile.name, base_url: profile.baseURL, api_key: profile.apiKey, model: model.name, type: profile.type } : null
       })
     });
     const payload = await response.json().catch(() => ({}));
@@ -561,10 +779,13 @@ async function sendAssistantMessage(event) {
     state.assistantMessages.push({ role: 'assistant', content: payload.message || 'AI 未返回内容' });
     state.assistantMessages = state.assistantMessages.slice(-12);
   } catch (error) {
+    if (error.name === 'AbortError' || requestId !== assistantRequestId) return;
     state.assistantMessages.push({ role: 'assistant', content: error.message || 'AI 请求失败', error: true });
     state.assistantMessages = state.assistantMessages.slice(-12);
     showToast(error.message || 'AI 请求失败');
   } finally {
+    if (requestId !== assistantRequestId) return;
+    assistantRequestController = null;
     state.assistantBusy = false;
     renderAssistant();
   }
@@ -582,6 +803,187 @@ async function syncAIStatus() {
     state.aiModel = '';
   }
   renderAssistant();
+}
+
+function fillAppSettingsForm(payload, { databaseDraft = null } = {}) {
+  const form = $('#app-settings-form');
+  if (!form) return;
+  const draft = databaseDraft || (!payload.database?.configured ? appSettingsDatabaseDraft : null);
+  const environment = payload.environment || 'production';
+  if (!Array.from(form.elements.environment.options).some((option) => option.value === environment)) {
+    form.elements.environment.add(new Option(environment, environment));
+  }
+  form.elements.environment.value = environment;
+  form.elements.dbEnabled.checked = Boolean(payload.database?.enabled);
+  form.elements.dbDsn.value = '';
+  form.elements.dbDsn.placeholder = payload.database?.dsnConfigured ? '已配置，留空保持不变' : '例如：user:password@tcp(127.0.0.1:3306)/log_agent';
+  form.elements.dbHost.value = payload.database?.host || '';
+  form.elements.dbPort.value = payload.database?.port || '';
+  form.elements.dbUser.value = payload.database?.user || '';
+  form.elements.dbPassword.value = '';
+  form.elements.currentAdminToken.value = '';
+  form.elements.adminToken.value = '';
+  $('#settings-db-status').textContent = payload.database?.configured ? '已连接' : '未配置';
+  $('#settings-admin-status').textContent = payload.adminTokenConfigured ? '已配置' : '未配置';
+  if (draft) {
+    form.elements.dbEnabled.checked = Boolean(draft.enabled);
+    form.elements.dbDsn.value = draft.dsn || '';
+    form.elements.dbHost.value = draft.host || '';
+    form.elements.dbPort.value = draft.port || '';
+    form.elements.dbUser.value = draft.user || '';
+    form.elements.dbPassword.value = draft.password || '';
+    if (!payload.database?.configured && draft.enabled) $('#settings-db-status').textContent = '未保存';
+  }
+}
+
+async function openAppSettings() {
+  const modal = $('#app-settings-modal');
+  modal.classList.remove('hidden');
+  try {
+    const response = await fetch('/api/settings', { headers: { Accept: 'application/json' } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || '设置读取失败');
+    fillAppSettingsForm(payload);
+  } catch (error) {
+    modal.classList.add('hidden');
+    showToast(error.message || '设置读取失败');
+  }
+}
+
+function closeAppSettings() {
+  $('#app-settings-modal').classList.add('hidden');
+  $('#app-settings-form')?.reset();
+}
+
+function appSettingsDatabasePayload(form) {
+  return {
+    enabled: form.elements.dbEnabled.checked,
+    dsn: String(form.elements.dbDsn.value || '').trim(),
+    host: String(form.elements.dbHost.value || '').trim(),
+    port: String(form.elements.dbPort.value || '').trim(),
+    user: String(form.elements.dbUser.value || '').trim(),
+    password: String(form.elements.dbPassword.value || ''),
+  };
+}
+
+function rememberDatabaseDraft(form) {
+  appSettingsDatabaseDraft = appSettingsDatabasePayload(form);
+  return appSettingsDatabaseDraft;
+}
+
+function appSettingsAuthHeaders(form) {
+  const currentAdminToken = String(form.elements.currentAdminToken.value || '').trim() || aiAdminToken;
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (currentAdminToken) headers['X-Log-Agent-Admin-Token'] = currentAdminToken;
+  return { headers, currentAdminToken };
+}
+
+function ensureSettingsAdminToken(form) {
+  const { currentAdminToken } = appSettingsAuthHeaders(form);
+  if ($('#settings-admin-status').textContent === '已配置' && !currentAdminToken) {
+    showToast('请先填写当前管理员 key');
+    form.elements.currentAdminToken.focus();
+    return false;
+  }
+  return true;
+}
+
+async function readSettingsResponse(response, fallbackMessage) {
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = payload.error === 'admin token required' ? '请填写正确的当前管理员 key' : payload.error;
+    throw new Error(error || (response.status === 401 ? '当前管理员 key 不正确' : fallbackMessage));
+  }
+  return payload;
+}
+
+async function testDatabaseSettings() {
+  const form = $('#app-settings-form');
+  if (!ensureSettingsAdminToken(form)) return;
+  const button = $('#settings-db-test');
+  const { headers } = appSettingsAuthHeaders(form);
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/settings/database/test', { method: 'POST', headers, body: JSON.stringify({ database: appSettingsDatabasePayload(form) }) });
+    const payload = await readSettingsResponse(response, '数据库连接测试失败');
+    $('#settings-db-status').textContent = '连接成功';
+    showToast(payload.message || '数据库连接测试成功');
+  } catch (error) {
+    $('#settings-db-status').textContent = '连接失败';
+    showToast(error.message || '数据库连接测试失败');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveDatabaseSettings() {
+  const form = $('#app-settings-form');
+  if (!ensureSettingsAdminToken(form)) return;
+  const button = $('#settings-db-save');
+  const { headers, currentAdminToken } = appSettingsAuthHeaders(form);
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/settings/database', { method: 'PUT', headers, body: JSON.stringify({ database: appSettingsDatabasePayload(form) }) });
+    const payload = await readSettingsResponse(response, '数据库保存失败');
+    appSettingsDatabaseDraft = null;
+    if (currentAdminToken) aiAdminToken = currentAdminToken;
+    fillAppSettingsForm(payload);
+    $('#settings-db-status').textContent = payload.database?.configured ? '已连接' : '未配置';
+    showToast('数据库设置已保存');
+    await syncGoBackend({ incremental: true });
+  } catch (error) {
+    showToast(error.message || '数据库保存失败');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveAdminSettings() {
+  const form = $('#app-settings-form');
+  if (!ensureSettingsAdminToken(form)) return;
+  const button = $('#settings-admin-save');
+  const adminToken = String(form.elements.adminToken.value || '').trim();
+  const databaseDraft = rememberDatabaseDraft(form);
+  const { headers, currentAdminToken } = appSettingsAuthHeaders(form);
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/settings/admin', { method: 'PUT', headers, body: JSON.stringify({ adminToken }) });
+    const payload = await readSettingsResponse(response, '管理员 key 保存失败');
+    if (adminToken) aiAdminToken = adminToken;
+    else if (currentAdminToken) aiAdminToken = currentAdminToken;
+    fillAppSettingsForm(payload, { databaseDraft });
+    const databasePending = databaseDraft.enabled && (databaseDraft.dsn || databaseDraft.host || databaseDraft.user);
+    showToast(databasePending && !payload.database?.configured ? '管理员 key 已保存；数据库信息尚未保存，请点击“保存数据库”' : '管理员 key 已保存');
+  } catch (error) {
+    showToast(error.message || '管理员 key 保存失败');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveAppSettings(event) {
+  event.preventDefault();
+  const form = $('#app-settings-form');
+  if (!ensureSettingsAdminToken(form)) return;
+  const databaseDraft = rememberDatabaseDraft(form);
+  const submitButton = $('#app-settings-form button[type="submit"]');
+  const { headers } = appSettingsAuthHeaders(form);
+  submitButton.disabled = true;
+  try {
+    const response = await fetch('/api/settings/environment', {
+      method: 'PUT', headers,
+      body: JSON.stringify({ environment: String(form.elements.environment.value || '').trim() })
+    });
+    const payload = await readSettingsResponse(response, '运行环境保存失败');
+    fillAppSettingsForm(payload, { databaseDraft });
+    closeAppSettings();
+    const databasePending = databaseDraft.enabled && (databaseDraft.dsn || databaseDraft.host || databaseDraft.user);
+    showToast(databasePending && !payload.database?.configured ? '运行环境已保存；数据库信息尚未保存' : '运行环境已保存');
+  } catch (error) {
+    showToast(error.message || '运行环境保存失败');
+  } finally {
+    submitButton.disabled = false;
+  }
 }
 
 function applyTheme(theme) {
@@ -805,8 +1207,14 @@ function logTime(log) {
 
 async function loadSelectedContainerLogs() {
   const targets = selectedContainerTargets();
-  if (!targets.length || !goServerConnected) return;
+  if (!targets.length || !goServerConnected) {
+    if (containerLogRetryTimer) clearTimeout(containerLogRetryTimer);
+    containerLogRetryTimer = null;
+    return;
+  }
   const selectionKey = state.selectedContainers.join('|');
+  if (loadedContainerSelectionKey === selectionKey && targets.every((target) => Object.prototype.hasOwnProperty.call(state.containerLogCache, containerKey(target.nodeId, target.containerId)))) return;
+  let loading = false;
   try {
     await Promise.all(targets.map(async (target) => {
       const cacheKey = containerKey(target.nodeId, target.containerId);
@@ -816,10 +1224,20 @@ async function loadSelectedContainerLogs() {
       const payload = await response.json();
       if (state.selectedContainers.join('|') !== selectionKey) return;
       state.containerLogCache[cacheKey] = payload.logs || [];
+      loading = loading || Boolean(payload.loading);
     }));
     if (state.selectedContainers.join('|') !== selectionKey) return;
     scheduleLogRender();
     updatePreview();
+    if (loading) {
+      if (containerLogRetryTimer) clearTimeout(containerLogRetryTimer);
+      containerLogRetryTimer = setTimeout(() => {
+        containerLogRetryTimer = null;
+        if (state.selectedContainers.join('|') === selectionKey) loadSelectedContainerLogs();
+      }, 1000);
+    } else {
+      loadedContainerSelectionKey = selectionKey;
+    }
   } catch (error) {
     showToast(error.message || '容器日志加载失败');
   }
@@ -827,14 +1245,14 @@ async function loadSelectedContainerLogs() {
 
 const rangeLabels = {
   '30m': '最近 30 分钟',
-  '2h': '最近 2 小时',
+  '5h': '最近 5 小时',
   '1d': '最近 1 天',
   '1w': '最近一周'
 };
 
 const rangeDurations = {
   '30m': 30 * 60 * 1000,
-  '2h': 2 * 60 * 60 * 1000,
+  '5h': 5 * 60 * 60 * 1000,
   '1d': 24 * 60 * 60 * 1000,
   '1w': 7 * 24 * 60 * 60 * 1000
 };
@@ -891,6 +1309,103 @@ function syncRuleButtons() {
   $$('[data-rule-toggle]').forEach((button) => {
     button.classList.toggle('active', Boolean(state.ruleState[button.dataset.ruleToggle]));
   });
+  applyPipelineRuleOrder();
+}
+
+const ruleNames = {
+  mask: '敏感信息脱敏',
+  structure: '结构化字段提取',
+  noise: '健康检查过滤'
+};
+
+function normalizeRuleOrder(order) {
+  const defaults = ['mask', 'structure', 'noise'];
+  if (!Array.isArray(order) || order.length !== defaults.length) return defaults;
+  const unique = new Set(order);
+  return unique.size === defaults.length && defaults.every((rule) => unique.has(rule)) ? [...order] : defaults;
+}
+
+function applyPipelineRuleOrder() {
+  state.ruleOrder = normalizeRuleOrder(state.ruleOrder);
+  const list = $('.pipeline-list');
+  if (list) {
+    state.ruleOrder.forEach((rule) => {
+      const item = list.querySelector(`.pipeline-item[data-rule="${rule}"]`);
+      if (item) list.append(item);
+    });
+  }
+  const summary = $('#rule-order-summary');
+  if (summary) summary.textContent = `日志接收 → ${state.ruleOrder.map((rule) => ruleNames[rule]).join(' → ')} → 日志缓存`;
+}
+
+async function persistRuleOrder(order, previousOrder) {
+  state.ruleOrder = normalizeRuleOrder(order);
+  applyPipelineRuleOrder();
+  updatePreview();
+  try {
+    const response = await fetch('/api/rules', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ order: state.ruleOrder })
+    });
+    if (!response.ok) throw new Error('规则顺序保存失败');
+    const payload = await response.json();
+    state.ruleOrder = normalizeRuleOrder(payload.order);
+    applyPipelineRuleOrder();
+    showToast('加工规则顺序已保存');
+  } catch (error) {
+    state.ruleOrder = normalizeRuleOrder(previousOrder);
+    applyPipelineRuleOrder();
+    showToast(error.message || '规则顺序保存失败，已恢复原顺序');
+  }
+}
+
+function bindPipelineDragAndDrop() {
+  const list = $('.pipeline-list');
+  if (!list) return;
+  let draggingItem = null;
+  Array.from(list.querySelectorAll('.pipeline-item')).forEach((item) => {
+    const handle = item.querySelector('.drag-handle');
+    item.draggable = false;
+    handle?.addEventListener('pointerdown', () => {
+      item.dataset.dragHandleActive = 'true';
+      item.draggable = true;
+    });
+    item.addEventListener('dragstart', (event) => {
+      if (item.dataset.dragHandleActive !== 'true') {
+        event.preventDefault();
+        return;
+      }
+      delete item.dataset.dragHandleActive;
+      draggingItem = item;
+      item.classList.add('dragging');
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', item.dataset.rule || '');
+    });
+    item.addEventListener('dragend', () => {
+      item.classList.remove('dragging');
+      item.draggable = false;
+      draggingItem = null;
+      Array.from(list.querySelectorAll('.pipeline-item.drag-over')).forEach((entry) => entry.classList.remove('drag-over'));
+    });
+  });
+  list.addEventListener('dragover', (event) => {
+    if (!draggingItem) return;
+    event.preventDefault();
+    const target = event.target.closest('.pipeline-item');
+    if (!target || target === draggingItem) return;
+    Array.from(list.querySelectorAll('.pipeline-item.drag-over')).forEach((entry) => entry.classList.remove('drag-over'));
+    target.classList.add('drag-over');
+    const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+    list.insertBefore(draggingItem, afterTarget ? target.nextSibling : target);
+  });
+  list.addEventListener('drop', (event) => {
+    if (!draggingItem) return;
+    event.preventDefault();
+    const nextOrder = Array.from(list.querySelectorAll('.pipeline-item')).map((item) => item.dataset.rule);
+    const previousOrder = state.ruleOrder;
+    if (nextOrder.join('\u0000') !== previousOrder.join('\u0000')) persistRuleOrder(nextOrder, previousOrder);
+  });
 }
 
 async function persistRuleGroup(updates, successMessage) {
@@ -936,8 +1451,18 @@ function renderNodes() {
   state.expandedNodes = state.expandedNodes.filter((id) => getNode(id));
   $('#node-total').textContent = String(nodes.length).padStart(2, '0');
   $('#metric-nodes').textContent = String(nodes.length).padStart(2, '0');
+  const connectedNodes = nodes.filter((node) => node.status === 'connected').length;
   const activeContainers = nodes.reduce((total, node) => node.status === 'connected' ? total + (Number(node.count) || 0) : total, 0);
-  $('#metric-containers').textContent = activeContainers ? activeContainers.toLocaleString('en-US') : '—';
+  $('#metric-nodes-foot').textContent = nodes.length
+    ? `${connectedNodes} / ${nodes.length} 个节点已连接`
+    : '尚未接入节点';
+  $('#metric-containers').textContent = activeContainers.toLocaleString('en-US');
+  $('#metric-containers-foot').textContent = activeContainers
+    ? `${activeContainers} 个运行中容器`
+    : '当前没有运行中的容器';
+  $('#metric-processed-foot').textContent = state.processed
+    ? `${rangeLabels[state.range] || '当前范围'}累计接收`
+    : '等待日志流';
   $('#node-list').innerHTML = nodes.length ? nodes.map((node) => {
     const containers = node.containers || [];
     const expanded = state.expandedNodes.includes(node.id);
@@ -974,8 +1499,10 @@ function renderNodes() {
     const nodeId = item.dataset.nodeId;
     state.selectedNodes = [nodeId];
     state.selectedContainers = [];
+    loadedContainerSelectionKey = '';
     if (!state.expandedNodes.includes(nodeId)) state.expandedNodes.push(nodeId);
     state.containerLogCache = {};
+    loadedContainerSelectionKey = '';
     resetLogPagination();
     renderNodes();
     updateDetailPanel();
@@ -997,6 +1524,7 @@ function renderNodes() {
     state.selectedNodes = selectedNodeIds.length ? selectedNodeIds : [nodeId];
     if (!state.expandedNodes.includes(nodeId)) state.expandedNodes.push(nodeId);
     state.containerLogCache = {};
+    loadedContainerSelectionKey = '';
     state.selectedLog = 0;
     resetLogPagination();
     renderNodes();
@@ -1082,7 +1610,8 @@ function logVirtualWindow(total, stream) {
   if (!total) return { start: 0, end: 0 };
   // Adaptive row heights cannot use fixed spacer math; render normal-sized
   // result sets completely so every multi-line message can determine its row height.
-  if (total <= 2000) return { start: 0, end: total };
+  // Keep virtualization as a safeguard for unusually large log histories.
+  if (total <= adaptiveLogRenderLimit) return { start: 0, end: total };
   const viewportRows = Math.max(12, Math.ceil(stream.clientHeight / logVirtualRowHeight));
   const windowSize = viewportRows + logVirtualOverscan * 2;
   const anchor = Math.floor(stream.scrollTop / logVirtualRowHeight);
@@ -1098,6 +1627,13 @@ function scheduleLogRender() {
   }, 80);
 }
 
+function hasLogTextSelection() {
+  const selection = window.getSelection();
+  const stream = $('#log-stream');
+  if (!selection || selection.isCollapsed || !selection.rangeCount || !stream) return false;
+  return stream.contains(selection.getRangeAt(0).commonAncestorContainer);
+}
+
 function scheduleLogWindowRender() {
   if (logScrollFrame) return;
   logScrollFrame = requestAnimationFrame(() => {
@@ -1109,6 +1645,9 @@ function scheduleLogWindowRender() {
 function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit = 0 } = {}) {
   const stream = $('#log-stream');
   const emptyState = $('#empty-state');
+  // Replacing the log rows destroys the browser's native text selection.
+  // Keep it intact while the user is dragging or copying a log excerpt.
+  if (hasLogTextSelection()) return;
   const scrollTop = stream.scrollTop;
   const allResults = reuseFiltered ? lastFilteredLogs : filteredLogs();
   if (!reuseFiltered) lastFilteredLogs = allResults;
@@ -1131,7 +1670,7 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   $('#stream-nav-count').textContent = String(allResults.length).padStart(2, '0');
   const firstId = results[0]?.id || 0;
   const lastId = results[results.length - 1]?.id || 0;
-  const windowKey = `${allResults.length}:${stagedResults.length}:${start}:${end}:${firstId}:${lastId}:${state.selectedLog}`;
+  const windowKey = `${allResults.length}:${stagedResults.length}:${start}:${end}:${firstId}:${lastId}:${state.selectedLog}:${state.activeAnalysisLogId}`;
   if (reuseFiltered && windowKey === lastVirtualWindowKey) {
     if (preserveScroll && stream.scrollTop !== scrollTop) stream.scrollTop = scrollTop;
     return;
@@ -1146,23 +1685,15 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
       <span class="log-level ${log.level}">${highlightSearchText(log.level.toUpperCase())}</span>
       <span class="log-source"><span class="source-tag">${highlightSearchText(log.node)}</span><span class="container-tag">/${highlightSearchText(log.container)}</span></span>
       <span class="log-level-marker ${escapeHtml(log.level || 'info')}" aria-hidden="true"></span>
-      <span class="log-message" title="${escapeHtml(log.message)}">${highlightMessage(log.message)}</span><span class="row-actions"><button class="row-ai-button" type="button" data-analyze-log="${log.id}" aria-label="分析这条日志" title="让 AI 分析这条日志">◔</button></span>
+      <span class="log-message" title="${escapeHtml(log.message)}">${highlightMessage(log.message)}</span><span class="row-actions"><button class="row-ai-button${String(log.id) === state.activeAnalysisLogId ? ' active' : ''}" type="button" data-analyze-log="${log.id}" aria-label="分析这条日志" aria-pressed="${String(log.id) === state.activeAnalysisLogId}" title="让 AI 分析这条日志"><img src="ai-icon.png" alt="" aria-hidden="true" /></button></span>
     </div>
   `).join('')}${bottomSpacer}`;
   stream.append(emptyState);
   emptyState.classList.toggle('hidden', allResults.length > 0);
   if (preserveScroll && stream.scrollTop !== scrollTop) stream.scrollTop = scrollTop;
-  $$('#log-stream .row-ai-button').forEach((button) => button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    const log = logsForActiveContainer().find((item) => item.id === Number(button.dataset.analyzeLog));
-    if (!log) return;
-    if (!state.assistantContext.some((item) => item.id === log.id)) state.assistantContext = [log, ...state.assistantContext].slice(0, 20);
-    $('#assistant-dock').classList.add('open');
-    $('#assistant-input').value = '请分析这条日志：说明问题、可能原因和建议的排查步骤。';
-    renderAssistant();
-    sendAssistantMessage({ preventDefault() {} });
-  }));
-  $$('#log-stream .log-row').forEach((row) => row.addEventListener('click', () => {
+  $$('#log-stream .log-row').forEach((row) => row.addEventListener('click', (event) => {
+    if (event.target.closest('[data-analyze-log]')) return;
+    if (hasLogTextSelection()) return;
     const logId = Number(row.dataset.logId);
     state.selectedLog = state.selectedLog === logId ? 0 : logId;
     renderLogs();
@@ -1227,6 +1758,7 @@ function updatePreview() {
     const trace = log.message.match(/trace[_-]?id[=:]\s*([^\s·]+)/i)?.[1];
     if (trace) preview.trace_id = state.ruleState.mask ? '***' : trace;
   }
+  preview.processing_order = state.ruleOrder.filter((rule) => state.ruleState[rule]);
   $('#preview-code').textContent = JSON.stringify(preview);
 }
 
@@ -1270,6 +1802,7 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
       refreshCustomSelect($('#time-range-filter'));
     }
     state.ruleState = { ...state.ruleState, ...payload.rules };
+    state.ruleOrder = normalizeRuleOrder(payload.ruleOrder || state.ruleOrder);
     syncRuleButtons();
     goServerConnected = true;
     const syncLabel = eventStream?.readyState === EventSource.OPEN ? '实时同步中' : '服务端已连接';
@@ -1277,6 +1810,9 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
     if (!state.paused) $('#stream-status').textContent = state.historyLoading ? '正在加载历史日志' : '正在监听';
     updateSyncFooter(syncLabel, 'connected');
     $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
+    $('#metric-processed-foot').textContent = state.processed
+      ? `${rangeLabels[state.range] || '当前范围'}累计接收`
+      : '等待日志流';
     renderNodes();
     if (!incremental || incomingLogs.length || previousRange !== state.range || previousHistoryLoading !== state.historyLoading) {
       const renderLimit = initialLogPreviewActive ? initialLogPreviewLimit : 0;
@@ -1286,6 +1822,7 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
     updateDetailPanel(); updatePreview();
     persistSelection();
     if (connectStream || !eventStream || eventStream.readyState === EventSource.CLOSED) connectGoStream();
+    if (state.selectedContainers.length) loadSelectedContainerLogs();
     return true;
   } catch (error) {
     goServerConnected = false;
@@ -1327,6 +1864,7 @@ function connectGoStream() {
     });
     state.processed += 1;
     $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
+    $('#metric-processed-foot').textContent = `${rangeLabels[state.range] || '当前范围'}累计接收`;
     updateSyncFooter('实时同步中', 'connected');
     updateLastSync(incoming.timestamp);
     scheduleLogRender();
@@ -1463,6 +2001,11 @@ function setView(view) {
 }
 
 function bindEvents() {
+  document.addEventListener('selectionchange', () => {
+    const isSelectingLogText = hasLogTextSelection();
+    if (logTextSelectionActive && !isSelectingLogText) scheduleLogRender();
+    logTextSelectionActive = isSelectingLogText;
+  });
   $$('.nav-item').forEach((button) => button.addEventListener('click', () => setView(button.dataset.view)));
   $('#time-range-filter').addEventListener('change', async (event) => {
     const requestVersion = ++historyRequestVersion;
@@ -1480,12 +2023,26 @@ function bindEvents() {
     if (!goServerConnected) return;
     $('#stream-status').textContent = '正在加载';
     try {
-      const response = await fetch(`/api/logs/range?range=${encodeURIComponent(state.range)}`, { method: 'POST' });
+      const rangeQuery = new URLSearchParams({ range: state.range });
+      state.selectedNodes.forEach((nodeId) => rangeQuery.append('node', nodeId));
+      const response = await fetch(`/api/logs/range?${rangeQuery.toString()}`, { method: 'POST' });
       if (!response.ok) throw new Error('时间范围加载失败');
-      await syncGoBackend({ incremental: true });
+      const rangePayload = await response.json().catch(() => ({}));
+      if (requestVersion !== historyRequestVersion) return;
+      const strictReload = rangePayload.status === 'reloading';
+      if (strictReload) {
+        state.logs = [];
+        state.containerLogCache = {};
+        state.historyLoading = true;
+        resetLogPagination();
+        renderLogs();
+      }
+      await syncGoBackend({ incremental: !strictReload });
       if (requestVersion !== historyRequestVersion) return;
       if (state.historyLoading) scheduleHistorySync();
-      showToast(state.historyLoading ? `正在增量加载${rangeLabels[state.range]}日志` : `已切换至${rangeLabels[state.range]}`);
+      showToast(state.historyLoading
+        ? `${strictReload ? '正在重新加载' : '正在增量加载'}${rangeLabels[state.range]}日志`
+        : `已切换至${rangeLabels[state.range]}`);
     } catch (error) {
       showToast(error.message);
     }
@@ -1509,6 +2066,13 @@ function bindEvents() {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   $('#global-search').addEventListener('input', (event) => { state.globalQuery = event.target.value; resetLogPagination(); renderLogs(); });
+  $('#log-stream').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-analyze-log]');
+    if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
+    analyzeLogFromButton(button);
+  });
   $('#log-stream').addEventListener('scroll', scheduleLogWindowRender);
   $('#pause-button').addEventListener('click', () => {
     state.paused = !state.paused;
@@ -1535,7 +2099,52 @@ function bindEvents() {
     const button = event.target.closest('[data-remove-assistant-log]');
     if (button) removeAssistantContext(button.dataset.removeAssistantLog);
   });
+  $('#assistant-attach-button').addEventListener('click', () => $('#assistant-file-input').click());
+  $('#assistant-file-input').addEventListener('change', (event) => {
+    void addAssistantAttachments(event.target.files);
+    event.target.value = '';
+  });
+  $('#assistant-attachment-list').addEventListener('click', (event) => {
+    const previewButton = event.target.closest('[data-preview-assistant-attachment]');
+    if (previewButton) {
+      event.stopPropagation();
+      openAssistantAttachmentPreview(Number(previewButton.dataset.previewAssistantAttachment));
+      return;
+    }
+    const button = event.target.closest('[data-remove-assistant-attachment]');
+    if (!button) return;
+    // renderAssistant removes the clicked button from the DOM. Stop this click
+    // before the global outside-click listener can mistake it for a dock exit.
+    event.stopPropagation();
+    state.assistantAttachments.splice(Number(button.dataset.removeAssistantAttachment), 1);
+    renderAssistant();
+  });
+  $('#assistant-attachment-preview-close').addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeAssistantAttachmentPreview();
+  });
+  $('#assistant-attachment-preview-modal').addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeAssistantAttachmentPreview();
+  });
+  $('#assistant-panel').addEventListener('wheel', (event) => {
+    const scroller = event.target.closest('.assistant-context-list, .assistant-messages');
+    if (!scroller) {
+      // Headings, controls, and the composer do not scroll. Keep their wheel
+      // gestures inside the assistant instead of moving the page underneath.
+      event.preventDefault();
+      return;
+    }
+    const atTop = scroller.scrollTop <= 0;
+    const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+    if ((event.deltaY < 0 && atTop) || (event.deltaY > 0 && atBottom)) event.preventDefault();
+  }, { passive: false });
   $('#assistant-form').addEventListener('submit', sendAssistantMessage);
+  $('#assistant-input').addEventListener('paste', (event) => {
+    const pastedImages = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/'));
+    if (!pastedImages.length) return;
+    event.preventDefault();
+    void addAssistantAttachments(pastedImages);
+  });
   $('#assistant-input').addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -1547,6 +2156,17 @@ function bindEvents() {
     dock.classList.toggle('open');
     if (dock.classList.contains('open')) $('#assistant-input').focus();
   });
+  $('#settings-button').addEventListener('click', openAppSettings);
+  $('#app-settings-form').addEventListener('submit', saveAppSettings);
+  $('#settings-db-test').addEventListener('click', testDatabaseSettings);
+  $('#settings-db-save').addEventListener('click', saveDatabaseSettings);
+  $('#settings-admin-save').addEventListener('click', saveAdminSettings);
+  ['dbEnabled', 'dbDsn', 'dbHost', 'dbPort', 'dbUser', 'dbPassword'].forEach((name) => {
+    $('#app-settings-form').elements[name].addEventListener('input', () => rememberDatabaseDraft($('#app-settings-form')));
+    $('#app-settings-form').elements[name].addEventListener('change', () => rememberDatabaseDraft($('#app-settings-form')));
+  });
+  $$('[data-close-app-settings]').forEach((button) => button.addEventListener('click', closeAppSettings));
+  $('#app-settings-modal').addEventListener('click', (event) => { if (event.target.id === 'app-settings-modal') closeAppSettings(); });
   $('#ai-profile-form').addEventListener('submit', saveAIProfile);
   $('#new-ai-profile')?.addEventListener('click', () => openAISettings());
   $('#delete-ai-profile').addEventListener('click', () => deleteAIProfile(state.settingsAIProfileId));
@@ -1579,7 +2199,7 @@ function bindEvents() {
   document.addEventListener('click', (event) => {
     if (!event.target.closest('#pipeline-actions')) closePipelineMenu();
     if (!event.target.closest('#assistant-model-picker')) closeAIModelMenu();
-    if (!event.target.closest('#assistant-dock')) $('#assistant-dock').classList.remove('open');
+    if (!event.target.closest('#assistant-dock') && !event.target.closest('#assistant-attachment-preview-modal')) $('#assistant-dock').classList.remove('open');
   });
   $$('.toggle').forEach((button) => button.addEventListener('click', async () => {
     const rule = button.dataset.ruleToggle || button.closest('.pipeline-item')?.dataset.rule;
@@ -1611,6 +2231,7 @@ function bindEvents() {
       button.disabled = false;
     }
   }));
+  bindPipelineDragAndDrop();
   if ($('#add-rule-button')) $('#add-rule-button').addEventListener('click', () => showToast('规则模板面板即将开放')); 
   $('#rules-add-rule').addEventListener('click', () => showToast('规则模板面板即将开放'));
   $('#open-add-node').addEventListener('click', () => openNodeModal());
@@ -1641,6 +2262,8 @@ function bindEvents() {
     if (event.key === ' ' && document.activeElement.tagName !== 'INPUT') { event.preventDefault(); $('#pause-button').click(); }
     if (event.key === 'Escape') {
       if (!$('#ai-admin-token-modal').classList.contains('hidden')) closeAIAdminTokenPrompt();
+      else if (!$('#app-settings-modal').classList.contains('hidden')) closeAppSettings();
+      else if (!$('#ai-settings-modal').classList.contains('hidden')) closeAISettings();
       else closeNodeModal();
     }
     if (event.key === '/' && document.activeElement.tagName !== 'INPUT') { event.preventDefault(); $('#global-search').focus(); }
@@ -1667,6 +2290,7 @@ updatePreview();
 renderAssistant();
 bindEvents();
 syncAIStatus();
+loadAIProfilesFromDatabase();
 syncGoBackend({ connectStream: true }).then((connected) => {
   if (connected) {
     backendRefreshTimer = setInterval(() => syncGoBackend({ incremental: true }), 3000);
