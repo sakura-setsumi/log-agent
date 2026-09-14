@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f4f6f8" />
     <title>日志中枢 · Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
-    <link rel="stylesheet" href="styles.css?v=assistant-composer-gap-75" />
+    <link rel="stylesheet" href="styles.css?v=markdown-safe-78" />
   </head>
   <body>
     <div class="app-shell">
@@ -90,15 +90,16 @@
               <div class="metric-value" id="metric-containers">—</div>
               <div class="metric-foot" id="metric-containers-foot">等待容器状态</div>
             </article>
-            <article class="metric-card accent-purple">
-              <div class="metric-top"><span>已接收日志</span><span class="metric-icon">✦</span></div>
+            <article class="metric-card accent-purple" title="服务启动后接收的日志总数；该计数不代表当前缓存条数。">
+              <div class="metric-top"><span>累计接收日志</span><span class="metric-icon">✦</span></div>
               <div class="metric-value" id="metric-processed">0</div>
               <div class="metric-foot" id="metric-processed-foot">等待日志流</div>
             </article>
-            <article class="metric-card accent-blue">
-              <div class="metric-top"><span>存储占用</span><span class="metric-icon">◒</span></div>
+            <article class="metric-card accent-blue" title="日志仅保存在内存中。这里显示当前条数、容量、累计淘汰数和最近淘汰时间。达到上限后，每新增一条日志会淘汰时间最早的一条。">
+              <div class="metric-top"><span>日志缓存使用率</span><span class="metric-icon">◒</span></div>
               <div class="metric-value" id="metric-storage">—</div>
               <div class="metric-foot" id="metric-storage-foot">等待数据</div>
+              <div class="metric-policy" id="metric-storage-policy">满额后自动淘汰最早日志</div>
             </article>
           </section>
 
@@ -180,7 +181,11 @@
               <section class="assistant-panel panel" id="assistant-panel">
                 <div class="panel-heading compact-heading assistant-heading">
                   <div><div class="section-kicker">AI LOG ASSISTANT</div><h2>AI 日志助手</h2></div>
-                  <button class="assistant-new-chat" id="assistant-clear-context" type="button" aria-label="新聊天" data-tooltip="新聊天"><span aria-hidden="true">✎</span></button>
+                  <div class="assistant-heading-actions">
+                    <button class="assistant-session-toggle" id="assistant-session-toggle" type="button" aria-label="会话历史" aria-haspopup="menu" aria-expanded="false" data-tooltip="会话历史"><span aria-hidden="true">☷</span></button>
+                    <button class="assistant-new-chat" id="assistant-clear-context" type="button" aria-label="新聊天" data-tooltip="新聊天"><span aria-hidden="true">✎</span></button>
+                  </div>
+                  <div class="assistant-session-menu hidden" id="assistant-session-menu" role="menu"><div class="assistant-session-menu-label">历史会话（最近 12 个）</div><div id="assistant-session-list"></div></div>
                 </div>
                 <p class="panel-description">点击左侧日志加入上下文，让 AI 帮你定位问题、解释异常。</p>
 
@@ -326,6 +331,8 @@
     </div>
 
     <div class="toast hidden" id="toast"><span class="toast-icon">✓</span><span id="toast-message">已更新</span></div>
-    <script src="app.js?v=assistant-first-click-30"></script>
+    <script src="app.js?v=markdown-safe-35"></script>
+    <script src="assistant-ui.js?v=assistant-events-2"></script>
+    <script src="bootstrap.js?v=bootstrap-2"></script>
   </body>
 </html>

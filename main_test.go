@@ -338,6 +338,47 @@ func TestFetchDozzleHistoryStopsWhenCacheIsFull(t *testing.T) {
 	}
 }
 
+func TestCacheObservabilityReportsEvictedLogs(t *testing.T) {
+	previousCapacity := maxStoredLogs
+	maxStoredLogs = 2
+	defer func() { maxStoredLogs = previousCapacity }()
+
+	now := time.Now()
+	s := &server{
+		nodes:                 []Node{{ID: "node-1", Name: "node"}},
+		logs:                  []LogEntry{{ID: 2, Timestamp: now.Add(-time.Minute).UnixMilli(), Message: "newer"}, {ID: 1, Timestamp: now.Add(-2 * time.Minute).UnixMilli(), Message: "oldest"}},
+		nextLogID:             2,
+		containerLogs:         map[string][]LogEntry{},
+		subscribers:           map[chan LogEntry]struct{}{},
+		historyCoverage:       map[string]time.Time{},
+		historyRange:          "30m",
+		rules:                 map[string]bool{},
+		nodeContexts:          map[string]context.Context{},
+		nodeCancels:           map[string]context.CancelFunc{},
+		containerNames:        map[string]map[string]string{},
+		historyLoads:          map[string]struct{}{},
+		historyLoadGeneration: map[string]uint64{},
+	}
+
+	s.appendRemoteLogLocked("node-1", dozzleLogEvent{ID: 3, Timestamp: now.UnixMilli(), Level: "info", Container: "container-1"}, "current", false)
+	if s.evictedLogs != 1 || s.lastEvictedAt <= 0 {
+		t.Fatalf("expected one observed eviction, got evicted=%d last=%d", s.evictedLogs, s.lastEvictedAt)
+	}
+	if len(s.logs) != 2 || s.logs[len(s.logs)-1].Message != "newer" {
+		t.Fatalf("expected the oldest cached log to be evicted, got %#v", s.logs)
+	}
+
+	response := httptest.NewRecorder()
+	s.handleBootstrap(response, httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil))
+	var payload bootstrapResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode bootstrap response: %v", err)
+	}
+	if payload.Storage.Used != 2 || payload.Storage.Capacity != 2 || payload.Storage.Evicted != 1 || payload.Storage.LastEvictedAt <= 0 {
+		t.Fatalf("unexpected cache observability payload: %#v", payload.Storage)
+	}
+}
+
 func TestFetchDozzleHistoryPaginatesFullPages(t *testing.T) {
 	now := time.Now().UTC()
 	from := now.Add(-24 * time.Hour)

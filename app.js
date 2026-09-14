@@ -9,6 +9,8 @@ const selectionStorageKey = 'log-agent-selection';
 const aiProfilesStorageKey = 'log-agent-ai-profiles';
 const aiActiveProfileStorageKey = 'log-agent-ai-active-profile';
 const aiActiveModelStorageKey = 'log-agent-ai-active-model';
+const assistantSessionsStorageKey = 'log-agent-ai-sessions';
+const maxAssistantSessions = 12;
 
 const state = {
   selectedNodes: [],
@@ -32,6 +34,8 @@ const state = {
   assistantMessages: [],
   assistantAttachments: [],
   assistantBusy: false,
+  assistantSessions: [],
+  activeAssistantSessionId: '',
   aiProfiles: [],
   activeAIProfileId: '',
   activeAIModelId: '',
@@ -201,6 +205,88 @@ function loadAIProfiles() {
   }
 }
 
+function copyAssistantSessionData(session) {
+  return {
+    context: (session.context || []).slice(0, 20).map((log) => ({ id: log.id, date: log.date, time: log.time, timestamp: log.timestamp, level: log.level, node: log.node, container: log.container, message: log.message })),
+    messages: (session.messages || []).slice(-12).map((message) => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: String(message.content || '').slice(0, 16000), error: Boolean(message.error) }))
+  };
+}
+
+function persistAssistantSessions() {
+  try { localStorage.setItem(assistantSessionsStorageKey, JSON.stringify(state.assistantSessions.slice(0, maxAssistantSessions))); } catch (error) { /* Local history is optional. */ }
+}
+
+function activeAssistantSession() {
+  return state.assistantSessions.find((session) => session.id === state.activeAssistantSessionId) || null;
+}
+
+function syncActiveAssistantSession() {
+  const session = activeAssistantSession();
+  if (!session) return;
+  Object.assign(session, copyAssistantSessionData({ context: state.assistantContext, messages: state.assistantMessages }), { activeLogId: state.activeAnalysisLogId, updatedAt: Date.now() });
+  if (session.title === '新对话' && session.messages.length) session.title = String(session.messages.find((message) => message.role === 'user')?.content || '新对话').replace(/\s+/g, ' ').slice(0, 80);
+  state.assistantSessions = [session, ...state.assistantSessions.filter((item) => item.id !== session.id)].slice(0, maxAssistantSessions);
+  persistAssistantSessions();
+}
+
+function startAssistantSession({ context = [], activeLogId = '', title = '新对话' } = {}) {
+  syncActiveAssistantSession();
+  const now = Date.now();
+  const session = { id: `assistant-session-${now}-${Math.random().toString(36).slice(2, 8)}`, title: String(title).slice(0, 80) || '新对话', createdAt: now, updatedAt: now, activeLogId: String(activeLogId || ''), ...copyAssistantSessionData({ context, messages: [] }) };
+  state.assistantSessions = [session, ...state.assistantSessions].slice(0, maxAssistantSessions);
+  state.activeAssistantSessionId = session.id;
+  state.activeAnalysisLogId = session.activeLogId;
+  state.assistantContext = session.context;
+  state.assistantMessages = [];
+  state.assistantAttachments = [];
+  persistAssistantSessions();
+}
+
+function selectAssistantSession(id) {
+  const session = state.assistantSessions.find((item) => item.id === id);
+  if (!session) return;
+  state.activeAssistantSessionId = session.id;
+  state.activeAnalysisLogId = session.activeLogId;
+  state.selectedLog = Number(session.activeLogId) || 0;
+  const copied = copyAssistantSessionData(session);
+  state.assistantContext = copied.context;
+  state.assistantMessages = copied.messages;
+  state.assistantAttachments = [];
+  closeAssistantSessionMenu();
+  renderLogs();
+  renderAssistant();
+}
+
+function deleteAssistantSession(id) {
+  const active = id === state.activeAssistantSessionId;
+  state.assistantSessions = state.assistantSessions.filter((session) => session.id !== id);
+  if (active) {
+    if (state.assistantSessions[0]) selectAssistantSession(state.assistantSessions[0].id);
+    else startAssistantSession();
+  }
+  persistAssistantSessions();
+  renderAssistant();
+}
+
+function closeAssistantSessionMenu() {
+  $('#assistant-session-menu')?.classList.add('hidden');
+  $('#assistant-session-toggle')?.setAttribute('aria-expanded', 'false');
+}
+
+function renderAssistantSessions() {
+  const list = $('#assistant-session-list');
+  if (!list) return;
+  list.innerHTML = state.assistantSessions.length ? state.assistantSessions.map((session) => `<div class="assistant-session-item${session.id === state.activeAssistantSessionId ? ' active' : ''}"><button class="assistant-session-select" type="button" data-select-assistant-session="${escapeHtml(session.id)}"><span>${escapeHtml(session.title)}</span><small>${new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small></button><button class="assistant-session-remove" type="button" data-delete-assistant-session="${escapeHtml(session.id)}" aria-label="删除会话">×</button></div>`).join('') : '<div class="assistant-session-empty">暂无历史会话</div>';
+}
+
+function loadAssistantSessions() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(assistantSessionsStorageKey) || '[]');
+    state.assistantSessions = Array.isArray(saved) ? saved.filter((session) => session && session.id).slice(0, maxAssistantSessions).map((session) => ({ id: String(session.id), title: String(session.title || '新对话').slice(0, 80), createdAt: Number(session.createdAt) || Date.now(), updatedAt: Number(session.updatedAt) || Date.now(), activeLogId: String(session.activeLogId || ''), ...copyAssistantSessionData(session) })) : [];
+    if (state.assistantSessions[0]) selectAssistantSession(state.assistantSessions[0].id);
+  } catch (error) { state.assistantSessions = []; }
+}
+
 async function loadAIProfilesFromDatabase() {
   try {
     const response = await fetch('/api/ai/profiles', { headers: { Accept: 'application/json' } });
@@ -327,6 +413,7 @@ function fillAISettingsForm() {
 function renderAssistant() {
   const panel = $('#assistant-panel');
   if (!panel) return;
+  renderAssistantSessions();
   renderAIModelPicker();
   renderAssistantAttachments();
   // Keep neighboring rows available to the model, while showing only the log
@@ -462,55 +549,144 @@ async function addAssistantAttachments(files) {
   renderAssistant();
 }
 
+const assistantMarkdownMaxLength = 24000;
+const assistantMarkdownMaxTableColumns = 12;
+const assistantMarkdownMaxTableRows = 100;
+const assistantMarkdownTags = new Set(['A', 'CODE', 'DIV', 'EM', 'H2', 'H3', 'H4', 'PRE', 'SPAN', 'STRONG', 'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR']);
+const assistantMarkdownClasses = new Set(['assistant-markdown-link', 'markdown-code-block', 'markdown-list-copy', 'markdown-list-item', 'markdown-spacer', 'markdown-table', 'markdown-table-wrap']);
+
+function safeAssistantMarkdownURL(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw || /[\u0000-\u001F\u007F]/.test(raw)) return '';
+  try {
+    const url = new URL(raw);
+    return ['http:', 'https:', 'mailto:'].includes(url.protocol) ? url.href : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function renderAssistantMarkdownText(value) {
+  return escapeHtml(value)
+    .replace(/\*\*([^*\r\n]{1,4096})\*\*/g, '<strong>$1</strong>')
+    .replace(/(?<!\*)\*([^*\r\n]{1,4096})\*(?!\*)/g, '<em>$1</em>');
+}
+
+function renderAssistantMarkdownInline(value) {
+  const source = String(value ?? '');
+  const tokenPattern = /`([^`\r\n]{1,4096})`|\[([^\]\r\n]{1,4096})\]\(([^()\s]{1,2048})\)/g;
+  let output = '';
+  let cursor = 0;
+  source.replace(tokenPattern, (match, code, label, href, offset) => {
+    output += renderAssistantMarkdownText(source.slice(cursor, offset));
+    if (code !== undefined) {
+      output += `<code>${escapeHtml(code)}</code>`;
+    } else {
+      const safeHref = safeAssistantMarkdownURL(href);
+      output += safeHref
+        ? `<a class="assistant-markdown-link" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${renderAssistantMarkdownText(label)}</a>`
+        : renderAssistantMarkdownText(match);
+    }
+    cursor = offset + match.length;
+    return match;
+  });
+  return output + renderAssistantMarkdownText(source.slice(cursor));
+}
+
+function sanitizeAssistantMarkdownHTML(html) {
+  const template = document.createElement('template');
+  template.innerHTML = String(html ?? '');
+  const elements = [];
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_ELEMENT);
+  while (walker.nextNode()) elements.push(walker.currentNode);
+  elements.forEach((element) => {
+    if (!assistantMarkdownTags.has(element.tagName)) {
+      element.replaceWith(document.createTextNode(element.textContent || ''));
+      return;
+    }
+    Array.from(element.attributes).forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      const classNames = attribute.value.split(/\s+/).filter(Boolean);
+      const allowedClass = name === 'class' && classNames.length && classNames.every((className) => assistantMarkdownClasses.has(className));
+      const allowedLinkAttribute = element.tagName === 'A' && ['href', 'target', 'rel'].includes(name);
+      if (!allowedClass && !allowedLinkAttribute) element.removeAttribute(attribute.name);
+    });
+    if (element.tagName === 'A') {
+      const safeHref = safeAssistantMarkdownURL(element.getAttribute('href'));
+      if (!safeHref) {
+        element.replaceWith(...Array.from(element.childNodes));
+        return;
+      }
+      element.setAttribute('href', safeHref);
+      element.setAttribute('target', '_blank');
+      element.setAttribute('rel', 'noopener noreferrer');
+    }
+  });
+  return template.innerHTML;
+}
+
 function renderAssistantMarkdown(content) {
-  const lines = String(content ?? '').split(/\r?\n/);
-  const renderInline = (value) => escapeHtml(value)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  const source = String(content ?? '');
+  const truncated = source.length > assistantMarkdownMaxLength;
+  const lines = source.slice(0, assistantMarkdownMaxLength).split(/\r?\n/);
   const tableCells = (line) => String(line).trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim());
   const isTableSeparator = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
   const rendered = [];
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (line.includes('|') && isTableSeparator(lines[index + 1] || '')) {
-      const headers = tableCells(line);
-      const rows = [];
-      index += 2;
-      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
-        const cells = tableCells(lines[index]);
-        if (cells.length !== headers.length) break;
-        rows.push(cells);
+    if (/^```/.test(line)) {
+      const code = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test(lines[index])) {
+        code.push(lines[index]);
         index += 1;
       }
-      index -= 1;
-      rendered.push(`<div class="markdown-table-wrap"><table class="markdown-table"><thead><tr>${headers.map((cell) => `<th>${renderInline(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map((cells) => `<tr>${cells.map((cell) => `<td>${renderInline(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+      rendered.push(`<pre class="markdown-code-block"><code>${escapeHtml(code.join('\n'))}</code></pre>`);
       continue;
     }
+    if (line.includes('|') && isTableSeparator(lines[index + 1] || '')) {
+      const headers = tableCells(line);
+      if (headers.length <= assistantMarkdownMaxTableColumns) {
+        const rows = [];
+        index += 2;
+        while (index < lines.length && rows.length < assistantMarkdownMaxTableRows && lines[index].includes('|') && lines[index].trim()) {
+          const cells = tableCells(lines[index]);
+          if (cells.length !== headers.length) break;
+          rows.push(cells);
+          index += 1;
+        }
+        index -= 1;
+        rendered.push(`<div class="markdown-table-wrap"><table class="markdown-table"><thead><tr>${headers.map((cell) => `<th>${renderAssistantMarkdownInline(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map((cells) => `<tr>${cells.map((cell) => `<td>${renderAssistantMarkdownInline(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+        continue;
+      }
+    }
 
-    const escaped = renderInline(line);
-    if (!escaped.trim()) {
+    if (!line.trim()) {
       rendered.push('<div class="markdown-spacer"></div>');
       continue;
     }
-    if (/^###\s+/.test(escaped)) { rendered.push(`<h4>${escaped.slice(4)}</h4>`); continue; }
-    if (/^##\s+/.test(escaped)) { rendered.push(`<h3>${escaped.slice(3)}</h3>`); continue; }
-    if (/^#\s+/.test(escaped)) { rendered.push(`<h2>${escaped.slice(2)}</h2>`); continue; }
-    if (/^[-*]\s+/.test(escaped)) { rendered.push(`<div class="markdown-list-item"><span>•</span><span class="markdown-list-copy">${escaped.slice(2)}</span></div>`); continue; }
-    if (/^\d+\.\s+/.test(escaped)) { rendered.push(`<div class="markdown-list-item"><span>${escaped.match(/^\d+/)[0]}.</span><span class="markdown-list-copy">${escaped.replace(/^\d+\.\s+/, '')}</span></div>`); continue; }
-    rendered.push(`<div>${escaped}</div>`);
+    if (/^###\s+/.test(line)) { rendered.push(`<h4>${renderAssistantMarkdownInline(line.slice(4))}</h4>`); continue; }
+    if (/^##\s+/.test(line)) { rendered.push(`<h3>${renderAssistantMarkdownInline(line.slice(3))}</h3>`); continue; }
+    if (/^#\s+/.test(line)) { rendered.push(`<h2>${renderAssistantMarkdownInline(line.slice(2))}</h2>`); continue; }
+    if (/^[-*]\s+/.test(line)) { rendered.push(`<div class="markdown-list-item"><span>•</span><span class="markdown-list-copy">${renderAssistantMarkdownInline(line.slice(2))}</span></div>`); continue; }
+    const ordered = line.match(/^(\d+)\.\s+(.*)$/);
+    if (ordered) { rendered.push(`<div class="markdown-list-item"><span>${escapeHtml(ordered[1])}.</span><span class="markdown-list-copy">${renderAssistantMarkdownInline(ordered[2])}</span></div>`); continue; }
+    rendered.push(`<div>${renderAssistantMarkdownInline(line)}</div>`);
   }
-  return rendered.join('');
+  if (truncated) rendered.push('<div class="markdown-spacer"></div><div>内容过长，已截断显示。</div>');
+  return sanitizeAssistantMarkdownHTML(rendered.join(''));
 }
 
 function addAssistantContext(log) {
   if (!log) return;
+  if (!activeAssistantSession()) startAssistantSession();
   if (state.assistantContext.some((item) => item.id === log.id)) {
     showToast('这条日志已在 AI 上下文中');
     return;
   }
   state.assistantContext = [log, ...state.assistantContext].slice(0, 20);
+  syncActiveAssistantSession();
   renderAssistant();
   showToast('日志已加入 AI 分析上下文');
 }
@@ -522,6 +698,7 @@ function removeAssistantContext(id) {
     state.assistantContext = [];
     renderLogs();
   }
+  syncActiveAssistantSession();
   renderAssistant();
 }
 
@@ -532,10 +709,7 @@ function clearAssistantContext() {
     assistantRequestController = null;
   }
   state.assistantBusy = false;
-  state.assistantContext = [];
-  state.assistantMessages = [];
-  state.assistantAttachments = [];
-  state.activeAnalysisLogId = '';
+  startAssistantSession();
   renderLogs();
   renderAssistant();
   showToast('已开始新聊天');
@@ -554,9 +728,7 @@ function beginLogAnalysis(log) {
   assistantRequestController = null;
   assistantRequestId += 1;
   state.assistantBusy = false;
-  state.activeAnalysisLogId = String(log.id);
-  state.assistantContext = orderedLogs.slice(contextStart, contextEnd);
-  state.assistantMessages = [];
+  startAssistantSession({ context: orderedLogs.slice(contextStart, contextEnd), activeLogId: String(log.id), title: `${String(log.level || '日志').toUpperCase()} · ${String(log.container || log.node || '日志分析')}` });
   $('#assistant-dock').classList.add('open');
   $('#assistant-input').value = `请重点分析选中的这条日志有什么问题。请结合前后各 3 条日志，说明异常现象、可能原因和建议的排查步骤。\n\n选中日志：${log.time} · ${String(log.level || '').toUpperCase()} · ${log.node} / ${log.container}`;
   renderAssistant();
@@ -751,6 +923,7 @@ async function sendAssistantMessage(event) {
   const attachments = state.assistantAttachments.slice();
   if (!typedContent && !attachments.length) return;
   const content = typedContent || `请分析已附加的文件：${attachments.map((attachment) => attachment.name).join('、')}`;
+  if (!activeAssistantSession()) startAssistantSession();
   const profile = activeAIProfile();
   const model = activeAIModel();
   const requestId = ++assistantRequestId;
@@ -761,6 +934,7 @@ async function sendAssistantMessage(event) {
   input.value = '';
   state.assistantAttachments = [];
   state.assistantBusy = true;
+  syncActiveAssistantSession();
   renderAssistant();
   try {
     const response = await fetch('/api/ai/chat', {
@@ -787,6 +961,7 @@ async function sendAssistantMessage(event) {
     if (requestId !== assistantRequestId) return;
     assistantRequestController = null;
     state.assistantBusy = false;
+    syncActiveAssistantSession();
     renderAssistant();
   }
 }
@@ -1291,13 +1466,24 @@ function updateStorage(storage) {
   const used = Number(storage?.used);
   const capacity = Number(storage?.capacity);
   const percent = Number(storage?.percent);
+  const evicted = Math.max(0, Number(storage?.evicted) || 0);
+  const lastEvictedAt = Number(storage?.lastEvictedAt);
   if (!Number.isFinite(used) || !Number.isFinite(capacity) || capacity <= 0) {
     $('#metric-storage').textContent = '—';
     $('#metric-storage-foot').textContent = '等待数据';
+    $('#metric-storage-policy').textContent = '满额后自动淘汰最早日志';
     return;
   }
   $('#metric-storage').innerHTML = `${Math.max(0, Math.min(100, percent))}<span class="unit">%</span>`;
-  $('#metric-storage-foot').textContent = `日志缓存 ${used.toLocaleString('en-US')} / ${capacity.toLocaleString('en-US')} 条`;
+  $('#metric-storage-foot').textContent = `当前 ${used.toLocaleString('en-US')} / ${capacity.toLocaleString('en-US')} 条`;
+  if (!evicted) {
+    $('#metric-storage-policy').textContent = '尚未发生淘汰；满额后新增一条，淘汰最早一条';
+    return;
+  }
+  const lastEvicted = Number.isFinite(lastEvictedAt) && lastEvictedAt > 0
+    ? new Date(lastEvictedAt).toLocaleTimeString('zh-CN', { hour12: false })
+    : '时间未知';
+  $('#metric-storage-policy').textContent = `累计淘汰 ${evicted.toLocaleString('en-US')} 条 · 最近 ${lastEvicted}`;
 }
 
 function syncRuleButtons() {
@@ -1461,7 +1647,7 @@ function renderNodes() {
     ? `${activeContainers} 个运行中容器`
     : '当前没有运行中的容器';
   $('#metric-processed-foot').textContent = state.processed
-    ? `${rangeLabels[state.range] || '当前范围'}累计接收`
+    ? '服务启动后累计接收，不等于缓存条数'
     : '等待日志流';
   $('#node-list').innerHTML = nodes.length ? nodes.map((node) => {
     const containers = node.containers || [];
@@ -1811,7 +1997,7 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
     updateSyncFooter(syncLabel, 'connected');
     $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
     $('#metric-processed-foot').textContent = state.processed
-      ? `${rangeLabels[state.range] || '当前范围'}累计接收`
+      ? '服务启动后累计接收，不等于缓存条数'
       : '等待日志流';
     renderNodes();
     if (!incremental || incomingLogs.length || previousRange !== state.range || previousHistoryLoading !== state.historyLoading) {
@@ -1864,7 +2050,7 @@ function connectGoStream() {
     });
     state.processed += 1;
     $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
-    $('#metric-processed-foot').textContent = `${rangeLabels[state.range] || '当前范围'}累计接收`;
+    $('#metric-processed-foot').textContent = '服务启动后累计接收，不等于缓存条数';
     updateSyncFooter('实时同步中', 'connected');
     updateLastSync(incoming.timestamp);
     scheduleLogRender();
@@ -2083,79 +2269,7 @@ function bindEvents() {
     showToast(state.paused ? '日志接收已暂停' : '日志接收已恢复');
   });
   $('#clear-button').addEventListener('click', () => { state.query = ''; $('#log-search').value = ''; resetLogPagination(); renderLogs(); showToast('已清空当前过滤条件'); });
-  $('#assistant-model-trigger').addEventListener('click', (event) => {
-    event.stopPropagation();
-    const menu = $('#assistant-model-menu');
-    const isOpen = !menu.classList.contains('hidden');
-    closeAIModelMenu();
-    if (!isOpen) {
-      menu.classList.remove('hidden');
-      $('#assistant-model-trigger').setAttribute('aria-expanded', 'true');
-    }
-  });
-  $('#assistant-manage-models').addEventListener('click', () => { closeAIModelMenu(); openAISettings(); });
-  $('#assistant-clear-context').addEventListener('click', clearAssistantContext);
-  $('#assistant-context-list').addEventListener('click', (event) => {
-    const button = event.target.closest('[data-remove-assistant-log]');
-    if (button) removeAssistantContext(button.dataset.removeAssistantLog);
-  });
-  $('#assistant-attach-button').addEventListener('click', () => $('#assistant-file-input').click());
-  $('#assistant-file-input').addEventListener('change', (event) => {
-    void addAssistantAttachments(event.target.files);
-    event.target.value = '';
-  });
-  $('#assistant-attachment-list').addEventListener('click', (event) => {
-    const previewButton = event.target.closest('[data-preview-assistant-attachment]');
-    if (previewButton) {
-      event.stopPropagation();
-      openAssistantAttachmentPreview(Number(previewButton.dataset.previewAssistantAttachment));
-      return;
-    }
-    const button = event.target.closest('[data-remove-assistant-attachment]');
-    if (!button) return;
-    // renderAssistant removes the clicked button from the DOM. Stop this click
-    // before the global outside-click listener can mistake it for a dock exit.
-    event.stopPropagation();
-    state.assistantAttachments.splice(Number(button.dataset.removeAssistantAttachment), 1);
-    renderAssistant();
-  });
-  $('#assistant-attachment-preview-close').addEventListener('click', (event) => {
-    event.stopPropagation();
-    closeAssistantAttachmentPreview();
-  });
-  $('#assistant-attachment-preview-modal').addEventListener('click', (event) => {
-    if (event.target === event.currentTarget) closeAssistantAttachmentPreview();
-  });
-  $('#assistant-panel').addEventListener('wheel', (event) => {
-    const scroller = event.target.closest('.assistant-context-list, .assistant-messages');
-    if (!scroller) {
-      // Headings, controls, and the composer do not scroll. Keep their wheel
-      // gestures inside the assistant instead of moving the page underneath.
-      event.preventDefault();
-      return;
-    }
-    const atTop = scroller.scrollTop <= 0;
-    const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
-    if ((event.deltaY < 0 && atTop) || (event.deltaY > 0 && atBottom)) event.preventDefault();
-  }, { passive: false });
-  $('#assistant-form').addEventListener('submit', sendAssistantMessage);
-  $('#assistant-input').addEventListener('paste', (event) => {
-    const pastedImages = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/'));
-    if (!pastedImages.length) return;
-    event.preventDefault();
-    void addAssistantAttachments(pastedImages);
-  });
-  $('#assistant-input').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      $('#assistant-form').requestSubmit();
-    }
-  });
-  $('#assistant-launcher').addEventListener('click', () => {
-    const dock = $('#assistant-dock');
-    dock.classList.toggle('open');
-    if (dock.classList.contains('open')) $('#assistant-input').focus();
-  });
+  bindAssistantEvents();
   $('#settings-button').addEventListener('click', openAppSettings);
   $('#app-settings-form').addEventListener('submit', saveAppSettings);
   $('#settings-db-test').addEventListener('click', testDatabaseSettings);
@@ -2199,6 +2313,7 @@ function bindEvents() {
   document.addEventListener('click', (event) => {
     if (!event.target.closest('#pipeline-actions')) closePipelineMenu();
     if (!event.target.closest('#assistant-model-picker')) closeAIModelMenu();
+    if (!event.target.closest('#assistant-session-menu') && !event.target.closest('#assistant-session-toggle')) closeAssistantSessionMenu();
     if (!event.target.closest('#assistant-dock') && !event.target.closest('#assistant-attachment-preview-modal')) $('#assistant-dock').classList.remove('open');
   });
   $$('.toggle').forEach((button) => button.addEventListener('click', async () => {
@@ -2278,22 +2393,3 @@ function exportLogs() {
   const link = document.createElement('a'); link.href = url; link.download = `dozzle-logs-${new Date().toISOString().slice(0, 10)}.csv`; link.click(); URL.revokeObjectURL(url);
   showToast(`已导出 ${rows.length} 条日志`);
 }
-
-initializeTheme();
-restoreSelection();
-loadAIProfiles();
-initializeCustomSelects();
-renderNodes();
-renderLogs();
-updateDetailPanel();
-updatePreview();
-renderAssistant();
-bindEvents();
-syncAIStatus();
-loadAIProfilesFromDatabase();
-syncGoBackend({ connectStream: true }).then((connected) => {
-  if (connected) {
-    backendRefreshTimer = setInterval(() => syncGoBackend({ incremental: true }), 3000);
-    if (state.historyLoading) scheduleHistorySync();
-  }
-});

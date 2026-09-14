@@ -5,6 +5,9 @@
 # Build artifacts
 log-agent.exe
 log-agent-linux-amd64
+dozzle-ops*.exe
+dist/
+.gocache/
 *.test
 
 # Local configuration and secrets

@@ -30,7 +30,7 @@ import (
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
 //
-//go:embed index.html styles.css app.js favicon.png ai-icon.png
+//go:embed index.html styles.css app.js assistant-ui.js bootstrap.js favicon.png ai-icon.png
 var frontend embed.FS
 
 const (
@@ -174,6 +174,8 @@ type server struct {
 	logs                  []LogEntry
 	processed             int
 	nextLogID             int64
+	evictedLogs           int64
+	lastEvictedAt         int64
 	historyRange          string
 	historyNodeScope      string
 	historyGeneration     uint64
@@ -240,14 +242,21 @@ type containerLogsResponse struct {
 }
 
 type storageStats struct {
-	Used     int `json:"used"`
-	Capacity int `json:"capacity"`
-	Percent  int `json:"percent"`
+	Used          int   `json:"used"`
+	Capacity      int   `json:"capacity"`
+	Percent       int   `json:"percent"`
+	Evicted       int64 `json:"evicted"`
+	LastEvictedAt int64 `json:"lastEvictedAt"`
 }
 
 func main() {
 	s := newServer()
+	address := ":8099"
+	log.Printf("Log Agent is running at http://localhost%s", address)
+	log.Fatal(http.ListenAndServe(address, newHTTPHandler(s)))
+}
 
+func newHTTPHandler(s *server) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("/api/health", s.handleHealth)
@@ -271,10 +280,7 @@ func main() {
 		log.Fatal(err)
 	}
 	mux.Handle("/", http.FileServer(http.FS(static)))
-
-	address := ":8099"
-	log.Printf("Log Agent is running at http://localhost%s", address)
-	log.Fatal(http.ListenAndServe(address, withSecurityHeaders(mux)))
+	return withSecurityHeaders(mux)
 }
 
 func newServer() *server {
@@ -632,7 +638,10 @@ func (s *server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	storage := storageStats{Used: len(s.logs), Capacity: maxStoredLogs}
+	storage := storageStats{
+		Used: len(s.logs), Capacity: maxStoredLogs,
+		Evicted: s.evictedLogs, LastEvictedAt: s.lastEvictedAt,
+	}
 	if storage.Capacity > 0 {
 		storage.Percent = (storage.Used*100 + storage.Capacity - 1) / storage.Capacity
 		if storage.Percent > 100 {
@@ -2846,9 +2855,14 @@ func (s *server) appendRemoteLogLocked(nodeID string, event dozzleLogEvent, mess
 		nodeID:    nodeID,
 		remoteID:  event.ID,
 	}
-	s.logs = insertNewestLog(s.logs, entry, maxStoredLogs)
+	var evictedExisting bool
+	s.logs, evictedExisting = insertNewestLog(s.logs, entry, maxStoredLogs)
+	if evictedExisting {
+		s.evictedLogs++
+		s.lastEvictedAt = time.Now().UnixMilli()
+	}
 	key := containerLogKey(nodeID, containerID)
-	s.containerLogs[key] = insertNewestLog(s.containerLogs[key], entry, maxContainerLogs)
+	s.containerLogs[key], _ = insertNewestLog(s.containerLogs[key], entry, maxContainerLogs)
 	s.processed++
 	if broadcast {
 		for subscriber := range s.subscribers {
@@ -2873,7 +2887,7 @@ func (s *server) hasDuplicateLogLocked(nodeID, containerID string, event dozzleL
 	return false
 }
 
-func insertNewestLog(logs []LogEntry, entry LogEntry, limit int) []LogEntry {
+func insertNewestLog(logs []LogEntry, entry LogEntry, limit int) ([]LogEntry, bool) {
 	index := sort.Search(len(logs), func(index int) bool {
 		return logs[index].Timestamp <= entry.Timestamp
 	})
@@ -2881,9 +2895,11 @@ func insertNewestLog(logs []LogEntry, entry LogEntry, limit int) []LogEntry {
 	copy(logs[index+1:], logs[index:])
 	logs[index] = entry
 	if len(logs) > limit {
+		dropped := logs[limit]
 		logs = logs[:limit]
+		return logs, dropped.ID != entry.ID
 	}
-	return logs
+	return logs, false
 }
 
 func normalizeLogLevel(level string) string {
