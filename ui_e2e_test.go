@@ -13,13 +13,14 @@ import (
 )
 
 type assistantMarkdownSafety struct {
-	HasCodeBlock bool `json:"hasCodeBlock"`
-	HasRawImage  bool `json:"hasRawImage"`
-	HasScriptTag bool `json:"hasScriptTag"`
-	HasTable     bool `json:"hasTable"`
-	SafeLink     bool `json:"safeLink"`
-	UnsafeLink   bool `json:"unsafeLink"`
-	XSSExecuted  bool `json:"xssExecuted"`
+	HasCodeBlock   bool `json:"hasCodeBlock"`
+	HasRawImage    bool `json:"hasRawImage"`
+	HasScriptTag   bool `json:"hasScriptTag"`
+	HasTable       bool `json:"hasTable"`
+	SafeLink       bool `json:"safeLink"`
+	UnsafeLink     bool `json:"unsafeLink"`
+	XSSExecuted    bool `json:"xssExecuted"`
+	SameBackground bool `json:"sameBackground"`
 }
 
 func TestE2EAssistantInteractions(t *testing.T) {
@@ -183,12 +184,13 @@ func TestE2EAssistantInteractions(t *testing.T) {
 				safeLink: safeLink?.getAttribute('href') === 'https://example.com/docs',
 				unsafeLink: Array.from(message.querySelectorAll('a')).some((link) => /^javascript:/i.test(link.getAttribute('href') || '')),
 				xssExecuted: window.__assistantMarkdownExecuted === true,
+				sameBackground: getComputedStyle(message).backgroundColor === getComputedStyle(document.querySelector('#assistant-messages')).backgroundColor,
 			};
 		})()`, &markdownSafety),
 	); err != nil {
 		t.Fatalf("verify markdown rendering safety: %v", err)
 	}
-	if !markdownSafety.HasCodeBlock || !markdownSafety.HasTable || !markdownSafety.SafeLink || markdownSafety.HasRawImage || markdownSafety.HasScriptTag || markdownSafety.UnsafeLink || markdownSafety.XSSExecuted {
+	if !markdownSafety.HasCodeBlock || !markdownSafety.HasTable || !markdownSafety.SafeLink || !markdownSafety.SameBackground || markdownSafety.HasRawImage || markdownSafety.HasScriptTag || markdownSafety.UnsafeLink || markdownSafety.XSSExecuted {
 		t.Fatalf("unsafe markdown rendering state: %+v", markdownSafety)
 	}
 }
