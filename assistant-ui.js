@@ -60,9 +60,7 @@ function bindAssistantEvents() {
     event.stopPropagation();
     closeAssistantAttachmentPreview();
   });
-  $('#assistant-attachment-preview-modal').addEventListener('click', (event) => {
-    if (event.target === event.currentTarget) closeAssistantAttachmentPreview();
-  });
+  bindBackdropDismissal($('#assistant-attachment-preview-modal'), closeAssistantAttachmentPreview);
   $('#assistant-panel').addEventListener('wheel', (event) => {
     const scroller = event.target.closest('.assistant-context-list, .assistant-messages');
     if (!scroller) {

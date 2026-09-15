@@ -6,12 +6,63 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image/gif"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestEmbeddedLoadingAnimationKeepsFullLoop(t *testing.T) {
+	data, err := frontend.ReadFile("loading.gif")
+	if err != nil {
+		t.Fatalf("read embedded loading animation: %v", err)
+	}
+	animation, err := gif.DecodeAll(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("decode embedded loading animation: %v", err)
+	}
+	if len(animation.Image) != 41 {
+		t.Fatalf("expected the complete 41-frame loading loop, got %d frames", len(animation.Image))
+	}
+	totalDelay := 0
+	for _, delay := range animation.Delay {
+		totalDelay += delay
+	}
+	if totalDelay < 400 {
+		t.Fatalf("loading loop was truncated: duration=%dms", totalDelay*10)
+	}
+}
+
+func TestNewServerFallsBackWhenDatabaseIsUnavailable(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "log-agent-settings.json")
+	settings := `{
+  "environment": "test",
+  "database": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": "1",
+    "user": "unavailable",
+    "password": "unavailable",
+    "name": "log_agent"
+  }
+}`
+	if err := os.WriteFile(settingsPath, []byte(settings), 0600); err != nil {
+		t.Fatalf("write unavailable database settings: %v", err)
+	}
+	t.Setenv("LOG_AGENT_SETTINGS_FILE", settingsPath)
+
+	s := newServer()
+	if s.db != nil {
+		t.Fatal("expected unavailable database to fall back to memory-only storage")
+	}
+	if s.settings.Database.Host != "127.0.0.1" || !s.settings.Database.Enabled {
+		t.Fatalf("database settings were not retained after fallback: %+v", s.settings.Database)
+	}
+}
 
 func TestRuleOrderUpdateValidatesAndReturnsNewOrder(t *testing.T) {
 	s := &server{rules: map[string]bool{"mask": true, "structure": true, "noise": false}, ruleOrder: defaultRuleOrder()}

@@ -37,6 +37,32 @@ type logStreamBurstView struct {
 	NewestID     int `json:"newestId"`
 }
 
+type modalDragDismissalView struct {
+	RemainedOpenAfterDrag bool `json:"remainedOpenAfterDrag"`
+	ClosedAfterBackdrop   bool `json:"closedAfterBackdrop"`
+}
+
+type logOrderView struct {
+	FirstID             int    `json:"firstId"`
+	LastID              int    `json:"lastId"`
+	AtBottom            bool   `json:"atBottom"`
+	FlowVisibleAtBottom bool   `json:"flowVisibleAtBottom"`
+	FollowDisabled      bool   `json:"followDisabled"`
+	FlowHiddenAbove     bool   `json:"flowHiddenAbove"`
+	ContainerOrigin     string `json:"containerOrigin"`
+	DateTop             string `json:"dateTop"`
+	MetaBorderStyle     string `json:"metaBorderStyle"`
+	MetaWidth           string `json:"metaWidth"`
+	MetaBackground      string `json:"metaBackground"`
+	EvenRowBackground   string `json:"evenRowBackground"`
+	OddRowBackground    string `json:"oddRowBackground"`
+}
+
+type logFlowView struct {
+	AnimationName     string `json:"animationName"`
+	AnimationDuration string `json:"animationDuration"`
+}
+
 func TestE2ELogStreamPauseFreezesAndResumes(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
@@ -94,6 +120,16 @@ func TestE2ELogStreamPauseFreezesAndResumes(t *testing.T) {
 		chromedp.WaitVisible(`[data-log-id="1"]`, chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("load initial log stream: %v", err)
+	}
+	var flowView logFlowView
+	if err := chromedp.Run(browserContext, chromedp.Evaluate(`(() => {
+		const style = getComputedStyle(document.querySelector('.logs-panel .stream-footer'), '::after');
+		return { animationName: style.animationName, animationDuration: style.animationDuration };
+	})()`, &flowView)); err != nil {
+		t.Fatalf("read log flow animation: %v", err)
+	}
+	if flowView.AnimationName != "log-stream-flow" || flowView.AnimationDuration == "0s" {
+		t.Fatalf("log flow animation is disabled: %+v", flowView)
 	}
 	waitForSubscriberCount(t, s, 1)
 
@@ -177,6 +213,82 @@ func TestE2ELogStreamPauseFreezesAndResumes(t *testing.T) {
 		t.Fatalf("dashboard did not remain interactive after burst, status=%q", pausedStatus)
 	}
 	waitForSubscriberCount(t, s, 0)
+
+	var modalView modalDragDismissalView
+	if err := chromedp.Run(browserContext, chromedp.Evaluate(`(() => {
+		const modal = document.querySelector('#app-settings-modal');
+		const card = modal.querySelector('.modal-card');
+		modal.classList.remove('hidden');
+		card.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }));
+		modal.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }));
+		modal.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		const remainedOpenAfterDrag = !modal.classList.contains('hidden');
+		modal.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 2 }));
+		modal.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 2 }));
+		modal.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		return {
+			remainedOpenAfterDrag,
+			closedAfterBackdrop: modal.classList.contains('hidden'),
+		};
+	})()`, &modalView)); err != nil {
+		t.Fatalf("exercise modal backdrop dismissal: %v", err)
+	}
+	if !modalView.RemainedOpenAfterDrag || !modalView.ClosedAfterBackdrop {
+		t.Fatalf("unexpected modal backdrop dismissal behavior: %+v", modalView)
+	}
+
+	var orderView logOrderView
+	if err := chromedp.Run(browserContext, chromedp.Evaluate(`(() => {
+		const now = Date.now();
+		state.logs = Array.from({ length: 100 }, (_, index) => {
+			const id = 100 - index;
+			return {
+				id,
+				date: '2026/09/14',
+				time: '12:00:00',
+				timestamp: now + id,
+				level: 'info',
+				node: 'E2E Node',
+				container: 'api',
+				message: 'ordered log',
+			};
+		});
+		state.query = '';
+		state.globalQuery = '';
+		state.selectedNodes = [];
+		state.selectedContainers = [];
+		state.level = 'all';
+		state.historyLoading = false;
+		followLatestLogs = true;
+		renderLogs();
+		const stream = document.querySelector('#log-stream');
+		const footer = document.querySelector('.logs-panel .stream-footer');
+		const ids = Array.from(stream.querySelectorAll('.log-row')).map((row) => Number(row.dataset.logId));
+		const atBottom = isLogStreamNearBottom(stream);
+		const flowVisibleAtBottom = footer.classList.contains('is-at-latest');
+		stream.scrollTop = 0;
+		stream.dispatchEvent(new Event('scroll'));
+		return {
+			firstId: ids[0],
+			lastId: ids[ids.length - 1],
+			atBottom,
+			flowVisibleAtBottom,
+			followDisabled: followLatestLogs === false,
+			flowHiddenAbove: !footer.classList.contains('is-at-latest'),
+			containerOrigin: stream.querySelector('.log-container-origin')?.textContent || '',
+			dateTop: getComputedStyle(stream.querySelector('.log-meta')).top,
+			metaBorderStyle: getComputedStyle(stream.querySelector('.log-meta')).borderTopStyle,
+			metaWidth: getComputedStyle(stream.querySelector('.log-meta')).width,
+			metaBackground: getComputedStyle(stream.querySelector('.log-meta')).backgroundColor,
+			evenRowBackground: getComputedStyle(stream.querySelector('.log-row-tone-even')).backgroundColor,
+			oddRowBackground: getComputedStyle(stream.querySelector('.log-row-tone-odd')).backgroundColor,
+		};
+	})()`, &orderView)); err != nil {
+		t.Fatalf("verify chronological log ordering: %v", err)
+	}
+	if orderView.FirstID != 1 || orderView.LastID != 100 || !orderView.AtBottom || !orderView.FlowVisibleAtBottom || !orderView.FollowDisabled || !orderView.FlowHiddenAbove || orderView.ContainerOrigin != "E2E Node/api" || orderView.DateTop != "2px" || orderView.MetaBorderStyle != "solid" || orderView.MetaWidth != "130px" || orderView.MetaBackground != "rgb(255, 255, 255)" || orderView.EvenRowBackground != "rgb(245, 245, 245)" || orderView.OddRowBackground != "rgb(239, 239, 240)" {
+		t.Fatalf("unexpected chronological log stream behavior: %+v", orderView)
+	}
 }
 
 func readLogStreamPauseView(t *testing.T, browserContext context.Context) logStreamPauseView {

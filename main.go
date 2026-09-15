@@ -30,7 +30,7 @@ import (
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
 //
-//go:embed index.html styles.css app.js assistant-ui.js bootstrap.js favicon.png ai-icon.png
+//go:embed index.html styles.css app.js assistant-ui.js bootstrap.js favicon.png ai-icon.png loading.gif
 var frontend embed.FS
 
 const (
@@ -310,7 +310,8 @@ func newServer() *server {
 	}
 	db, err := openNodeDatabase(settings)
 	if err != nil {
-		log.Fatalf("open node database: %v", err)
+		log.Printf("open node database failed: %v; using memory-only node storage", err)
+		return s
 	}
 	s.db = db
 	if err := s.loadNodes(); err != nil {

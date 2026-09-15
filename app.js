@@ -71,9 +71,31 @@ let pendingStreamLogs = [];
 let lastFilteredLogs = [];
 let lastVirtualWindowKey = '';
 let logTextSelectionActive = false;
+let followLatestLogs = true;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+function bindBackdropDismissal(modal, close) {
+  let startedOnBackdrop = false;
+  let endedOnBackdrop = false;
+  modal.addEventListener('pointerdown', (event) => {
+    startedOnBackdrop = event.target === modal;
+    endedOnBackdrop = false;
+  });
+  modal.addEventListener('pointerup', (event) => {
+    endedOnBackdrop = event.target === modal;
+  });
+  modal.addEventListener('pointercancel', () => {
+    startedOnBackdrop = false;
+    endedOnBackdrop = false;
+  });
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal && startedOnBackdrop && endedOnBackdrop) close();
+    startedOnBackdrop = false;
+    endedOnBackdrop = false;
+  });
+}
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
@@ -451,7 +473,7 @@ function renderAssistant() {
   if (state.assistantBusy) {
     const loading = document.createElement('div');
     loading.className = 'assistant-message assistant assistant-loading';
-    loading.innerHTML = '<span class="assistant-loading-spinner" aria-hidden="true"></span><span>正在分析日志…</span>';
+    loading.innerHTML = '<img class="loading-animation" src="loading.gif" alt="" aria-hidden="true" /><span>正在分析日志…</span>';
     messages.appendChild(loading);
     $('#assistant-status').textContent = '正在分析中…';
   } else if (currentAIConfigured()) {
@@ -1820,7 +1842,7 @@ function filteredLogs() {
     const queryMatch = !query || normalizeSearchText(`${log.node} ${log.container} ${log.message}`).includes(query);
     const noiseMatch = state.ruleState.noise ? !log.message.includes('/healthz') : true;
     return isLogInSelectedRange(log, now) && nodeMatch && containerMatch && levelMatch && queryMatch && noiseMatch;
-  });
+  }).reverse();
 }
 
 function resetLogPagination() {
@@ -1829,8 +1851,7 @@ function resetLogPagination() {
   initialLogPreviewActive = false;
   initialLogPreviewLimit = 0;
   lastVirtualWindowKey = '';
-  const stream = $('#log-stream');
-  if (stream) stream.scrollTop = 0;
+  followLatestLogs = true;
 }
 
 function scheduleInitialLogCompletion() {
@@ -1844,7 +1865,7 @@ function scheduleInitialLogCompletion() {
   }, 80);
 }
 
-function logVirtualWindow(total, stream) {
+function logVirtualWindow(total, stream, stickToBottom = false) {
   if (!total) return { start: 0, end: 0 };
   // Adaptive row heights cannot use fixed spacer math; render normal-sized
   // result sets completely so every multi-line message can determine its row height.
@@ -1852,6 +1873,7 @@ function logVirtualWindow(total, stream) {
   if (total <= adaptiveLogRenderLimit) return { start: 0, end: total };
   const viewportRows = Math.max(12, Math.ceil(stream.clientHeight / logVirtualRowHeight));
   const windowSize = viewportRows + logVirtualOverscan * 2;
+  if (stickToBottom) return { start: Math.max(0, total - windowSize), end: total };
   const anchor = Math.floor(stream.scrollTop / logVirtualRowHeight);
   const start = Math.max(0, Math.min(Math.max(0, total - 1), anchor - logVirtualOverscan));
   return { start, end: Math.min(total, start + windowSize) };
@@ -1873,11 +1895,25 @@ function hasLogTextSelection() {
 }
 
 function scheduleLogWindowRender() {
+  const stream = $('#log-stream');
+  followLatestLogs = isLogStreamNearBottom(stream);
+  syncLogFlowVisibility(stream);
   if (logScrollFrame) return;
   logScrollFrame = requestAnimationFrame(() => {
     logScrollFrame = null;
     renderLogs({ reuseFiltered: true, preserveScroll: true });
   });
+}
+
+function isLogStreamNearBottom(stream) {
+  return stream.scrollHeight - stream.scrollTop - stream.clientHeight < 24;
+}
+
+function syncLogFlowVisibility(stream) {
+  const footer = $('.logs-panel .stream-footer');
+  if (!footer) return;
+  const distanceFromBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight;
+  footer.classList.toggle('is-at-latest', distanceFromBottom <= 2);
 }
 
 function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit = 0 } = {}) {
@@ -1887,10 +1923,11 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   // Keep it intact while the user is dragging or copying a log excerpt.
   if (hasLogTextSelection()) return;
   const scrollTop = stream.scrollTop;
+  const stickToBottom = followLatestLogs;
   const allResults = reuseFiltered ? lastFilteredLogs : filteredLogs();
   if (!reuseFiltered) lastFilteredLogs = allResults;
-  const stagedResults = renderLimit > 0 ? allResults.slice(0, renderLimit) : allResults;
-  const { start, end } = logVirtualWindow(stagedResults.length, stream);
+  const stagedResults = renderLimit > 0 ? allResults.slice(-renderLimit) : allResults;
+  const { start, end } = logVirtualWindow(stagedResults.length, stream, stickToBottom);
   const results = stagedResults.slice(start, end);
   const loadedLabel = state.historyLoading
     ? `历史日志加载中 · 已发现 ${allResults.length} 条`
@@ -1911,6 +1948,7 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   const windowKey = `${allResults.length}:${stagedResults.length}:${start}:${end}:${firstId}:${lastId}:${state.selectedLog}:${state.activeAnalysisLogId}`;
   if (reuseFiltered && windowKey === lastVirtualWindowKey) {
     if (preserveScroll && stream.scrollTop !== scrollTop) stream.scrollTop = scrollTop;
+    syncLogFlowVisibility(stream);
     return;
   }
   lastVirtualWindowKey = windowKey;
@@ -1918,8 +1956,11 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   const bottomSpacer = end < stagedResults.length ? `<div class="log-virtual-spacer" style="height:${(stagedResults.length - end) * logVirtualRowHeight}px" aria-hidden="true"></div>` : '';
   stream.innerHTML = `${topSpacer}${results.map((log, index) => `
     <div class="log-row log-row-${escapeHtml(log.level || 'info')} log-row-tone-${(start + index) % 2 ? 'odd' : 'even'} ${log.id === state.selectedLog ? 'selected' : ''}" data-log-id="${log.id}">
-      <span class="log-date">${highlightSearchText(logDate(log))}</span>
-      <span class="log-time">${highlightSearchText(logTime(log))}</span>
+      <span class="log-meta">
+        <span class="log-date">${highlightSearchText(logDate(log))}</span>
+        <span class="log-time">${highlightSearchText(logTime(log))}</span>
+        <span class="log-container-origin" title="${escapeHtml(`${log.node || '未知节点'}/${log.container || '未知容器'}`)}">${highlightSearchText(`${log.node || '未知节点'}/${log.container || '未知容器'}`)}</span>
+      </span>
       <span class="log-level ${log.level}">${highlightSearchText(log.level.toUpperCase())}</span>
       <span class="log-source"><span class="source-tag">${highlightSearchText(log.node)}</span><span class="container-tag">/${highlightSearchText(log.container)}</span></span>
       <span class="log-level-marker ${escapeHtml(log.level || 'info')}" aria-hidden="true"></span>
@@ -1928,7 +1969,9 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   `).join('')}${bottomSpacer}`;
   stream.append(emptyState);
   emptyState.classList.toggle('hidden', allResults.length > 0);
-  if (preserveScroll && stream.scrollTop !== scrollTop) stream.scrollTop = scrollTop;
+  if (stickToBottom) stream.scrollTop = stream.scrollHeight;
+  else if (preserveScroll && stream.scrollTop !== scrollTop) stream.scrollTop = scrollTop;
+  syncLogFlowVisibility(stream);
 }
 
 function updateDetailPanel() {
@@ -2416,16 +2459,16 @@ function bindEvents() {
     $('#app-settings-form').elements[name].addEventListener('change', () => rememberDatabaseDraft($('#app-settings-form')));
   });
   $$('[data-close-app-settings]').forEach((button) => button.addEventListener('click', closeAppSettings));
-  $('#app-settings-modal').addEventListener('click', (event) => { if (event.target.id === 'app-settings-modal') closeAppSettings(); });
+  bindBackdropDismissal($('#app-settings-modal'), closeAppSettings);
   $('#ai-profile-form').addEventListener('submit', saveAIProfile);
   $('#new-ai-profile')?.addEventListener('click', () => openAISettings());
   $('#delete-ai-profile').addEventListener('click', () => deleteAIProfile(state.settingsAIProfileId));
   $('#ai-add-model-button').addEventListener('click', addAIModel);
   $$('[data-close-ai-modal]').forEach((button) => button.addEventListener('click', closeAISettings));
-  $('#ai-settings-modal').addEventListener('click', (event) => { if (event.target.id === 'ai-settings-modal') closeAISettings(); });
+  bindBackdropDismissal($('#ai-settings-modal'), closeAISettings);
   $('#ai-admin-token-form').addEventListener('submit', (event) => { event.preventDefault(); closeAIAdminTokenPrompt($('#ai-admin-token-input').value); });
   $$('[data-close-ai-token]').forEach((button) => button.addEventListener('click', () => closeAIAdminTokenPrompt()));
-  $('#ai-admin-token-modal').addEventListener('click', (event) => { if (event.target.id === 'ai-admin-token-modal') closeAIAdminTokenPrompt(); });
+  bindBackdropDismissal($('#ai-admin-token-modal'), () => closeAIAdminTokenPrompt());
   $('#refresh-button').addEventListener('click', () => { $('#refresh-button').style.transform = 'rotate(360deg)'; setTimeout(() => $('#refresh-button').style.transform = '', 350); showToast('节点状态已刷新'); });
   $('#export-button').addEventListener('click', exportLogs);
   const pipelineMoreButton = $('#pipeline-more-button');
@@ -2496,7 +2539,7 @@ function bindEvents() {
     if (node) await unbindNode(node);
   });
   $$('[data-close-modal]').forEach((button) => button.addEventListener('click', closeNodeModal));
-  $('#add-node-modal').addEventListener('click', (event) => { if (event.target.id === 'add-node-modal') closeNodeModal(); });
+  bindBackdropDismissal($('#add-node-modal'), closeNodeModal);
   $('#add-node-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
