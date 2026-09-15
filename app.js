@@ -580,7 +580,7 @@ const assistantMarkdownMaxLength = 24000;
 const assistantMarkdownMaxTableColumns = 12;
 const assistantMarkdownMaxTableRows = 100;
 const assistantMarkdownTags = new Set(['A', 'CODE', 'DIV', 'EM', 'H2', 'H3', 'H4', 'PRE', 'SPAN', 'STRONG', 'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR']);
-const assistantMarkdownClasses = new Set(['assistant-markdown-link', 'markdown-code-block', 'markdown-list-copy', 'markdown-list-item', 'markdown-spacer', 'markdown-table', 'markdown-table-wrap']);
+const assistantMarkdownClasses = new Set(['assistant-markdown-link', 'markdown-blockquote', 'markdown-code-block', 'markdown-divider', 'markdown-list-copy', 'markdown-list-item', 'markdown-spacer', 'markdown-table', 'markdown-table-wrap']);
 
 function safeAssistantMarkdownURL(value) {
   const raw = String(value ?? '').trim();
@@ -602,22 +602,26 @@ function renderAssistantMarkdownText(value) {
 function renderAssistantMarkdownInline(value) {
   const source = String(value ?? '');
   const tokenPattern = /`([^`\r\n]{1,4096})`|\[([^\]\r\n]{1,4096})\]\(([^()\s]{1,2048})\)/g;
+  const tokens = [];
   let output = '';
   let cursor = 0;
   source.replace(tokenPattern, (match, code, label, href, offset) => {
-    output += renderAssistantMarkdownText(source.slice(cursor, offset));
+    output += source.slice(cursor, offset);
+    let renderedToken = '';
     if (code !== undefined) {
-      output += `<code>${escapeHtml(code)}</code>`;
+      renderedToken = `<code>${escapeHtml(code)}</code>`;
     } else {
       const safeHref = safeAssistantMarkdownURL(href);
-      output += safeHref
+      renderedToken = safeHref
         ? `<a class="assistant-markdown-link" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${renderAssistantMarkdownText(label)}</a>`
         : renderAssistantMarkdownText(match);
     }
+    output += `\uE000${tokens.push(renderedToken) - 1}\uE001`;
     cursor = offset + match.length;
     return match;
   });
-  return output + renderAssistantMarkdownText(source.slice(cursor));
+  output += source.slice(cursor);
+  return renderAssistantMarkdownText(output).replace(/\uE000(\d+)\uE001/g, (_, index) => tokens[Number(index)] || '');
 }
 
 function sanitizeAssistantMarkdownHTML(html) {
@@ -693,7 +697,9 @@ function renderAssistantMarkdown(content) {
       rendered.push('<div class="markdown-spacer"></div>');
       continue;
     }
-    if (/^###\s+/.test(line)) { rendered.push(`<h4>${renderAssistantMarkdownInline(line.slice(4))}</h4>`); continue; }
+    if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { rendered.push('<div class="markdown-divider"></div>'); continue; }
+    if (/^>\s?/.test(line)) { rendered.push(`<div class="markdown-blockquote">${renderAssistantMarkdownInline(line.replace(/^>\s?/, ''))}</div>`); continue; }
+    if (/^#{3,6}\s+/.test(line)) { rendered.push(`<h4>${renderAssistantMarkdownInline(line.replace(/^#{3,6}\s+/, ''))}</h4>`); continue; }
     if (/^##\s+/.test(line)) { rendered.push(`<h3>${renderAssistantMarkdownInline(line.slice(3))}</h3>`); continue; }
     if (/^#\s+/.test(line)) { rendered.push(`<h2>${renderAssistantMarkdownInline(line.slice(2))}</h2>`); continue; }
     if (/^[-*]\s+/.test(line)) { rendered.push(`<div class="markdown-list-item"><span>•</span><span class="markdown-list-copy">${renderAssistantMarkdownInline(line.slice(2))}</span></div>`); continue; }
@@ -2323,11 +2329,402 @@ async function unbindNode(node) {
   }
 }
 
+
+const commandStorageKey = 'log-agent-command-flows';
+const commandServerStorageKey = 'log-agent-command-servers';
+const commandFavoritesStorageKey = 'log-agent-command-favorites';
+
+function commandDefaults() {
+  return [{ id: `flow-${Date.now()}`, name: '发布前检查', serverId: '', lines: [
+    { text: 'echo "开始检查"', status: 'idle' },
+    { text: 'docker ps --format "table {{.Names}}\\t{{.Status}}"', status: 'idle' },
+    { text: 'df -h', status: 'idle' }
+  ] }];
+}
+
+function loadCommandFlows() {
+  state.commandServerKeys = state.commandServerKeys || {};
+  try {
+    const savedFlows = JSON.parse(localStorage.getItem(commandStorageKey) || 'null');
+    const savedServers = JSON.parse(localStorage.getItem(commandServerStorageKey) || 'null');
+    const savedFavorites = JSON.parse(localStorage.getItem(commandFavoritesStorageKey) || '[]');
+    state.commandFlows = Array.isArray(savedFlows) && savedFlows.length ? savedFlows : commandDefaults();
+    state.commandServers = Array.isArray(savedServers) ? savedServers : [];
+    state.commandFavorites = Array.isArray(savedFavorites) ? savedFavorites.filter((item) => item && Array.isArray(item.flows)).slice(0, 50) : [];
+  } catch {
+    state.commandFlows = commandDefaults();
+    state.commandServers = [];
+    state.commandFavorites = [];
+  }
+  state.commandFlows.forEach((flow) => {
+    if (!flow.serverId && flow.host) {
+      const server = { id: `server-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: flow.host, host: flow.host, port: flow.port || '22', user: flow.user || '', auth: flow.auth || 'key', secret: flow.secret || '' };
+      state.commandServers.push(server);
+      flow.serverId = server.id;
+    }
+  });
+  state.activeCommandFlowId = state.commandFlows[0].id;
+  saveCommandFlows();
+}
+
+function saveCommandFlows() {
+  try {
+    localStorage.setItem(commandStorageKey, JSON.stringify(state.commandFlows));
+    localStorage.setItem(commandServerStorageKey, JSON.stringify(state.commandServers || []));
+    localStorage.setItem(commandFavoritesStorageKey, JSON.stringify(state.commandFavorites || []));
+  } catch {}
+}
+
+function commandFavoriteSnapshot() {
+  return JSON.parse(JSON.stringify((state.commandFlows || []).map((flow) => ({
+    id: flow.id,
+    name: flow.name || '',
+    serverId: flow.serverId || '',
+    lines: (flow.lines || []).map((line) => ({
+      type: line.type || 'command',
+      text: line.text || '',
+      fileId: line.fileId || '',
+      fileName: (state.commandFiles || []).find((file) => file.id === line.fileId)?.name || line.fileName || '',
+      destination: line.destination || '',
+      status: 'idle',
+      uploadProgress: 0
+    }))
+  }))));
+}
+
+function renderCommandFavorites() {
+  const list = $('#command-favorites-list');
+  if (!list) return;
+  const favorites = state.commandFavorites || [];
+  list.innerHTML = favorites.length ? favorites.map((item) => {
+    const lineCount = item.flows.reduce((total, flow) => total + (flow.lines?.length || 0), 0);
+    const date = new Date(item.createdAt || Date.now()).toLocaleString('zh-CN', { hour12: false });
+    return `<article class="command-favorite-item"><div><strong>${escapeHtml(item.name || '未命名收藏')}</strong><small>${escapeHtml(date)} · ${item.flows.length} 组 · ${lineCount} 行</small></div><div class="command-favorite-item-actions"><button class="secondary-button compact-button" type="button" data-restore-command-favorite="${escapeHtml(item.id)}">还原</button><button class="danger-button compact-button" type="button" data-delete-command-favorite="${escapeHtml(item.id)}">删除</button></div></article>`;
+  }).join('') : '<div class="command-favorites-empty">暂无收藏的指令集组</div>';
+}
+
+function openCommandFavorites() {
+  const modal = $('#command-favorites-modal');
+  if (!modal) return;
+  const flow = activeCommandFlow();
+  $('#command-favorite-name').value = flow?.name ? `${flow.name}收藏` : `指令集组收藏 ${new Date().toLocaleDateString('zh-CN')}`;
+  renderCommandFavorites();
+  modal.classList.remove('hidden');
+  requestAnimationFrame(() => { $('#command-favorite-name').focus(); $('#command-favorite-name').select(); });
+}
+
+function closeCommandFavorites() { $('#command-favorites-modal')?.classList.add('hidden'); }
+
+function saveCommandFavorite(event) {
+  event?.preventDefault();
+  const name = $('#command-favorite-name')?.value.trim();
+  if (!name) { $('#command-favorite-name')?.focus(); return showToast('请输入收藏名称'); }
+  state.commandFavorites = state.commandFavorites || [];
+  state.commandFavorites.unshift({ id: `favorite-${Date.now()}-${Math.random().toString(16).slice(2)}`, name, createdAt: Date.now(), flows: commandFavoriteSnapshot() });
+  state.commandFavorites = state.commandFavorites.slice(0, 50);
+  saveCommandFlows();
+  renderCommandFavorites();
+  showToast(`已收藏整个指令集组：${name}`);
+}
+
+function restoreCommandFavorite(favoriteId) {
+  const favorite = (state.commandFavorites || []).find((item) => item.id === favoriteId);
+  if (!favorite?.flows?.length) return;
+  const restoredAt = Date.now();
+  state.commandFlows = JSON.parse(JSON.stringify(favorite.flows)).map((flow, flowIndex) => ({
+    ...flow,
+    id: `flow-${restoredAt}-${flowIndex}-${Math.random().toString(16).slice(2)}`,
+    lines: (flow.lines || []).map((line) => ({ ...line, status: 'idle', uploadProgress: 0, error: '' }))
+  }));
+  state.activeCommandFlowId = state.commandFlows[0].id;
+  saveCommandFlows();
+  renderCommandFlows();
+  renderCommandEditor();
+  closeCommandFavorites();
+  showToast(`已还原“${favorite.name}”的可编辑副本`);
+}
+
+function deleteCommandFavorite(favoriteId) {
+  const favorite = (state.commandFavorites || []).find((item) => item.id === favoriteId);
+  state.commandFavorites = (state.commandFavorites || []).filter((item) => item.id !== favoriteId);
+  saveCommandFlows();
+  renderCommandFavorites();
+  if (favorite) showToast(`已删除收藏：${favorite.name}`);
+}
+
+function activeCommandFlow() { return state.commandFlows.find((flow) => flow.id === state.activeCommandFlowId) || state.commandFlows[0]; }
+function commandServer(id) { return (state.commandServers || []).find((server) => server.id === id); }
+
+function bindServerToFlow(flowId, serverId) {
+  const flow = state.commandFlows.find((item) => item.id === flowId);
+  if (!flow || !commandServer(serverId)) return;
+  flow.serverId = serverId;
+  flow.lines.forEach((line) => { if (line.status !== 'idle') line.status = 'idle'; });
+  saveCommandFlows();
+  renderCommandFlows();
+  if (flow.id === state.activeCommandFlowId) renderCommandEditor();
+  showToast(`已绑定服务器：${commandServer(serverId).name || commandServer(serverId).host}`);
+}
+
+function addCommandFiles(fileList) {
+  const files = Array.from(fileList || []).filter((file) => file && file.name);
+  if (!files.length) return;
+  state.commandFiles = state.commandFiles || [];
+  files.forEach((file) => {
+    const existing = state.commandFiles.find((item) => item.name === file.name && item.size === file.size);
+    if (!existing) { const imageFile = file.type?.startsWith('image/') || /\.(?:avif|gif|jpe?g|png|webp)$/i.test(file.name); state.commandFiles.push({ id: `file-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: file.name, size: file.size, type: file.type || 'application/octet-stream', file, previewURL: imageFile ? URL.createObjectURL(file) : '', uploadProgress: 0, uploadStatus: '' }); }
+  });
+  renderCommandFileShelf();
+  showToast(`已添加 ${files.length} 个文件，可拖入指令行`);
+}
+function formatFileSize(size) { if (size < 1024) return `${size} B`; if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`; return `${(size / (1024 * 1024)).toFixed(1)} MB`; }
+function renderCommandFileShelf() {
+  const list = $('#command-file-list');
+  if (!list) return;
+  const files = state.commandFiles || [];
+  $('#command-file-count').textContent = `${files.length} 个文件`;
+  list.innerHTML = files.map((item) => `<article class="command-file-card upload-${escapeHtml(item.uploadStatus || 'idle')}" draggable="true" data-command-file-id="${escapeHtml(item.id)}"><div class="command-file-thumb${item.previewURL ? ' image' : ''}">${item.previewURL ? `<img src="${escapeHtml(item.previewURL)}" alt="${escapeHtml(item.name)}" />` : `<span>${escapeHtml((item.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span>`}</div><div class="command-file-copy"><strong>${escapeHtml(item.name)}</strong><small><span>${formatFileSize(item.size || 0)}</span><span class="command-file-progress-label">${item.uploadStatus === 'uploading' ? `${item.uploadProgress || 0}%` : item.uploadStatus === 'success' ? '已上传' : item.uploadStatus === 'error' ? '上传失败' : ''}</span></small></div><div class="command-file-progress"><i style="width:${Math.max(0, Math.min(100, item.uploadProgress || 0))}%"></i></div><button type="button" class="command-file-remove" aria-label="移除文件">×</button></article>`).join('');
+  list.querySelectorAll('.command-file-card').forEach((card) => {
+    card.addEventListener('dragstart', (event) => { event.dataTransfer.setData('text/command-file-id', card.dataset.commandFileId); event.dataTransfer.effectAllowed = 'copy'; });
+    card.querySelector('.command-file-remove').addEventListener('click', () => { const removed = state.commandFiles.find((item) => item.id === card.dataset.commandFileId); if (removed?.previewURL) URL.revokeObjectURL(removed.previewURL); state.commandFiles = state.commandFiles.filter((item) => item.id !== card.dataset.commandFileId); renderCommandFileShelf(); });
+  });
+}
+function bindCommandFileShelf() {
+  state.commandFiles = state.commandFiles || [];
+  renderCommandFileShelf();
+  const zone = $('#command-file-drop-zone');
+  const input = $('#command-file-input-shelf');
+  $('#command-file-select')?.addEventListener('click', () => input?.click());
+  input?.addEventListener('change', (event) => { addCommandFiles(event.target.files); event.target.value = ''; });
+  zone?.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); zone.classList.add('drag-active'); } });
+  zone?.addEventListener('dragleave', () => zone.classList.remove('drag-active'));
+  zone?.addEventListener('drop', (event) => { event.preventDefault(); zone.classList.remove('drag-active'); addCommandFiles(event.dataTransfer.files); });
+  document.addEventListener('paste', (event) => { if ($('#commands-view')?.classList.contains('hidden')) return; const files = Array.from(event.clipboardData?.files || []); if (files.length) { event.preventDefault(); addCommandFiles(files); } });
+}
+function renderCommandServers() {
+  const list = $('#server-card-list');
+  if (!list) return;
+  if (!state.commandServers.length) {
+    list.innerHTML = '<div class="server-library-empty">暂无服务器，点击右上角新增后即可复用。</div>';
+    return;
+  }
+  list.innerHTML = state.commandServers.map((server) => {
+    const connectionStatus = ['success', 'failed'].includes(server.connectionStatus) ? server.connectionStatus : 'untested';
+    return `
+    <article class="reusable-server-card connection-${connectionStatus}" draggable="${connectionStatus === 'success'}" data-server-id="${escapeHtml(server.id)}" title="${escapeHtml(server.connectionError || '')}">
+      <div class="reusable-server-heading"><span class="server-drag-handle">⁙</span><input data-server-field="name" value="${escapeHtml(server.name || '')}" placeholder="服务器名称" /><button type="button" class="server-test-button" data-test-server="${escapeHtml(server.id)}">${connectionStatus === 'success' ? '已连接' : connectionStatus === 'failed' ? '重试' : '测试连接'}</button><button type="button" class="server-remove-button" aria-label="删除服务器">×</button></div>
+      <div class="reusable-server-fields">
+        <label>地址<input data-server-field="host" value="${escapeHtml(server.host || '')}" placeholder="192.168.1.20" /></label>
+        <label>端口<input data-server-field="port" type="number" min="1" max="65535" value="${escapeHtml(server.port || '22')}" /></label>
+        <label>用户名<input data-server-field="user" value="${escapeHtml(server.user || '')}" placeholder="deploy" /></label>
+        <label>认证<select data-server-field="auth"><option value="key" ${server.auth !== 'password' ? 'selected' : ''}>SSH Key</option><option value="password" ${server.auth === 'password' ? 'selected' : ''}>密码</option></select></label>
+      </div>
+      ${server.auth === 'password' ? `<input class="reusable-server-secret" data-server-field="secret" type="password" value="${escapeHtml(server.secret || '')}" placeholder="登录密码" />` : `<label class="server-key-picker"><span>选择密钥文件</span><small>${escapeHtml(server.keyName || '未选择文件')}</small><input data-server-key-file type="file" accept=".key,.pem,.ppk,application/x-pem-file" hidden /></label>`}
+    </article>`;
+  }).join('');
+  list.querySelectorAll('.reusable-server-card').forEach((card) => {
+    card.addEventListener('dragstart', (event) => { const server = commandServer(card.dataset.serverId); if (server?.connectionStatus !== 'success') { event.preventDefault(); showToast('请先测试连接，只有连接成功的服务器可以拖动'); return; } const preview = document.createElement('div'); preview.className = 'server-drag-preview'; preview.innerHTML = `<span>⁙</span><strong>${escapeHtml(server.name || server.host || '未命名服务器')}</strong>`; document.body.appendChild(preview); event.dataTransfer.setDragImage(preview, 18, 17); setTimeout(() => preview.remove(), 0); card.classList.add('dragging'); event.dataTransfer.setData('text/server-id', card.dataset.serverId); event.dataTransfer.effectAllowed = 'copy'; });
+    card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    card.querySelectorAll('[data-server-field]').forEach((input) => {
+      const updateServer = () => { const server = commandServer(card.dataset.serverId); const field = input.dataset.serverField; server[field] = input.value; server.connectionStatus = 'untested'; server.connectionError = ''; if (field === 'host' || field === 'port') server.hostFingerprint = ''; card.classList.remove('connection-success', 'connection-failed'); card.classList.add('connection-untested'); card.draggable = false; const testButton = card.querySelector('.server-test-button'); if (testButton) testButton.textContent = '测试连接'; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); if (field === 'auth' && input.matches('select')) renderCommandServers(); };
+      input.addEventListener('input', updateServer);
+      input.addEventListener('change', updateServer);
+      input.addEventListener('pointerdown', (event) => event.stopPropagation());
+    });
+    card.querySelector('[data-server-key-file]')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const server = commandServer(card.dataset.serverId); try { state.commandServerKeys[server.id] = await file.text(); server.keyName = file.name; server.connectionStatus = 'untested'; server.connectionError = ''; saveCommandFlows(); renderCommandServers(); renderCommandFlows(); showToast(`已选择密钥：${file.name}`); } catch (error) { showToast(`读取密钥失败：${error.message}`); } });
+    card.querySelector('.server-test-button').addEventListener('click', () => testCommandServerConnection(card.dataset.serverId));
+    card.querySelector('.server-remove-button').addEventListener('click', () => {
+      const id = card.dataset.serverId;
+      state.commandServers = state.commandServers.filter((server) => server.id !== id);
+      state.commandFlows.forEach((flow) => { if (flow.serverId === id) flow.serverId = ''; });
+      saveCommandFlows(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
+    });
+  });
+}
+
+async function testCommandServerConnection(serverId) {
+  const server = commandServer(serverId);
+  const card = document.querySelector(`.reusable-server-card[data-server-id="${CSS.escape(serverId)}"]`);
+  const button = card?.querySelector('.server-test-button');
+  if (!server || !button) return;
+  button.disabled = true; button.textContent = '测试中…';
+  try {
+    const requestConnection = () => fetch('/api/commands/test', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ host: server.host || '', port: server.port || '22', user: server.user || '', auth: server.auth || 'key', secret: server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || ''), fingerprint: server.hostFingerprint || '' }) });
+    let response = await requestConnection();
+    let payload = await response.json().catch(() => ({}));
+    if (response.status === 428 && payload.fingerprint) {
+      if (!window.confirm(`首次连接，请核对服务器指纹：\n\n${payload.fingerprint}\n\n确认信任此服务器吗？`)) { server.connectionStatus = 'untested'; server.connectionError = ''; return; }
+      server.hostFingerprint = payload.fingerprint;
+      response = await requestConnection();
+      payload = await response.json().catch(() => ({}));
+    }
+    if (!response.ok) throw new Error(payload.error || '连接失败');
+    server.connectionStatus = 'success'; server.connectionError = '';
+    showToast(`连接成功：${server.name || server.host}`);
+  } catch (error) {
+    server.connectionStatus = 'failed'; server.connectionError = error.message || '连接失败';
+    showToast(server.connectionError);
+  } finally {
+    saveCommandFlows(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
+  }
+}
+
+function renderCommandFlows() {
+  const list = $('#commands-flow-list');
+  if (!list) return;
+  list.innerHTML = state.commandFlows.map((flow) => {
+    const server = commandServer(flow.serverId);
+    const done = flow.lines.length && flow.lines.every((line) => line.status === 'success');
+    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || '未命名指令集')}</strong><span>${flow.lines.length} 行指令</span></div><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : '拖入服务器')}</span></button><i class="command-flow-status ${done ? 'ok' : ''}"></i></div>`;
+  }).join('');
+  $('#commands-flow-count').textContent = `${state.commandFlows.length} 组`;
+  list.querySelectorAll('.command-flow-card').forEach((card) => {
+    card.addEventListener('click', (event) => { if (event.target.closest('.flow-bind-slot')) return; state.activeCommandFlowId = card.dataset.flowId; renderCommandFlows(); renderCommandEditor(); });
+    card.addEventListener('dragstart', (event) => { if (event.target.closest('.flow-bind-slot')) return; card.classList.add('dragging'); event.dataTransfer.setData('text/flow-id', card.dataset.flowId); });
+    card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    card.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/flow-id')) { event.preventDefault(); card.classList.add('drag-over'); } });
+    card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+    card.addEventListener('drop', (event) => { const movedId = event.dataTransfer.getData('text/flow-id'); if (!movedId) return; event.preventDefault(); card.classList.remove('drag-over'); const from = state.commandFlows.findIndex((flow) => flow.id === movedId); const to = state.commandFlows.findIndex((flow) => flow.id === card.dataset.flowId); if (from >= 0 && to >= 0 && from !== to) { const [moved] = state.commandFlows.splice(from, 1); state.commandFlows.splice(to, 0, moved); saveCommandFlows(); renderCommandFlows(); } });
+  });
+  list.querySelectorAll('.flow-bind-slot').forEach((slot) => {
+    slot.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/server-id')) { event.preventDefault(); event.stopPropagation(); slot.classList.add('drop-ready'); } });
+    slot.addEventListener('dragleave', () => slot.classList.remove('drop-ready'));
+    slot.addEventListener('drop', (event) => { const serverId = event.dataTransfer.getData('text/server-id'); if (!serverId) return; event.preventDefault(); event.stopPropagation(); slot.classList.remove('drop-ready'); bindServerToFlow(slot.dataset.bindFlow, serverId); });
+    slot.addEventListener('click', () => { const flow = state.commandFlows.find((item) => item.id === slot.dataset.bindFlow); if (!state.commandServers.length) return showToast('请先在上方新增服务器'); const current = Math.max(-1, state.commandServers.findIndex((server) => server.id === flow.serverId)); bindServerToFlow(flow.id, state.commandServers[(current + 1) % state.commandServers.length].id); });
+  });
+}
+
+function commandLineMarkup(text) {
+  const source = String(text || '');
+  let html = '';
+  let cursor = 0;
+  const pattern = /\[\[file:([^\]]+)\]\]/g;
+  source.replace(pattern, (match, id, offset) => {
+    html += escapeHtml(source.slice(cursor, offset));
+    const file = (state.commandFiles || []).find((item) => item.id === id);
+    html += `<span class="command-file-token" contenteditable="false" draggable="true" data-file-id="${escapeHtml(id)}">${escapeHtml(file?.name || id)}</span>`;
+    cursor = offset + match.length;
+    return match;
+  });
+  return html + escapeHtml(source.slice(cursor));
+}
+function serializeCommandLine(element) {
+  let value = '';
+  element.childNodes.forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) value += node.nodeValue;
+    else if (node.nodeType === Node.ELEMENT_NODE && node.matches('.command-file-token')) value += `[[file:${node.dataset.fileId}]]`;
+    else value += serializeCommandLine(node);
+  });
+  return value;
+}
+
+function defaultCommandUploadDestination(flow) { const server = commandServer(flow?.serverId); if (!server?.user) return ''; return server.user === 'root' ? '/root' : `/home/${server.user}`; }
+function commandUploadLineMarkup(line, index) { const file = (state.commandFiles || []).find((item) => item.id === line.fileId); const fileName = file?.name || line.fileName || ''; const progress = Math.max(0, Math.min(100, line.uploadProgress || 0)); const status = line.status === 'running' ? `${progress}%` : line.status === 'success' ? '上传完成' : line.status === 'error' ? '上传失败' : '等待上传'; return `<div class="command-line command-upload-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index">${String(index + 1).padStart(2, '0')}</span><div class="command-upload-fields"><div class="command-upload-file-box">${file?.previewURL ? `<img src="${escapeHtml(file.previewURL)}" alt="" />` : '<span>FILE</span>'}<strong title="${escapeHtml(fileName)}">${escapeHtml(file ? fileName : fileName ? `${fileName}（需重新拖入）` : '文件已移除')}</strong></div><label class="command-upload-destination"><span>服务器位置</span><input value="${escapeHtml(line.destination || '')}" placeholder="例如：/home/opc" /></label><div class="command-line-upload-progress"><i style="width:${progress}%"></i><span>${status}</span></div></div><button class="command-line-remove" type="button" aria-label="删除第 ${index + 1} 行">×</button></div>`; }
+function renderCommandEditor() {
+  const flow = activeCommandFlow();
+  if (!flow) return;
+  $('#command-flow-name').value = flow.name || '';
+  $('#commands-editor-title').textContent = flow.name || '运行指令';
+  const lines = $('#command-lines');
+  lines.innerHTML = flow.lines.map((line, index) => line.type === 'upload' ? commandUploadLineMarkup(line, index) : `<div class="command-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index">${String(index + 1).padStart(2, '0')}</span><div class="command-editable" contenteditable="true" spellcheck="false" data-placeholder="输入服务器指令">${commandLineMarkup(line.text)}</div><button class="command-line-remove" type="button" aria-label="删除第 ${index + 1} 行">×</button></div>`).join('');
+  lines.querySelectorAll('.command-editable').forEach((input) => {
+    input.addEventListener('input', () => { const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.text = serializeCommandLine(input); line.status = 'idle'; delete line.error; saveCommandFlows(); renderCommandFlows(); });
+    input.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/command-file-id')) { event.preventDefault(); input.classList.add('file-drop-target'); } });
+    input.addEventListener('dragleave', () => input.classList.remove('file-drop-target'));
+    input.addEventListener('drop', (event) => { const fileId = event.dataTransfer.getData('text/command-file-id'); if (!fileId) return; event.preventDefault(); const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.type = 'upload'; line.fileId = fileId; line.destination = defaultCommandUploadDestination(flow); line.text = ''; line.status = 'idle'; line.uploadProgress = 0; delete line.error; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); });
+    input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); document.execCommand('insertText', false, '\n'); } });
+  });
+  lines.querySelectorAll('.command-upload-destination input').forEach((input) => input.addEventListener('input', () => { const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.destination = input.value; line.status = 'idle'; line.uploadProgress = 0; delete line.error; saveCommandFlows(); renderCommandFlows(); }));
+  lines.querySelectorAll('.command-line-remove').forEach((button) => button.addEventListener('click', () => { flow.lines.splice(Number(button.closest('.command-line').dataset.index), 1); if (!flow.lines.length) flow.lines.push({ text: '', status: 'idle' }); saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); }));
+  const firstError = flow.lines.findIndex((line) => line.status === 'error');
+  $('#command-progress').textContent = firstError >= 0 ? `第 ${firstError + 1} 行失败，可修改后继续` : `${flow.lines.filter((line) => line.status === 'success').length} / ${flow.lines.length} 行已完成`;
+  $('#command-error').classList.toggle('hidden', firstError < 0);
+  if (firstError >= 0) $('#command-error-text').textContent = flow.lines[firstError].error || '服务器返回了错误';
+}
+function updateCommandUploadProgress(line, item, index, progress, status = 'uploading') { line.uploadProgress = progress; item.uploadProgress = progress; item.uploadStatus = status; const commandLine = document.querySelector(`.command-line[data-index="${index}"]`); if (commandLine) { const bar = commandLine.querySelector('.command-line-upload-progress i'); const label = commandLine.querySelector('.command-line-upload-progress span'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? '上传完成' : status === 'error' ? '上传失败' : `${progress}%`; } const card = document.querySelector(`[data-command-file-id="${CSS.escape(item.id)}"]`); if (card) { card.classList.remove('upload-idle', 'upload-uploading', 'upload-success', 'upload-error'); card.classList.add(`upload-${status}`); const bar = card.querySelector('.command-file-progress i'); const label = card.querySelector('.command-file-progress-label'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? '已上传' : status === 'error' ? '上传失败' : `${progress}%`; } }
+async function uploadCommandFile(server, line, item, index) { const body = new FormData(); body.append('host', server.host || ''); body.append('port', server.port || '22'); body.append('user', server.user || ''); body.append('auth', server.auth || 'key'); body.append('secret', server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || '')); body.append('fingerprint', server.hostFingerprint || ''); body.append('destination', line.destination || defaultCommandUploadDestination({ serverId: server.id })); body.append('file', item.file, item.name); return new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); updateCommandUploadProgress(line, item, index, 0); xhr.open('POST', '/api/commands/upload'); xhr.upload.addEventListener('progress', (event) => { if (event.lengthComputable) updateCommandUploadProgress(line, item, index, Math.min(99, Math.round((event.loaded / event.total) * 100))); }); xhr.addEventListener('load', () => { let payload = {}; try { payload = JSON.parse(xhr.responseText || '{}'); } catch {} if (xhr.status >= 200 && xhr.status < 300) { updateCommandUploadProgress(line, item, index, 100, 'success'); resolve(payload); } else { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(payload.error || `文件上传失败：${item.name}`)); } }); xhr.addEventListener('error', () => { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(`文件上传失败：${item.name}`)); }); xhr.send(body); }); }
+async function uploadCommandFiles(server, line, index) {
+  const ids = line.type === 'upload' ? [line.fileId] : [...String(line.text || '').matchAll(/\[\[file:([^\]]+)\]\]/g)].map((match) => match[1]);
+  const files = ids.map((id) => (state.commandFiles || []).find((item) => item.id === id)).filter((item) => item?.file);
+  if (line.type === 'upload' && !files.length) throw new Error('上传文件已被移除，请重新拖入文件');
+  if (!files.length || !goServerConnected) return 0;
+  for (const item of files) {
+    await uploadCommandFile(server, line, item, index);
+  }
+  return files.length;
+}
+function commandTextForExecution(text) { return String(text || '').replace(/\[\[file:([^\]]+)\]\]/g, (_, id) => (state.commandFiles || []).find((item) => item.id === id)?.name || id); }
+async function executeCommandLine(flow, line, index) {
+  const server = commandServer(flow.serverId);
+  if (line.type === 'upload') line.uploadProgress = 0;
+  line.status = 'running'; renderCommandEditor();
+  $('#commands-run-status').textContent = `正在运行第 ${index + 1} 行`;
+  await new Promise((resolve) => setTimeout(resolve, 380));
+  try {
+    if (!server) throw new Error('当前指令集尚未绑定服务器');
+    const uploadedFiles = await uploadCommandFiles(server, line, index);
+    const executableText = commandTextForExecution(line.text);
+    if (line.type === 'upload' || (uploadedFiles && /^\s*scp\s+/i.test(executableText))) { line.status = 'success'; line.error = ''; return true; }
+    if (goServerConnected) {
+      const response = await fetch('/api/commands/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host: server.host || '', port: server.port || '22', user: server.user || '', auth: server.auth || 'key', secret: server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || ''), fingerprint: server.hostFingerprint || '', command: executableText }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error([payload.error || '服务器执行失败', payload.output].filter(Boolean).join('\n'));
+    } else if (/fail|error|错误/i.test(executableText)) throw new Error('演示执行失败：检测到 fail/error 关键字');
+    line.status = 'success'; line.error = ''; return true;
+  } catch (error) { line.status = 'error'; line.error = error.message; return false; }
+}
+
+async function runCommandFlow(startAt = 0, flow = activeCommandFlow()) {
+  if (!flow || state.commandRunning) return false;
+  state.commandRunning = true; $('#commands-run-all').disabled = true; $('#commands-run-current').disabled = true;
+  const firstError = flow.lines.findIndex((line) => line.status === 'error');
+  const firstPending = flow.lines.findIndex((line) => line.status !== 'success');
+  const begin = startAt > 0 ? startAt : (firstError >= 0 ? firstError : Math.max(0, firstPending));
+  let failed = -1;
+  for (let i = begin; i < flow.lines.length; i += 1) { if (flow.lines[i].type !== 'upload' && !String(flow.lines[i].text || '').trim()) continue; const ok = await executeCommandLine(flow, flow.lines[i], i); saveCommandFlows(); renderCommandFlows(); if (!ok) { failed = i; break; } }
+  state.commandRunning = false; $('#commands-run-all').disabled = false; $('#commands-run-current').disabled = false; renderCommandEditor();
+  $('#commands-run-status').textContent = failed >= 0 ? `第 ${failed + 1} 行执行失败` : '当前指令集执行完成';
+  if (failed >= 0) showToast('指令执行失败，可修改后从错误处继续');
+  return failed < 0;
+}
+
+async function runAllCommandFlows() {
+  if (state.commandRunning) return;
+  for (const flow of state.commandFlows) {
+    state.activeCommandFlowId = flow.id; renderCommandFlows(); renderCommandEditor();
+    const ok = await runCommandFlow(0, flow); if (!ok) return;
+  }
+  $('#commands-run-status').textContent = '全部指令集执行完成'; showToast('全部指令集已按顺序执行完成');
+}
+
+function bindCommandEvents() {
+  loadCommandFlows(); bindCommandFileShelf(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
+  $('#command-flow-name')?.addEventListener('input', (event) => { const flow = activeCommandFlow(); flow.name = event.target.value; saveCommandFlows(); $('#commands-editor-title').textContent = flow.name || '运行指令'; renderCommandFlows(); });
+  $('#commands-add-server')?.addEventListener('click', () => { state.commandServers.push({ id: `server-${Date.now()}`, name: `服务器 ${state.commandServers.length + 1}`, host: '', port: '22', user: '', auth: 'key', secret: '', connectionStatus: 'untested', connectionError: '' }); saveCommandFlows(); renderCommandServers(); });
+  $('#commands-add-flow')?.addEventListener('click', () => { const flow = { id: `flow-${Date.now()}`, name: `新指令集 ${state.commandFlows.length + 1}`, serverId: '', lines: [{ text: '', status: 'idle' }] }; state.commandFlows.push(flow); state.activeCommandFlowId = flow.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
+  $('#commands-duplicate')?.addEventListener('click', () => { const source = activeCommandFlow(); const copy = JSON.parse(JSON.stringify(source)); copy.id = `flow-${Date.now()}`; copy.name = `${source.name || '指令集'} 副本`; copy.lines.forEach((line) => { line.status = 'idle'; delete line.error; }); state.commandFlows.push(copy); state.activeCommandFlowId = copy.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); showToast('指令集已复制，服务器绑定已保留'); });
+  $('#commands-delete')?.addEventListener('click', () => { if (state.commandFlows.length <= 1) return showToast('至少保留一组指令集'); const index = state.commandFlows.findIndex((flow) => flow.id === state.activeCommandFlowId); state.commandFlows.splice(index, 1); state.activeCommandFlowId = state.commandFlows[Math.max(0, index - 1)].id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
+  $('#commands-favorite')?.addEventListener('click', openCommandFavorites);
+  $('#command-favorite-form')?.addEventListener('submit', saveCommandFavorite);
+  $$('[data-close-command-favorites]').forEach((button) => button.addEventListener('click', closeCommandFavorites));
+  bindBackdropDismissal($('#command-favorites-modal'), closeCommandFavorites);
+  $('#command-favorites-list')?.addEventListener('click', (event) => {
+    const restoreButton = event.target.closest('[data-restore-command-favorite]');
+    const deleteButton = event.target.closest('[data-delete-command-favorite]');
+    if (restoreButton) restoreCommandFavorite(restoreButton.dataset.restoreCommandFavorite);
+    if (deleteButton) deleteCommandFavorite(deleteButton.dataset.deleteCommandFavorite);
+  });
+  $('#commands-add-line')?.addEventListener('click', () => { activeCommandFlow().lines.push({ text: '', status: 'idle' }); saveCommandFlows(); renderCommandEditor(); });
+  $('#commands-run-all')?.addEventListener('click', runAllCommandFlows);
+  $('#commands-run-current')?.addEventListener('click', () => { const flow = activeCommandFlow(); const index = flow.lines.findIndex((line) => line.status !== 'success'); runCommandFlow(index >= 0 ? index : 0, flow); });
+  $('#commands-import-button')?.addEventListener('click', () => $('#commands-file-input').click());
+  $('#commands-file-input')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const flow = activeCommandFlow(); const text = await file.text(); flow.lines = text.split(/\r?\n/).filter((line) => line.trim()).map((line) => ({ text: line, status: 'idle' })); if (!flow.lines.length) flow.lines = [{ text: '', status: 'idle' }]; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); showToast(`已导入 ${flow.lines.length} 行指令`); event.target.value = ''; });
+}
 function setView(view) {
-  const labels = { overview: '实时日志流', rules: '加工规则', connections: '连接管理' };
+  const labels = { overview: '实时日志流', rules: '加工规则', connections: '连接管理', commands: '服务器指令' };
   $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
   $('#view-breadcrumb').textContent = labels[view];
-  Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view' }).forEach(([name, selector]) => {
+  Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view', commands: '#commands-view' }).forEach(([name, selector]) => {
     $(selector).classList.toggle('hidden', name !== view);
   });
   if (view === 'rules') syncRuleButtons();
@@ -2526,6 +2923,7 @@ function bindEvents() {
     }
   }));
   bindPipelineDragAndDrop();
+  bindCommandEvents();
   if ($('#add-rule-button')) $('#add-rule-button').addEventListener('click', () => showToast('规则模板面板即将开放')); 
   $('#rules-add-rule').addEventListener('click', () => showToast('规则模板面板即将开放'));
   $('#open-add-node').addEventListener('click', () => openNodeModal());
@@ -2553,14 +2951,14 @@ function bindEvents() {
     showToast(nodeId ? '节点连接信息已保存' : `${name} 已添加，正在建立连接`);
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === ' ' && document.activeElement.tagName !== 'INPUT') { event.preventDefault(); $('#pause-button').click(); }
+    if (event.key === ' ' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA' && !document.activeElement.isContentEditable) { event.preventDefault(); $('#pause-button').click(); }
     if (event.key === 'Escape') {
       if (!$('#ai-admin-token-modal').classList.contains('hidden')) closeAIAdminTokenPrompt();
       else if (!$('#app-settings-modal').classList.contains('hidden')) closeAppSettings();
       else if (!$('#ai-settings-modal').classList.contains('hidden')) closeAISettings();
       else closeNodeModal();
     }
-    if (event.key === '/' && document.activeElement.tagName !== 'INPUT') { event.preventDefault(); $('#global-search').focus(); }
+    if (event.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA' && !document.activeElement.isContentEditable) { event.preventDefault(); $('#global-search').focus(); }
   });
 }
 

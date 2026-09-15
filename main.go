@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"golang.org/x/crypto/ssh"
 )
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
@@ -72,6 +74,32 @@ type containerInfo struct {
 	Name  string `json:"name"`
 	State string `json:"state"`
 }
+
+type commandConnectionRequest struct {
+	Host        string `json:"host"`
+	Port        string `json:"port"`
+	User        string `json:"user"`
+	Auth        string `json:"auth"`
+	Secret      string `json:"secret"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+type commandExecutionRequest struct {
+	Host        string `json:"host"`
+	Port        string `json:"port"`
+	User        string `json:"user"`
+	Auth        string `json:"auth"`
+	Secret      string `json:"secret"`
+	Fingerprint string `json:"fingerprint"`
+	Command     string `json:"command"`
+}
+
+type commandHostKeyError struct{ Fingerprint string }
+
+func (e *commandHostKeyError) Error() string { return "需要确认服务器指纹" }
+
+var commandConnectionDial = dialCommandSSH
+var commandExecutionRun = runCommandSSH
 
 type LogEntry struct {
 	ID        int64  `json:"id"`
@@ -266,6 +294,9 @@ func newHTTPHandler(s *server) http.Handler {
 	mux.HandleFunc("/api/ai/status", s.handleAIStatus)
 	mux.HandleFunc("/api/ai/chat", s.handleAIChat)
 	mux.HandleFunc("/api/ai/profiles", s.handleAIProfiles)
+	mux.HandleFunc("/api/commands/test", s.handleCommandConnectionTest)
+	mux.HandleFunc("/api/commands/upload", s.handleCommandFileUpload)
+	mux.HandleFunc("/api/commands/execute", s.handleCommandExecute)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/settings/database/test", s.handleDatabaseSettingsTest)
 	mux.HandleFunc("/api/settings/database", s.handleDatabaseSettings)
@@ -281,6 +312,363 @@ func newHTTPHandler(s *server) http.Handler {
 	}
 	mux.Handle("/", http.FileServer(http.FS(static)))
 	return withSecurityHeaders(mux)
+}
+
+func (s *server) handleCommandConnectionTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var request commandConnectionRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 32<<10)).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "连接参数无效"})
+		return
+	}
+	host := strings.TrimSpace(request.Host)
+	port := strings.TrimSpace(request.Port)
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请填写服务器地址"})
+		return
+	}
+	if port == "" {
+		port = "22"
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器端口无效"})
+		return
+	}
+	request.Host = host
+	request.Port = strconv.Itoa(portNumber)
+	request.User = strings.TrimSpace(request.User)
+	request.Auth = strings.TrimSpace(request.Auth)
+	request.Fingerprint = strings.TrimSpace(request.Fingerprint)
+	if request.User == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请填写用户名"})
+		return
+	}
+	if strings.TrimSpace(request.Secret) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请选择密钥文件或填写密码"})
+		return
+	}
+	if err := commandConnectionDial(request); err != nil {
+		var hostKeyError *commandHostKeyError
+		if errors.As(err, &hostKeyError) {
+			writeJSON(w, http.StatusPreconditionRequired, map[string]string{"error": hostKeyError.Error(), "fingerprint": hostKeyError.Fingerprint})
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "连接失败：" + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func dialCommandSSH(request commandConnectionRequest) error {
+	client, err := newCommandSSHClient(request)
+	if err != nil {
+		return err
+	}
+	return client.Close()
+}
+
+func newCommandSSHClient(request commandConnectionRequest) (*ssh.Client, error) {
+	var authMethod ssh.AuthMethod
+	if request.Auth == "password" {
+		authMethod = ssh.Password(request.Secret)
+	} else {
+		signer, err := ssh.ParsePrivateKey([]byte(request.Secret))
+		if err != nil {
+			return nil, fmt.Errorf("密钥文件无效：%w", err)
+		}
+		authMethod = ssh.PublicKeys(signer)
+	}
+	hostKeyCallback := func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		fingerprint := ssh.FingerprintSHA256(key)
+		if request.Fingerprint == "" {
+			return &commandHostKeyError{Fingerprint: fingerprint}
+		}
+		if subtle.ConstantTimeCompare([]byte(request.Fingerprint), []byte(fingerprint)) != 1 {
+			return fmt.Errorf("服务器指纹不匹配，当前为 %s", fingerprint)
+		}
+		return nil
+	}
+	return ssh.Dial("tcp", net.JoinHostPort(request.Host, request.Port), &ssh.ClientConfig{
+		User: request.User, Auth: []ssh.AuthMethod{authMethod}, HostKeyCallback: hostKeyCallback, Timeout: 5 * time.Second,
+	})
+}
+
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+
+func (s *server) handleCommandFileUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<20)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "读取上传文件失败：" + err.Error()})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请选择要上传的文件"})
+		return
+	}
+	defer file.Close()
+	request := commandConnectionRequest{Host: strings.TrimSpace(r.FormValue("host")), Port: strings.TrimSpace(r.FormValue("port")), User: strings.TrimSpace(r.FormValue("user")), Auth: strings.TrimSpace(r.FormValue("auth")), Secret: r.FormValue("secret"), Fingerprint: strings.TrimSpace(r.FormValue("fingerprint"))}
+	if request.Port == "" {
+		request.Port = "22"
+	}
+	if request.Host == "" || request.User == "" || request.Secret == "" || request.Fingerprint == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器连接信息不完整，请重新测试连接"})
+		return
+	}
+	filename := path.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
+	if filename == "." || filename == "/" || filename == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "文件名无效"})
+		return
+	}
+	homeDirectory := path.Join("/home", request.User)
+	if request.User == "root" {
+		homeDirectory = "/root"
+	}
+	destination := strings.TrimSpace(r.FormValue("destination"))
+	if destination == "" {
+		destination = homeDirectory
+	}
+	if strings.ContainsRune(destination, '\x00') {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器位置无效"})
+		return
+	}
+	destination = path.Clean(destination)
+	if destination != homeDirectory && !strings.HasPrefix(destination, homeDirectory+"/") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器位置必须位于 " + homeDirectory + " 内"})
+		return
+	}
+	remotePath := path.Join(destination, filename)
+	client, err := newCommandSSHClient(request)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "SSH 连接失败：" + err.Error()})
+		return
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "创建 SSH 会话失败：" + err.Error()})
+		return
+	}
+	defer session.Close()
+	session.Stdin = file
+	if err := session.Run("umask 077 && mkdir -p -- " + shellQuote(destination) + " && cat > " + shellQuote(remotePath)); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "写入远程文件失败：" + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": remotePath})
+}
+
+func splitCommandWords(command string) ([]string, error) {
+	var words []string
+	var current strings.Builder
+	var quote rune
+	escaped := false
+	flush := func() {
+		if current.Len() > 0 {
+			words = append(words, current.String())
+			current.Reset()
+		}
+	}
+	for _, char := range command {
+		if escaped {
+			current.WriteRune(char)
+			escaped = false
+			continue
+		}
+		if char == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if char == quote {
+				quote = 0
+			} else {
+				current.WriteRune(char)
+			}
+			continue
+		}
+		if char == '\'' || char == '"' {
+			quote = char
+			continue
+		}
+		if char == ' ' || char == '\t' {
+			flush()
+			continue
+		}
+		current.WriteRune(char)
+	}
+	if escaped || quote != 0 {
+		return nil, errors.New("指令中的引号或转义不完整")
+	}
+	flush()
+	return words, nil
+}
+
+func commandHomeDirectory(user string) string {
+	if user == "root" {
+		return "/root"
+	}
+	return path.Join("/home", user)
+}
+func commandPathInsideHome(value, home string) bool {
+	if value == "" || strings.HasPrefix(value, "-") {
+		return true
+	}
+	candidate := value
+	if !strings.HasPrefix(candidate, "/") {
+		candidate = path.Join(home, candidate)
+	}
+	candidate = path.Clean(candidate)
+	return candidate == home || strings.HasPrefix(candidate, home+"/")
+}
+
+func validateRemoteCommand(command, user string) error {
+	if strings.ContainsAny(command, "`$;&|<>\r\n") {
+		return errors.New("不允许使用重定向、管道、命令拼接或变量展开")
+	}
+	words, err := splitCommandWords(command)
+	if err != nil {
+		return err
+	}
+	if len(words) == 0 {
+		return errors.New("指令不能为空")
+	}
+	if (words[0] == "systemctl" && len(words) == 3 && words[1] == "stop") || (words[0] == "docker" && len(words) == 3 && words[1] == "stop") {
+		return nil
+	}
+	if len(words) == 5 && words[0] == "sudo" && words[1] == "-n" && words[2] == "systemctl" && words[3] == "stop" {
+		return nil
+	}
+	readOnly := map[string]bool{"echo": true, "pwd": true, "ls": true, "cat": true, "head": true, "tail": true, "df": true, "du": true, "ps": true, "whoami": true, "date": true, "uname": true, "journalctl": true}
+	if readOnly[words[0]] {
+		return nil
+	}
+	if words[0] == "docker" && len(words) >= 2 && map[string]bool{"ps": true, "logs": true, "inspect": true}[words[1]] {
+		return nil
+	}
+	fileCommands := map[string]bool{"mv": true, "cp": true, "rm": true, "mkdir": true, "touch": true, "chmod": true}
+	if !fileCommands[words[0]] {
+		return fmt.Errorf("不允许执行 %q；仅支持主目录文件操作、只读命令和停止服务", words[0])
+	}
+	home := commandHomeDirectory(user)
+	start := 1
+	if words[0] == "chmod" {
+		for start < len(words) && strings.HasPrefix(words[start], "-") {
+			start++
+		}
+		if start < len(words) {
+			start++
+		}
+	}
+	pathCount := 0
+	for _, word := range words[start:] {
+		if strings.HasPrefix(word, "-") {
+			continue
+		}
+		pathCount++
+		if !commandPathInsideHome(word, home) {
+			return fmt.Errorf("文件操作仅限 %s 目录内", home)
+		}
+	}
+	if pathCount == 0 {
+		return errors.New("文件操作缺少有效路径")
+	}
+	return nil
+}
+
+type limitedCommandOutput struct {
+	mu        sync.Mutex
+	data      []byte
+	limit     int
+	truncated bool
+}
+
+func (output *limitedCommandOutput) Write(data []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	remaining := output.limit - len(output.data)
+	if remaining > 0 {
+		if len(data) > remaining {
+			output.data = append(output.data, data[:remaining]...)
+			output.truncated = true
+		} else {
+			output.data = append(output.data, data...)
+		}
+	} else {
+		output.truncated = true
+	}
+	return len(data), nil
+}
+func (output *limitedCommandOutput) String() string {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	result := string(output.data)
+	if output.truncated {
+		result += "\n[输出过长，已截断]"
+	}
+	return result
+}
+
+func runCommandSSH(request commandExecutionRequest) (string, error) {
+	client, err := newCommandSSHClient(commandConnectionRequest{Host: request.Host, Port: request.Port, User: request.User, Auth: request.Auth, Secret: request.Secret, Fingerprint: request.Fingerprint})
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+	output := &limitedCommandOutput{limit: 1 << 20}
+	session.Stdout, session.Stderr = output, output
+	done := make(chan error, 1)
+	go func() { done <- session.Run(request.Command) }()
+	select {
+	case err := <-done:
+		return output.String(), err
+	case <-time.After(2 * time.Minute):
+		_ = session.Close()
+		return output.String(), errors.New("命令执行超时（限制 2 分钟）")
+	}
+}
+
+func (s *server) handleCommandExecute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var request commandExecutionRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 128<<10)).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "执行参数无效"})
+		return
+	}
+	request.Host, request.Port, request.User, request.Auth, request.Fingerprint, request.Command = strings.TrimSpace(request.Host), strings.TrimSpace(request.Port), strings.TrimSpace(request.User), strings.TrimSpace(request.Auth), strings.TrimSpace(request.Fingerprint), strings.TrimSpace(request.Command)
+	if request.Port == "" {
+		request.Port = "22"
+	}
+	if request.Host == "" || request.User == "" || request.Secret == "" || request.Fingerprint == "" || request.Command == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器连接信息或指令不完整"})
+		return
+	}
+	if err := validateRemoteCommand(request.Command, request.User); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	output, err := commandExecutionRun(request)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "命令执行失败：" + err.Error(), "output": output})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "output": output})
 }
 
 func newServer() *server {

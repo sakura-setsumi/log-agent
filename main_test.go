@@ -16,6 +16,54 @@ import (
 	"time"
 )
 
+func TestCommandConnectionTest(t *testing.T) {
+	originalDial := commandConnectionDial
+	defer func() { commandConnectionDial = originalDial }()
+	var received commandConnectionRequest
+	commandConnectionDial = func(request commandConnectionRequest) error { received = request; return nil }
+	requestBody, _ := json.Marshal(commandConnectionRequest{Host: "127.0.0.1", Port: "22", User: "deploy", Auth: "key", Secret: "private-key", Fingerprint: "SHA256:test"})
+	response := httptest.NewRecorder()
+	(&server{}).handleCommandConnectionTest(response, httptest.NewRequest(http.MethodPost, "/api/commands/test", bytes.NewReader(requestBody)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected successful connection test, got %d: %s", response.Code, response.Body.String())
+	}
+	if received.User != "deploy" || received.Secret != "private-key" || received.Fingerprint != "SHA256:test" {
+		t.Fatalf("expected SSH credentials and fingerprint to reach the dialer, got %#v", received)
+	}
+}
+
+func TestValidateRemoteCommandPolicy(t *testing.T) {
+	allowed := []string{`mv "images (1).jpg" image.jpg`, `rm -f old.log`, `docker stop api`, `systemctl stop log-agent.service`, `sudo -n systemctl stop log-agent.service`, `df -h`}
+	for _, command := range allowed {
+		if err := validateRemoteCommand(command, "opc"); err != nil {
+			t.Errorf("expected command to be allowed %q: %v", command, err)
+		}
+	}
+	rejected := []string{`mv file /etc/app.conf`, `sh -c "rm file"`, `echo value > /etc/app.conf`, `rm file; systemctl stop sshd`}
+	for _, command := range rejected {
+		if err := validateRemoteCommand(command, "opc"); err == nil {
+			t.Errorf("expected command to be rejected: %q", command)
+		}
+	}
+}
+
+func TestCommandExecuteHandler(t *testing.T) {
+	originalRun := commandExecutionRun
+	defer func() { commandExecutionRun = originalRun }()
+	commandExecutionRun = func(request commandExecutionRequest) (string, error) {
+		if request.Command != `mv "images (1).jpg" image.jpg` {
+			t.Fatalf("unexpected command: %q", request.Command)
+		}
+		return "done", nil
+	}
+	body, _ := json.Marshal(commandExecutionRequest{Host: "127.0.0.1", Port: "22", User: "opc", Auth: "key", Secret: "private-key", Fingerprint: "SHA256:test", Command: `mv "images (1).jpg" image.jpg`})
+	response := httptest.NewRecorder()
+	(&server{}).handleCommandExecute(response, httptest.NewRequest(http.MethodPost, "/api/commands/execute", bytes.NewReader(body)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected command execution success, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestEmbeddedLoadingAnimationKeepsFullLoop(t *testing.T) {
 	data, err := frontend.ReadFile("loading.gif")
 	if err != nil {

@@ -21,6 +21,10 @@ type assistantMarkdownSafety struct {
 	UnsafeLink     bool `json:"unsafeLink"`
 	XSSExecuted    bool `json:"xssExecuted"`
 	SameBackground bool `json:"sameBackground"`
+	HasDivider     bool `json:"hasDivider"`
+	HasBlockquote  bool `json:"hasBlockquote"`
+	HasDeepHeading bool `json:"hasDeepHeading"`
+	HasMixedBold   bool `json:"hasMixedBold"`
 }
 
 type logStreamPauseView struct {
@@ -471,7 +475,8 @@ func TestE2EAssistantInteractions(t *testing.T) {
 		chromedp.Evaluate(`(() => {
 			window.__assistantMarkdownExecuted = false;
 			const fence = String.fromCharCode(96).repeat(3);
-			const markdown = '# 安全渲染\n[安全链接](https://example.com/docs)\n[危险链接](javascript:alert(1))\n<img src=x onerror="window.__assistantMarkdownExecuted=true">\n<script>window.__assistantMarkdownExecuted=true</script>\n' + fence + '\nconst ok = true;\n' + fence + '\n| 名称 | 结果 |\n| --- | --- |\n| 安全 | **通过** |';
+			const inlineTick = String.fromCharCode(96);
+			const markdown = '# 安全渲染\n#### 后 3 条日志\n> 引用内容\n---\n**系统任务调用 ' + inlineTick + 'ServiceException' + inlineTick + ' 失败。**\n[安全链接](https://example.com/docs)\n[危险链接](javascript:alert(1))\n<img src=x onerror="window.__assistantMarkdownExecuted=true">\n<script>window.__assistantMarkdownExecuted=true</script>\n' + fence + '\nconst ok = true;\n' + fence + '\n| 名称 | 结果 |\n| --- | --- |\n| 安全 | **通过** |';
 			state.assistantMessages = [{ role: 'assistant', content: markdown }];
 			renderAssistant();
 			const message = document.querySelector('#assistant-messages .assistant-message.assistant');
@@ -485,13 +490,37 @@ func TestE2EAssistantInteractions(t *testing.T) {
 				unsafeLink: Array.from(message.querySelectorAll('a')).some((link) => /^javascript:/i.test(link.getAttribute('href') || '')),
 				xssExecuted: window.__assistantMarkdownExecuted === true,
 				sameBackground: getComputedStyle(message).backgroundColor === getComputedStyle(document.querySelector('#assistant-messages')).backgroundColor,
+				hasDivider: Boolean(message.querySelector('.markdown-divider')),
+				hasBlockquote: Boolean(message.querySelector('.markdown-blockquote')),
+				hasDeepHeading: Array.from(message.querySelectorAll('h4')).some((heading) => heading.textContent.includes('后 3 条日志')),
+				hasMixedBold: Array.from(message.querySelectorAll('strong')).some((strong) => strong.querySelector('code') && strong.textContent.includes('系统任务调用')),
 			};
 		})()`, &markdownSafety),
 	); err != nil {
 		t.Fatalf("verify markdown rendering safety: %v", err)
 	}
-	if !markdownSafety.HasCodeBlock || !markdownSafety.HasTable || !markdownSafety.SafeLink || !markdownSafety.SameBackground || markdownSafety.HasRawImage || markdownSafety.HasScriptTag || markdownSafety.UnsafeLink || markdownSafety.XSSExecuted {
+	if !markdownSafety.HasCodeBlock || !markdownSafety.HasTable || !markdownSafety.SafeLink || !markdownSafety.SameBackground || !markdownSafety.HasDivider || !markdownSafety.HasBlockquote || !markdownSafety.HasDeepHeading || !markdownSafety.HasMixedBold || markdownSafety.HasRawImage || markdownSafety.HasScriptTag || markdownSafety.UnsafeLink || markdownSafety.XSSExecuted {
 		t.Fatalf("unsafe markdown rendering state: %+v", markdownSafety)
+	}
+
+	var followUpMessagesSeparated bool
+	if err := chromedp.Run(browserContext,
+		chromedp.Evaluate(`(() => {
+			const longAnswer = Array.from({ length: 18 }, (_, index) => (index + 1) + '. 这是用于验证长回答布局的内容，确保后续提问不会覆盖前一条回答。').join('\n');
+			state.assistantMessages = [
+				{ role: 'assistant', content: longAnswer },
+				{ role: 'user', content: '这是继续提问' },
+				{ role: 'assistant', content: '这是继续回答' },
+			];
+			renderAssistant();
+			const items = Array.from(document.querySelectorAll('#assistant-messages .assistant-message'));
+			return items.every((item, index) => index === 0 || item.getBoundingClientRect().top >= items[index - 1].getBoundingClientRect().bottom + 9);
+		})()`, &followUpMessagesSeparated),
+	); err != nil {
+		t.Fatalf("verify assistant follow-up layout: %v", err)
+	}
+	if !followUpMessagesSeparated {
+		t.Fatal("assistant follow-up messages must not overlap the previous long response")
 	}
 }
 
