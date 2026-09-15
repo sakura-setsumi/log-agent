@@ -15,7 +15,9 @@ syncAIStatus();
 loadAIProfilesFromDatabase();
 syncGoBackend({ connectStream: true }).then((connected) => {
   if (connected) {
-    backendRefreshTimer = setInterval(() => syncGoBackend({ incremental: true }), 3000);
+    backendRefreshTimer = setInterval(() => {
+      if (!state.paused) syncGoBackend({ incremental: true });
+    }, 3000);
     if (state.historyLoading) scheduleHistorySync();
   }
 });

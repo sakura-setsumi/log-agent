@@ -3,7 +3,10 @@ const logPageSize = 50;
 const initialLogPreviewSize = 50;
 const logVirtualRowHeight = 74;
 const logVirtualOverscan = 60;
-const adaptiveLogRenderLimit = 10000;
+const adaptiveLogRenderLimit = 500;
+const streamBatchInterval = 100;
+const logRenderInterval = 250;
+const maxPendingStreamLogs = 2000;
 let maxBufferedLogs = 100000;
 const selectionStorageKey = 'log-agent-selection';
 const aiProfilesStorageKey = 'log-agent-ai-profiles';
@@ -63,6 +66,8 @@ let aiAdminTokenResolver = null;
 let appSettingsDatabaseDraft = null;
 let logRenderTimer;
 let logScrollFrame;
+let streamBatchTimer;
+let pendingStreamLogs = [];
 let lastFilteredLogs = [];
 let lastVirtualWindowKey = '';
 let logTextSelectionActive = false;
@@ -1345,23 +1350,68 @@ function nodeIdsForContainerKeys(values) {
 
 function logsForActiveContainer() {
   if (!state.selectedContainers.length) return state.logs;
+  const selectedSources = new Set();
+  selectedContainerTargets().forEach((target) => {
+    const node = getNode(target.nodeId);
+    if (!node) return;
+    selectedSources.add(`${node.name}\u0000${target.name}`);
+    selectedSources.add(`${node.name}\u0000${target.containerId}`);
+  });
   const merged = new Map();
-  state.logs.forEach((log) => merged.set(log.id, log));
+  state.logs.forEach((log) => {
+    if (selectedSources.has(`${log.node}\u0000${log.container}`)) merged.set(log.id, log);
+  });
   state.selectedContainers.forEach((key) => (state.containerLogCache[key] || []).forEach((log) => merged.set(log.id, log)));
   return sortLogsNewest(Array.from(merged.values()));
 }
 
-function sortLogsNewest(logs) {
-  return [...logs].sort((left, right) => (Number(right.timestamp) || 0) - (Number(left.timestamp) || 0) || right.id - left.id);
+function compareLogsNewest(left, right) {
+  return (Number(right.timestamp) || 0) - (Number(left.timestamp) || 0) || right.id - left.id;
 }
 
-function mergeLogs(existing, incoming) {
+function sortLogsNewest(logs) {
+  return [...logs].sort(compareLogsNewest);
+}
+
+function mergeLogs(existing, incoming, { skipDuplicateCheck = false } = {}) {
   if (!incoming.length) return existing;
-  const merged = new Map();
-  [...existing, ...incoming].forEach((log) => {
-    if (log && log.id != null) merged.set(log.id, log);
+  const incomingById = new Map();
+  incoming.forEach((log) => {
+    if (log && log.id != null) incomingById.set(log.id, log);
   });
-  return sortLogsNewest(Array.from(merged.values())).slice(0, maxBufferedLogs);
+  if (!incomingById.size) return existing;
+  if (!skipDuplicateCheck) {
+    const existingIds = new Set(existing.map((log) => log?.id));
+    const hasNewLog = Array.from(incomingById.keys()).some((id) => !existingIds.has(id));
+    if (!hasNewLog) return existing;
+  }
+  const sortedIncoming = sortLogsNewest(Array.from(incomingById.values()));
+  const merged = [];
+  let existingIndex = 0;
+  let incomingIndex = 0;
+  while (merged.length < maxBufferedLogs && (existingIndex < existing.length || incomingIndex < sortedIncoming.length)) {
+    while (existingIndex < existing.length && incomingById.has(existing[existingIndex]?.id)) existingIndex += 1;
+    const existingLog = existing[existingIndex];
+    const incomingLog = sortedIncoming[incomingIndex];
+    if (!existingLog) {
+      if (incomingLog) merged.push(incomingLog);
+      incomingIndex += 1;
+      continue;
+    }
+    if (!incomingLog) {
+      merged.push(existingLog);
+      existingIndex += 1;
+      continue;
+    }
+    if (compareLogsNewest(incomingLog, existingLog) <= 0) {
+      merged.push(incomingLog);
+      incomingIndex += 1;
+    } else {
+      merged.push(existingLog);
+      existingIndex += 1;
+    }
+  }
+  return merged;
 }
 
 function logDate(log) {
@@ -1382,7 +1432,7 @@ function logTime(log) {
 
 async function loadSelectedContainerLogs() {
   const targets = selectedContainerTargets();
-  if (!targets.length || !goServerConnected) {
+  if (state.paused || !targets.length || !goServerConnected) {
     if (containerLogRetryTimer) clearTimeout(containerLogRetryTimer);
     containerLogRetryTimer = null;
     return;
@@ -1397,11 +1447,11 @@ async function loadSelectedContainerLogs() {
       const response = await fetch(`/api/logs/container?${query.toString()}`, { headers: { Accept: 'application/json' } });
       if (!response.ok) throw new Error('容器日志加载失败');
       const payload = await response.json();
-      if (state.selectedContainers.join('|') !== selectionKey) return;
+      if (state.paused || state.selectedContainers.join('|') !== selectionKey) return;
       state.containerLogCache[cacheKey] = payload.logs || [];
       loading = loading || Boolean(payload.loading);
     }));
-    if (state.selectedContainers.join('|') !== selectionKey) return;
+    if (state.paused || state.selectedContainers.join('|') !== selectionKey) return;
     scheduleLogRender();
     updatePreview();
     if (loading) {
@@ -1646,9 +1696,11 @@ function renderNodes() {
   $('#metric-containers-foot').textContent = activeContainers
     ? `${activeContainers} 个运行中容器`
     : '当前没有运行中的容器';
-  $('#metric-processed-foot').textContent = state.processed
-    ? '服务启动后累计接收，不等于缓存条数'
-    : '等待日志流';
+  $('#metric-processed-foot').textContent = state.paused
+    ? '已暂停，当前视图不会接收新日志'
+    : state.processed
+      ? '服务启动后累计接收，不等于缓存条数'
+      : '等待日志流';
   $('#node-list').innerHTML = nodes.length ? nodes.map((node) => {
     const containers = node.containers || [];
     const expanded = state.expandedNodes.includes(node.id);
@@ -1809,8 +1861,8 @@ function scheduleLogRender() {
   if (logRenderTimer) return;
   logRenderTimer = setTimeout(() => {
     logRenderTimer = null;
-    renderLogs();
-  }, 80);
+    renderLogs({ preserveScroll: true });
+  }, logRenderInterval);
 }
 
 function hasLogTextSelection() {
@@ -1877,14 +1929,6 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   stream.append(emptyState);
   emptyState.classList.toggle('hidden', allResults.length > 0);
   if (preserveScroll && stream.scrollTop !== scrollTop) stream.scrollTop = scrollTop;
-  $$('#log-stream .log-row').forEach((row) => row.addEventListener('click', (event) => {
-    if (event.target.closest('[data-analyze-log]')) return;
-    if (hasLogTextSelection()) return;
-    const logId = Number(row.dataset.logId);
-    state.selectedLog = state.selectedLog === logId ? 0 : logId;
-    renderLogs();
-    updatePreview();
-  }));
 }
 
 function updateDetailPanel() {
@@ -1957,31 +2001,45 @@ function showToast(message) {
 
 async function syncGoBackend({ connectStream = false, incremental = false } = {}) {
   try {
+    const processedBeforeRequest = state.processed;
     const knownLogId = incremental ? state.logs.reduce((maxId, log) => Math.max(maxId, Number(log.id) || 0), 0) : 0;
     const cursor = Math.max(0, knownLogId - 2000);
     const endpoint = knownLogId ? `/api/bootstrap?since=${encodeURIComponent(cursor)}` : '/api/bootstrap';
-    const response = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+    let response = await fetch(endpoint, { headers: { Accept: 'application/json' } });
     if (!response.ok) throw new Error('Go backend is unavailable');
-    const payload = await response.json();
+    let payload = await response.json();
+    let serverRestarted = false;
+    if (knownLogId && Number(payload.processed) < processedBeforeRequest) {
+      response = await fetch('/api/bootstrap', { headers: { Accept: 'application/json' } });
+      if (!response.ok) throw new Error('Go backend is unavailable');
+      payload = await response.json();
+      serverRestarted = true;
+    }
+    const updateLogView = !state.paused;
     const previousRange = state.range;
     const previousHistoryLoading = state.historyLoading;
     const incomingLogs = payload.logs || [];
-    const stageInitialLogs = !initialLogPreviewRendered && incomingLogs.length > 0;
+    const stageInitialLogs = updateLogView && !initialLogPreviewRendered && incomingLogs.length > 0;
     nodes.splice(0, nodes.length, ...(payload.nodes || []));
     state.selectedNodes = state.selectedNodes.filter((id) => getNode(id));
     state.expandedNodes = state.expandedNodes.filter((id) => getNode(id));
     const serverCapacity = Number(payload.storage?.capacity);
     if (Number.isInteger(serverCapacity) && serverCapacity > 0) maxBufferedLogs = serverCapacity;
-    state.logs = incremental ? mergeLogs(state.logs, incomingLogs) : incomingLogs;
-    state.processed = payload.processed;
-    state.historyLoading = Boolean(payload.historyLoading);
-    if (stageInitialLogs) {
-      initialLogPreviewRendered = true;
-      initialLogPreviewActive = true;
-      initialLogPreviewLimit = initialLogPreviewSize;
+    let logsChanged = false;
+    if (updateLogView) {
+      const previousLogs = state.logs;
+      state.logs = incremental && !serverRestarted ? mergeLogs(state.logs, incomingLogs) : incomingLogs;
+      logsChanged = state.logs !== previousLogs;
+      state.processed = payload.processed;
+      state.historyLoading = Boolean(payload.historyLoading);
+      if (stageInitialLogs) {
+        initialLogPreviewRendered = true;
+        initialLogPreviewActive = true;
+        initialLogPreviewLimit = initialLogPreviewSize;
+      }
+      updateLastSync(state.logs[0]?.timestamp);
+      updateStorage(payload.storage);
     }
-    updateLastSync(state.logs[0]?.timestamp);
-    updateStorage(payload.storage);
     if (rangeLabels[payload.range]) {
       state.range = payload.range;
       $('#time-range-filter').value = payload.range;
@@ -1992,26 +2050,29 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
     syncRuleButtons();
     goServerConnected = true;
     const syncLabel = eventStream?.readyState === EventSource.OPEN ? '实时同步中' : '服务端已连接';
-    $('#sync-status').textContent = syncLabel;
+    $('#sync-status').textContent = state.paused ? '接收已暂停' : syncLabel;
     if (!state.paused) $('#stream-status').textContent = state.historyLoading ? '正在加载历史日志' : '正在监听';
-    updateSyncFooter(syncLabel, 'connected');
-    $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
-    $('#metric-processed-foot').textContent = state.processed
-      ? '服务启动后累计接收，不等于缓存条数'
-      : '等待日志流';
+    updateSyncFooter(state.paused ? '已暂停接收' : syncLabel, state.paused ? 'paused' : 'connected');
+    if (updateLogView) $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
+    $('#metric-processed-foot').textContent = state.paused
+      ? '已暂停，当前视图不会接收新日志'
+      : state.processed
+        ? '服务启动后累计接收，不等于缓存条数'
+        : '等待日志流';
     renderNodes();
-    if (!incremental || incomingLogs.length || previousRange !== state.range || previousHistoryLoading !== state.historyLoading) {
+    if (updateLogView && (!incremental || serverRestarted || logsChanged || previousRange !== state.range || previousHistoryLoading !== state.historyLoading)) {
       const renderLimit = initialLogPreviewActive ? initialLogPreviewLimit : 0;
       renderLogs({ renderLimit });
     }
-    scheduleInitialLogCompletion();
+    if (updateLogView) scheduleInitialLogCompletion();
     updateDetailPanel(); updatePreview();
     persistSelection();
-    if (connectStream || !eventStream || eventStream.readyState === EventSource.CLOSED) connectGoStream();
-    if (state.selectedContainers.length) loadSelectedContainerLogs();
+    if (!state.paused && (connectStream || !eventStream || eventStream.readyState === EventSource.CLOSED)) connectGoStream();
+    if (!state.paused && state.selectedContainers.length) loadSelectedContainerLogs();
     return true;
   } catch (error) {
     goServerConnected = false;
+    if (state.paused) return false;
     $('#sync-status').textContent = '等待后端连接';
     updateSyncFooter('等待服务连接', 'offline');
     return false;
@@ -2019,44 +2080,91 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
 }
 
 function scheduleHistorySync() {
-  if (historySyncTimer || !goServerConnected || !state.historyLoading) return;
+  if (historySyncTimer || state.paused || !goServerConnected || !state.historyLoading) return;
   historySyncTimer = setTimeout(async () => {
     historySyncTimer = null;
-    if (!goServerConnected || !state.historyLoading) return;
+    if (state.paused || !goServerConnected || !state.historyLoading) return;
     if (await syncGoBackend({ incremental: true }) && state.historyLoading) scheduleHistorySync();
   }, 500);
 }
 
+function clearPendingStreamBatch() {
+  if (streamBatchTimer) clearTimeout(streamBatchTimer);
+  streamBatchTimer = null;
+  pendingStreamLogs = [];
+}
+
+function flushPendingStreamLogs() {
+  streamBatchTimer = null;
+  if (state.paused || !pendingStreamLogs.length) {
+    pendingStreamLogs = [];
+    return;
+  }
+  const incomingLogs = pendingStreamLogs;
+  pendingStreamLogs = [];
+  state.logs = mergeLogs(state.logs, incomingLogs, { skipDuplicateCheck: true });
+
+  const cacheKeysBySource = new Map();
+  selectedContainerTargets().forEach((target) => {
+    const activeNode = getNode(target.nodeId);
+    if (!activeNode) return;
+    const cacheKey = containerKey(target.nodeId, target.containerId);
+    cacheKeysBySource.set(`${activeNode.name}\u0000${target.name}`, cacheKey);
+    cacheKeysBySource.set(`${activeNode.name}\u0000${target.containerId}`, cacheKey);
+  });
+  const cacheUpdates = new Map();
+  incomingLogs.forEach((incoming) => {
+    const cacheKey = cacheKeysBySource.get(`${incoming.node}\u0000${incoming.container}`);
+    if (!cacheKey) return;
+    if (!cacheUpdates.has(cacheKey)) cacheUpdates.set(cacheKey, []);
+    cacheUpdates.get(cacheKey).push(incoming);
+  });
+  cacheUpdates.forEach((updates, cacheKey) => {
+    state.containerLogCache[cacheKey] = mergeLogs(state.containerLogCache[cacheKey] || [], updates, { skipDuplicateCheck: true });
+  });
+
+  state.processed += incomingLogs.length;
+  $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
+  $('#metric-processed-foot').textContent = '服务启动后累计接收，不等于缓存条数';
+  updateSyncFooter('实时同步中', 'connected');
+  const newestTimestamp = incomingLogs.reduce((latest, log) => Math.max(latest, Number(log.timestamp) || 0), 0);
+  updateLastSync(newestTimestamp);
+  scheduleLogRender();
+}
+
+function enqueueStreamLog(incoming) {
+  pendingStreamLogs.push(incoming);
+  if (pendingStreamLogs.length > maxPendingStreamLogs) {
+    pendingStreamLogs.splice(0, pendingStreamLogs.length - maxPendingStreamLogs);
+  }
+  if (!streamBatchTimer) streamBatchTimer = setTimeout(flushPendingStreamLogs, streamBatchInterval);
+}
+
 function connectGoStream() {
+  if (state.paused) return;
   if (eventStream) eventStream.close();
-  eventStream = new EventSource('/api/stream');
-  eventStream.onopen = () => {
+  const stream = new EventSource('/api/stream');
+  eventStream = stream;
+  stream.onopen = () => {
+    if (eventStream !== stream) {
+      stream.close();
+      return;
+    }
+    if (state.paused) {
+      stream.close();
+      return;
+    }
     $('#sync-status').textContent = '实时同步中';
     $('#stream-status').textContent = '正在监听';
     updateSyncFooter('实时同步中', 'connected');
   };
-  eventStream.onmessage = (event) => {
-    if (state.paused) return;
-    const incoming = JSON.parse(event.data);
-    state.logs.unshift(incoming);
-    state.logs = sortLogsNewest(state.logs).slice(0, maxBufferedLogs);
-    const activeTargets = selectedContainerTargets();
-    activeTargets.forEach((target) => {
-      const activeNode = getNode(target.nodeId);
-      if (!activeNode || incoming.node !== activeNode.name || (incoming.container !== target.name && incoming.container !== target.containerId)) return;
-      const cacheKey = containerKey(target.nodeId, target.containerId);
-      const cached = state.containerLogCache[cacheKey] || [];
-      state.containerLogCache[cacheKey] = [incoming, ...cached.filter((log) => log.id !== incoming.id)].slice(0, maxBufferedLogs);
-    });
-    state.processed += 1;
-    $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
-    $('#metric-processed-foot').textContent = '服务启动后累计接收，不等于缓存条数';
-    updateSyncFooter('实时同步中', 'connected');
-    updateLastSync(incoming.timestamp);
-    scheduleLogRender();
+  stream.onmessage = (event) => {
+    if (state.paused || eventStream !== stream) return;
+    enqueueStreamLog(JSON.parse(event.data));
   };
-  eventStream.onerror = () => {
-    eventStream.close();
+  stream.onerror = () => {
+    stream.close();
+    if (state.paused || eventStream !== stream) return;
     goServerConnected = false;
     $('#sync-status').textContent = '实时流未连接';
     $('#stream-status').textContent = '等待连接';
@@ -2254,19 +2362,47 @@ function bindEvents() {
   $('#global-search').addEventListener('input', (event) => { state.globalQuery = event.target.value; resetLogPagination(); renderLogs(); });
   $('#log-stream').addEventListener('click', (event) => {
     const button = event.target.closest('[data-analyze-log]');
-    if (!button) return;
-    event.preventDefault();
-    event.stopPropagation();
-    analyzeLogFromButton(button);
+    if (button) {
+      event.preventDefault();
+      event.stopPropagation();
+      analyzeLogFromButton(button);
+      return;
+    }
+    const row = event.target.closest('.log-row');
+    if (!row || hasLogTextSelection()) return;
+    const logId = Number(row.dataset.logId);
+    state.selectedLog = state.selectedLog === logId ? 0 : logId;
+    renderLogs();
+    updatePreview();
   });
   $('#log-stream').addEventListener('scroll', scheduleLogWindowRender);
-  $('#pause-button').addEventListener('click', () => {
+  $('#pause-button').addEventListener('click', async () => {
     state.paused = !state.paused;
     $('#pause-button').classList.toggle('paused', state.paused);
     $('#pause-button').innerHTML = state.paused ? '<span>▶</span> 继续接收' : '<span>Ⅱ</span> 暂停接收';
-    $('#stream-status').textContent = state.paused ? '已暂停接收' : '正在监听';
     $('.stream-indicator').style.background = state.paused ? 'var(--orange)' : 'var(--teal)';
-    showToast(state.paused ? '日志接收已暂停' : '日志接收已恢复');
+    if (state.paused) {
+      if (eventStream) eventStream.close();
+      clearPendingStreamBatch();
+      if (historySyncTimer) {
+        clearTimeout(historySyncTimer);
+        historySyncTimer = null;
+      }
+      if (containerLogRetryTimer) {
+        clearTimeout(containerLogRetryTimer);
+        containerLogRetryTimer = null;
+      }
+      $('#sync-status').textContent = '接收已暂停';
+      $('#stream-status').textContent = '已暂停接收';
+      $('#metric-processed-foot').textContent = '已暂停，当前视图不会接收新日志';
+      updateSyncFooter('已暂停接收', 'paused');
+      showToast('日志接收已暂停');
+      return;
+    }
+    $('#stream-status').textContent = '正在恢复';
+    showToast('正在恢复日志接收');
+    const connected = await syncGoBackend({ incremental: true });
+    if (!state.paused && connected && state.historyLoading) scheduleHistorySync();
   });
   $('#clear-button').addEventListener('click', () => { state.query = ''; $('#log-search').value = ''; resetLogPagination(); renderLogs(); showToast('已清空当前过滤条件'); });
   bindAssistantEvents();

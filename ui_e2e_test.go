@@ -23,6 +23,194 @@ type assistantMarkdownSafety struct {
 	SameBackground bool `json:"sameBackground"`
 }
 
+type logStreamPauseView struct {
+	Processed    string `json:"processed"`
+	Paused       bool   `json:"paused"`
+	NewLogCount  int    `json:"newLogCount"`
+	StreamStatus string `json:"streamStatus"`
+}
+
+type logStreamBurstView struct {
+	Buffered     int `json:"buffered"`
+	Pending      int `json:"pending"`
+	RenderedRows int `json:"renderedRows"`
+	NewestID     int `json:"newestId"`
+}
+
+func TestE2ELogStreamPauseFreezesAndResumes(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+
+	now := time.Now()
+	first := LogEntry{
+		ID: 1, Date: now.Format("2006/01/02"), Time: now.Format("15:04:05"), Timestamp: now.UnixMilli(),
+		Level: "info", Node: "E2E Node", Container: "api", Message: "first log", nodeID: "e2e-node",
+	}
+	s := &server{
+		nodes:                 []Node{{ID: "e2e-node", Name: "E2E Node", Status: "connected"}},
+		logs:                  []LogEntry{first},
+		processed:             1,
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		chromedp.WindowSize(1440, 1000),
+	)
+	allocatorContext, cancelAllocator := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAllocator)
+	browserContext, cancelBrowser := chromedp.NewContext(allocatorContext,
+		chromedp.WithErrorf(func(string, ...any) {}),
+	)
+	t.Cleanup(cancelBrowser)
+
+	if err := chromedp.Run(browserContext,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`[data-log-id="1"]`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("load initial log stream: %v", err)
+	}
+	waitForSubscriberCount(t, s, 1)
+
+	if err := chromedp.Run(browserContext,
+		chromedp.Click(`#pause-button`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("pause log stream: %v", err)
+	}
+	waitForSubscriberCount(t, s, 0)
+
+	secondTime := now.Add(time.Second)
+	second := LogEntry{
+		ID: 2, Date: secondTime.Format("2006/01/02"), Time: secondTime.Format("15:04:05"), Timestamp: secondTime.UnixMilli(),
+		Level: "error", Node: "E2E Node", Container: "api", Message: "log received while paused", nodeID: "e2e-node",
+	}
+	s.mu.Lock()
+	s.logs = []LogEntry{second, first}
+	s.processed = 2
+	s.nextLogID = 2
+	s.mu.Unlock()
+
+	// Wait longer than the three-second bootstrap refresh interval. The paused
+	// view must remain frozen even if a refresh was already in flight.
+	if err := chromedp.Run(browserContext, chromedp.Sleep(3500*time.Millisecond)); err != nil {
+		t.Fatalf("wait while paused: %v", err)
+	}
+	pausedView := readLogStreamPauseView(t, browserContext)
+	if pausedView.Processed != "1" || !pausedView.Paused || pausedView.NewLogCount != 0 || pausedView.StreamStatus != "已暂停接收" {
+		t.Fatalf("paused view changed while backend received a log: %+v", pausedView)
+	}
+
+	if err := chromedp.Run(browserContext,
+		chromedp.Click(`#pause-button`, chromedp.ByQuery),
+		chromedp.WaitVisible(`[data-log-id="2"]`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("resume and catch up log stream: %v", err)
+	}
+	resumedView := readLogStreamPauseView(t, browserContext)
+	if resumedView.Processed != "2" || resumedView.Paused || resumedView.NewLogCount != 1 {
+		t.Fatalf("resumed view did not catch up: %+v", resumedView)
+	}
+	waitForSubscriberCount(t, s, 1)
+
+	var burstView logStreamBurstView
+	if err := chromedp.Run(browserContext,
+		chromedp.Evaluate(`(() => {
+			const now = Date.now();
+			for (let index = 0; index < 2000; index += 1) {
+				enqueueStreamLog({
+					id: 1000 + index,
+					date: '2026/09/14',
+					time: '12:00:00',
+					timestamp: now + index,
+					level: 'info',
+					node: 'E2E Node',
+					container: 'api',
+					message: 'restart burst',
+				});
+			}
+			return true;
+		})()`, nil),
+		chromedp.Sleep(500*time.Millisecond),
+		chromedp.Evaluate(`({
+			buffered: state.logs.length,
+			pending: pendingStreamLogs.length,
+			renderedRows: document.querySelectorAll('#log-stream .log-row').length,
+			newestId: state.logs[0]?.id || 0,
+		})`, &burstView),
+		chromedp.Click(`#pause-button`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("process restart log burst: %v", err)
+	}
+	if burstView.Buffered != 2002 || burstView.Pending != 0 || burstView.RenderedRows > 200 || burstView.NewestID != 2999 {
+		t.Fatalf("log burst was not batched and virtualized: %+v", burstView)
+	}
+	var pausedStatus string
+	if err := chromedp.Run(browserContext, chromedp.Text(`#stream-status`, &pausedStatus, chromedp.ByQuery)); err != nil {
+		t.Fatalf("read stream status after burst: %v", err)
+	}
+	if pausedStatus != "已暂停接收" {
+		t.Fatalf("dashboard did not remain interactive after burst, status=%q", pausedStatus)
+	}
+	waitForSubscriberCount(t, s, 0)
+}
+
+func readLogStreamPauseView(t *testing.T, browserContext context.Context) logStreamPauseView {
+	t.Helper()
+	var view logStreamPauseView
+	if err := chromedp.Run(browserContext, chromedp.Evaluate(`({
+		processed: document.querySelector('#metric-processed').textContent,
+		paused: state.paused,
+		newLogCount: document.querySelectorAll('[data-log-id="2"]').length,
+		streamStatus: document.querySelector('#stream-status').textContent,
+	})`, &view)); err != nil {
+		t.Fatalf("read log stream state: %v", err)
+	}
+	return view
+}
+
+func waitForSubscriberCount(t *testing.T, s *server, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.RLock()
+		count := len(s.subscribers)
+		s.mu.RUnlock()
+		if count == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.mu.RLock()
+	count := len(s.subscribers)
+	s.mu.RUnlock()
+	t.Fatalf("subscriber count = %d, want %d", count, want)
+}
+
 func TestE2EAssistantInteractions(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
