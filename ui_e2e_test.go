@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -427,9 +430,14 @@ func TestE2EAssistantInteractions(t *testing.T) {
 		chromedp.WaitVisible(`#assistant-session-list .assistant-session-item:nth-child(2) [data-select-assistant-session]`, chromedp.ByQuery),
 		chromedp.Click(`#assistant-session-list .assistant-session-item:nth-child(2) [data-select-assistant-session]`, chromedp.ByQuery),
 		chromedp.Text(`#assistant-context-count`, &contextCount, chromedp.ByQuery),
+		// Selecting a session closes the menu, so reopen it before deleting.
+		// The selected (now active) session is not necessarily :first-child:
+		// syncActiveAssistantSession only promotes a session when a new one is
+		// started, so a plain select leaves the list order untouched. Target
+		// the active item explicitly to exercise "delete the active session".
 		chromedp.Click(`#assistant-session-toggle`, chromedp.ByQuery),
-		chromedp.WaitVisible(`#assistant-session-list .assistant-session-item:first-child [data-delete-assistant-session]`, chromedp.ByQuery),
-		chromedp.Click(`#assistant-session-list .assistant-session-item:first-child [data-delete-assistant-session]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#assistant-session-list .assistant-session-item.active [data-delete-assistant-session]`, chromedp.ByQuery),
+		chromedp.Click(`#assistant-session-list .assistant-session-item.active [data-delete-assistant-session]`, chromedp.ByQuery),
 		chromedp.Text(`#assistant-context-count`, &contextCount, chromedp.ByQuery),
 		chromedp.Evaluate(`JSON.parse(localStorage.getItem('log-agent-ai-sessions') || '[]').length`, &persistedSessions),
 	); err != nil {
@@ -544,4 +552,177 @@ func writeE2EPixel(t *testing.T) string {
 		t.Fatalf("write test image: %v", err)
 	}
 	return path
+}
+
+// storageModeView is what the settings panel looks like to a given caller.
+type storageModeView struct {
+	Mode            string `json:"mode"`
+	Status          string `json:"status"`
+	Note            string `json:"note"`
+	SectionHidden   bool   `json:"sectionHidden"`
+	PathsHidden     bool   `json:"pathsHidden"`
+	ActionsHidden   bool   `json:"actionsHidden"`
+	NodesPath       string `json:"nodesPath"`
+	RevealDisabled  bool   `json:"revealDisabled"`
+	LocalStorageKey string `json:"localStorageKey"`
+}
+
+// TestE2EStorageModeFollowsRequestOrigin drives the real page twice: once over
+// the httptest loopback address (file mode) and once with a forged non-loopback
+// RemoteAddr (browser mode). The rule the user asked for is fixed, not a user
+// choice, so the page must reflect whatever /api/bootstrap reported.
+func TestE2EStorageModeFollowsRequestOrigin(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+
+	newServer := func(t *testing.T) *httptest.Server {
+		t.Helper()
+		// configDir() is memoized for the life of the process, so point it at a
+		// scratch directory before the store resolves anything.
+		t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+		*configDirCache() = configDirState{}
+		t.Cleanup(func() { *configDirCache() = configDirState{} })
+		s := &server{
+			nodes:                 []Node{},
+			logs:                  []LogEntry{},
+			processed:             0,
+			nextLogID:             0,
+			historyRange:          "30m",
+			rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+			ruleOrder:             defaultRuleOrder(),
+			subscribers:           make(map[chan LogEntry]struct{}),
+			containerNames:        make(map[string]map[string]string),
+			containerLogs:         make(map[string][]LogEntry),
+			historyCoverage:       make(map[string]time.Time),
+			historyLoads:          make(map[string]struct{}),
+			historyLoadGeneration: make(map[string]uint64),
+			streams:               make(map[string]struct{}),
+			nodeContexts:          make(map[string]context.Context),
+			nodeCancels:           make(map[string]context.CancelFunc),
+			settings:              defaultAppSettings(),
+			store:                 newConfigStore(),
+		}
+		web := httptest.NewServer(newHTTPHandler(s))
+		t.Cleanup(web.Close)
+		return web
+	}
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Flag("headless", true),
+		chromedp.NoSandbox,
+	)
+
+	inspect := func(t *testing.T, url string) storageModeView {
+		t.Helper()
+		allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+		defer cancelAlloc()
+		ctx, cancel := chromedp.NewContext(allocCtx)
+		defer cancel()
+
+		var raw string
+		if err := chromedp.Run(ctx,
+			chromedp.Navigate(url),
+			// The panel lives in a hidden modal; open it through the app's own
+			// entry point so loadConfigInfo() and updateStorageModeUI() run, then
+			// give the settings and config-info fetches time to settle.
+			chromedp.Evaluate(`openAppSettings()`, nil),
+			chromedp.Sleep(2*time.Second),
+			chromedp.Evaluate(`JSON.stringify({
+				status: document.querySelector('#settings-config-status')?.textContent || '',
+				note: document.querySelector('#settings-config-note')?.textContent || '',
+				sectionHidden: !!document.querySelector('#settings-config-storage')?.classList.contains('hidden'),
+				pathsHidden: !!document.querySelector('#settings-config-paths')?.classList.contains('hidden'),
+				actionsHidden: !!document.querySelector('#settings-config-actions')?.classList.contains('hidden'),
+				nodesPath: document.querySelector('#settings-nodes-path')?.textContent || '',
+				revealDisabled: !!(document.querySelector('#settings-config-reveal')||{}).disabled,
+				localStorageKey: String(!!localStorage.getItem('log-agent-browser-nodes')),
+			})`, &raw),
+		); err != nil {
+			t.Fatalf("inspect storage mode: %v", err)
+		}
+		var view storageModeView
+		if err := json.Unmarshal([]byte(raw), &view); err != nil {
+			t.Fatalf("decode panel view %q: %v", raw, err)
+		}
+		// The status text is the only mode signal a user sees.
+		if view.Status == "本地 JSON 文件" {
+			view.Mode = "file"
+		} else if view.Status == "此浏览器" {
+			view.Mode = "browser"
+		}
+		return view
+	}
+
+	t.Run("local caller sees file paths and actions", func(t *testing.T) {
+		web := newServer(t)
+		view := inspect(t, web.URL)
+		if view.Mode != "file" {
+			t.Fatalf("local caller mode = %q, want file", view.Mode)
+		}
+		if view.SectionHidden || view.PathsHidden || view.ActionsHidden {
+			t.Fatalf("local caller must see the storage section: %+v", view)
+		}
+		if view.NodesPath == "" || view.NodesPath == "—" {
+			t.Fatalf("local caller must see the resolved node path, got %q", view.NodesPath)
+		}
+		if view.Status != "本地 JSON 文件" {
+			t.Fatalf("local caller status = %q, want 本地 JSON 文件", view.Status)
+		}
+	})
+
+	t.Run("remote caller is routed to browser storage", func(t *testing.T) {
+		// httptest always connects from 127.0.0.1, so rewrite RemoteAddr to a
+		// public address to act as a visitor on someone else's deployment.
+		s := &server{
+			nodes:                 []Node{},
+			logs:                  []LogEntry{},
+			historyRange:          "30m",
+			rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+			ruleOrder:             defaultRuleOrder(),
+			subscribers:           make(map[chan LogEntry]struct{}),
+			containerNames:        make(map[string]map[string]string),
+			containerLogs:         make(map[string][]LogEntry),
+			historyCoverage:       make(map[string]time.Time),
+			historyLoads:          make(map[string]struct{}),
+			historyLoadGeneration: make(map[string]uint64),
+			streams:               make(map[string]struct{}),
+			nodeContexts:          make(map[string]context.Context),
+			nodeCancels:           make(map[string]context.CancelFunc),
+			settings:              defaultAppSettings(),
+			store:                 newConfigStore(),
+		}
+		handler := newHTTPHandler(s)
+		web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.RemoteAddr = "124.174.71.198:51234"
+			handler.ServeHTTP(w, r)
+		}))
+		t.Cleanup(web.Close)
+
+		view := inspect(t, web.URL)
+		if view.Mode != "browser" {
+			t.Fatalf("remote caller mode = %q, want browser", view.Mode)
+		}
+		// The whole point of browser mode: no filesystem affordances at all.
+		if !view.SectionHidden {
+			t.Fatal("remote caller must not see the file-backed storage section")
+		}
+		if view.NodesPath != "" && view.NodesPath != "—" {
+			t.Fatalf("remote caller leaked a node path: %q", view.NodesPath)
+		}
+		if view.Status != "此浏览器" {
+			t.Fatalf("remote caller status = %q, want 此浏览器", view.Status)
+		}
+		if !strings.Contains(view.Note, "浏览器") {
+			t.Fatalf("remote caller note must explain browser storage, got %q", view.Note)
+		}
+	})
 }

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -85,30 +86,287 @@ func TestEmbeddedLoadingAnimationKeepsFullLoop(t *testing.T) {
 	}
 }
 
-func TestNewServerFallsBackWhenDatabaseIsUnavailable(t *testing.T) {
-	settingsPath := filepath.Join(t.TempDir(), "log-agent-settings.json")
-	settings := `{
-  "environment": "test",
-  "database": {
-    "enabled": true,
-    "host": "127.0.0.1",
-    "port": "1",
-    "user": "unavailable",
-    "password": "unavailable",
-    "name": "log_agent"
-  }
-}`
-	if err := os.WriteFile(settingsPath, []byte(settings), 0600); err != nil {
-		t.Fatalf("write unavailable database settings: %v", err)
-	}
-	t.Setenv("LOG_AGENT_SETTINGS_FILE", settingsPath)
+func TestNewServerStartsWithFileBackedStorage(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
 
 	s := newServer()
-	if s.db != nil {
-		t.Fatal("expected unavailable database to fall back to memory-only storage")
+	if s.store == nil {
+		t.Fatal("expected a file-backed config store to be created")
 	}
-	if s.settings.Database.Host != "127.0.0.1" || !s.settings.Database.Enabled {
-		t.Fatalf("database settings were not retained after fallback: %+v", s.settings.Database)
+	if s.nodes == nil {
+		t.Fatal("expected an initialized node slice on a fresh install")
+	}
+	if len(s.nodes) != 0 {
+		t.Fatalf("expected no nodes on a fresh install, got %d", len(s.nodes))
+	}
+	if filepath.Dir(nodesFilePath()) != configRoot {
+		t.Fatalf("node config path = %s, want it under %s", nodesFilePath(), configRoot)
+	}
+	if filepath.Dir(modelsFilePath()) != configRoot {
+		t.Fatalf("model config path = %s, want it under %s", modelsFilePath(), configRoot)
+	}
+}
+
+// The JSON store must survive a hand-edited file: invalid rows are dropped and
+// IDs are reassigned so the rest of the app never sees duplicates or gaps.
+func TestConfigStoreSanitizesHandEditedFiles(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+
+	raw := `[
+  {"id": 7, "name": "kept", "address": "http://127.0.0.1:8080"},
+  {"id": 7, "name": "duplicate id", "address": "http://127.0.0.1:8081"},
+  {"id": 3, "name": "", "address": "http://127.0.0.1:8082"},
+  {"id": 4, "name": "no address", "address": ""}
+]`
+	if err := os.WriteFile(nodesFilePath(), []byte(raw), 0600); err != nil {
+		t.Fatalf("write hand-edited nodes file: %v", err)
+	}
+
+	store := newConfigStore()
+	nodes, err := store.listNodes()
+	if err != nil {
+		t.Fatalf("list nodes from hand-edited file: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("expected 2 valid nodes, got %d: %+v", len(nodes), nodes)
+	}
+	seen := make(map[int64]bool, len(nodes))
+	for _, node := range nodes {
+		if seen[node.ID] {
+			t.Fatalf("duplicate node id %d survived sanitizing", node.ID)
+		}
+		seen[node.ID] = true
+		if node.Name == "" || node.Address == "" {
+			t.Fatalf("incomplete node survived sanitizing: %+v", node)
+		}
+	}
+}
+
+// Nodes and models live in separate files, so a node-only write must not
+// disturb the model catalog.
+func TestConfigStoreKeepsNodesAndModelsIndependent(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+
+	store := newConfigStore()
+	nodeID, err := store.insertNode("local", "http://127.0.0.1:8099", "dozzle")
+	if err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	if nodeID <= 0 {
+		t.Fatalf("insert node returned id %d", nodeID)
+	}
+	modelID, err := store.upsertModel(0, "example", "https://api.example.com", "sk-secret", 2, []string{"gpt-4o-mini"})
+	if err != nil {
+		t.Fatalf("upsert model: %v", err)
+	}
+
+	nodes, err := store.listNodes()
+	if err != nil {
+		t.Fatalf("list nodes: %v", err)
+	}
+	models, err := store.listModels()
+	if err != nil {
+		t.Fatalf("list models: %v", err)
+	}
+	if len(nodes) != 1 || len(models) != 1 {
+		t.Fatalf("expected 1 node and 1 model, got %d and %d", len(nodes), len(models))
+	}
+
+	// Editing a provider without re-sending the key must not wipe it.
+	if _, err := store.upsertModel(modelID, "example renamed", "https://api.example.com", "", 2, []string{"gpt-4o-mini", "gpt-4o"}); err != nil {
+		t.Fatalf("update model: %v", err)
+	}
+	record, err := store.findModel(modelID)
+	if err != nil {
+		t.Fatalf("find model after update: %v", err)
+	}
+	if record.APIKey != "sk-secret" {
+		t.Fatalf("stored api key = %q, want it preserved across an edit", record.APIKey)
+	}
+	if record.Name != "example renamed" {
+		t.Fatalf("stored name = %q, want the update applied", record.Name)
+	}
+
+	if err := store.deleteNode(nodeID); err != nil {
+		t.Fatalf("delete node: %v", err)
+	}
+	models, err = store.listModels()
+	if err != nil {
+		t.Fatalf("list models after node delete: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("deleting a node changed the model catalog: %d models remain", len(models))
+	}
+}
+
+// Config files hold API keys, so they must not be group/world readable.
+func TestConfigStoreWritesPrivateFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not report POSIX file modes")
+	}
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+
+	store := newConfigStore()
+	if _, err := store.upsertModel(0, "example", "https://api.example.com", "sk-secret", 2, []string{"gpt-4o-mini"}); err != nil {
+		t.Fatalf("upsert model: %v", err)
+	}
+	info, err := os.Stat(modelsFilePath())
+	if err != nil {
+		t.Fatalf("stat models file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Fatalf("models file mode = %o, want 600", perm)
+	}
+}
+
+func TestConfigStoreReplaceAllResolvesIncomingIDs(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+
+	store := newConfigStore()
+	if _, err := store.insertNode("old", "http://127.0.0.1:8080", "dozzle"); err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+
+	// An import file may omit ids or repeat them; replaceAll owns the final set.
+	if err := store.replaceAll(
+		[]storedNode{
+			{Name: "a", Address: "http://127.0.0.1:9001"},
+			{ID: 42, Name: "b", Address: "http://127.0.0.1:9002"},
+			{ID: 42, Name: "c", Address: "http://127.0.0.1:9003"},
+		},
+		[]storedModel{{Name: "p", BaseURL: "https://api.example.com", ModelName: "m"}},
+	); err != nil {
+		t.Fatalf("replace all: %v", err)
+	}
+
+	nodes, err := store.listNodes()
+	if err != nil {
+		t.Fatalf("list nodes after replace: %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("expected 3 imported nodes, got %d: %+v", len(nodes), nodes)
+	}
+	seen := make(map[int64]bool, len(nodes))
+	for _, node := range nodes {
+		if seen[node.ID] {
+			t.Fatalf("duplicate node id %d after import", node.ID)
+		}
+		seen[node.ID] = true
+	}
+	models, err := store.listModels()
+	if err != nil {
+		t.Fatalf("list models after replace: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 1 imported model, got %d", len(models))
+	}
+}
+
+// configDir() memoises its result, so tests that change the environment must
+// reset the cache between cases. Production code never needs this: the cache
+// is deliberately write-once so a running process cannot change its target.
+//
+// The struct is cleared through a pointer rather than copied, because
+// sync.Once must not be copied after first use.
+func resetConfigDirCache(t *testing.T) {
+	t.Helper()
+	*configDirCache() = configDirState{}
+	t.Cleanup(func() { *configDirCache() = configDirState{} })
+}
+
+func TestConfigDirPrefersExplicitOverride(t *testing.T) {
+	override := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", override)
+	resetConfigDirCache(t)
+	if got := configDir(); got != override {
+		t.Fatalf("configDir() = %s, want the LOG_AGENT_CONFIG_DIR override %s", got, override)
+	}
+}
+
+// The default location is the "data" folder beside the executable, so an
+// install stays self-contained and the whole folder can be copied elsewhere.
+func TestConfigDirDefaultsToDataFolderBesideExecutable(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", "")
+	resetConfigDirCache(t)
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	got := configDir()
+	want := filepath.Join(filepath.Dir(executable), "data")
+	if got != want {
+		// A read-only build directory legitimately falls back; accept that but
+		// make sure it did not silently resolve somewhere relative.
+		if filepath.IsAbs(got) && strings.Contains(got, "logAgent") {
+			t.Skipf("executable directory is not writable; fell back to %s", got)
+		}
+		t.Fatalf("configDir() = %s, want %s", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("configDir() = %s, want an absolute path", got)
+	}
+}
+
+func TestIsWritableDirRejectsUncreatablePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows path semantics make an uncreatable path hard to express portably")
+	}
+	// A path under a regular file can never be created.
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatalf("write blocker file: %v", err)
+	}
+	if isWritableDir(filepath.Join(file, "child")) {
+		t.Fatal("isWritableDir accepted a path under an existing file")
+	}
+}
+
+func TestConfigDirResultIsStableAcrossCalls(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	resetConfigDirCache(t)
+	first := configDir()
+	// Mutating the environment after the first call must not move the target,
+	// otherwise a running process could start writing to a different file.
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	if second := configDir(); second != first {
+		t.Fatalf("configDir() changed from %s to %s without a restart", first, second)
+	}
+}
+
+func TestListenAddressResolution(t *testing.T) {
+	cases := []struct {
+		name    string
+		port    string
+		envPort string
+		want    string
+	}{
+		{name: "default", want: ":8099"},
+		{name: "LOG_AGENT_PORT wins", port: "7777", envPort: "6666", want: ":7777"},
+		{name: "PORT fallback", envPort: "6666", want: ":6666"},
+		{name: "leading colon tolerated", port: ":7777", want: ":7777"},
+		{name: "invalid falls back", port: "not-a-port", want: ":8099"},
+		{name: "out of range falls back", port: "70000", want: ":8099"},
+		{name: "zero falls back", port: "0", want: ":8099"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("LOG_AGENT_PORT", testCase.port)
+			t.Setenv("PORT", testCase.envPort)
+			if got := listenAddress(); got != testCase.want {
+				t.Fatalf("listenAddress() = %s, want %s", got, testCase.want)
+			}
+		})
 	}
 }
 
@@ -342,6 +600,115 @@ func TestLogRangeLoadsOnlyRequestedNodeScope(t *testing.T) {
 	}
 }
 
+func TestLogRangeLoadsOnlyRequestedContainerWhenSharedCacheIsFull(t *testing.T) {
+	previousCapacity := maxStoredLogs
+	maxStoredLogs = 1
+	defer func() { maxStoredLogs = previousCapacity }()
+
+	requests := make(map[string]int)
+	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests[r.URL.Path]++
+		w.Header().Set("Content-Type", "application/x-jsonl")
+		_, _ = fmt.Fprintln(w, `{"t":"single","m":"selected older log","rm":"selected older log","ts":1700000000000,"id":2,"l":"info","c":"container-1"}`)
+	}))
+	defer dozzle.Close()
+
+	s := &server{
+		nodes:                 []Node{{ID: "node-1", Name: "one", baseURL: dozzle.URL, hostID: "host-1", Containers: []containerInfo{{ID: "container-1", Name: "one", State: "running"}, {ID: "container-2", Name: "two", State: "running"}}}},
+		logs:                  []LogEntry{{ID: 1, Timestamp: time.Now().UnixMilli(), Message: "cached"}},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{},
+		containerNames:        map[string]map[string]string{"node-1": {"container-1": "one", "container-2": "two"}},
+		containerLogs:         map[string][]LogEntry{},
+		nodeContexts:          map[string]context.Context{"node-1": context.Background()},
+		subscribers:           map[chan LogEntry]struct{}{},
+		streams:               map[string]struct{}{},
+		nodeCancels:           map[string]context.CancelFunc{},
+		historyLoads:          map[string]struct{}{},
+		historyLoadGeneration: map[string]uint64{},
+	}
+
+	response := httptest.NewRecorder()
+	s.handleLogRange(response, httptest.NewRequest(http.MethodPost, "/api/logs/range?range=1d&node=node-1&container=node-1%3A%3Acontainer-1", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted range response, got %d", response.Code)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && s.historyLoading() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.historyLoading() {
+		t.Fatal("selected container history loading did not finish")
+	}
+	if requests["/api/hosts/host-1/containers/container-1/logs"] != 1 || requests["/api/hosts/host-1/containers/container-2/logs"] != 0 {
+		t.Fatalf("expected only selected container to be queried, got %#v", requests)
+	}
+	loaded := s.containerLogs[containerLogKey("node-1", "container-1")]
+	if len(loaded) != 1 || loaded[0].Message != "selected older log" {
+		t.Fatalf("expected selected history to bypass full shared cache, got %#v", loaded)
+	}
+}
+
+func TestGroupedDozzleLogFallsBackToRawMessage(t *testing.T) {
+	s := &server{
+		nodes:          []Node{{ID: "node-1", Name: "node"}},
+		rules:          map[string]bool{},
+		containerNames: map[string]map[string]string{"node-1": {"container-1": "api"}},
+		containerLogs:  map[string][]LogEntry{},
+		subscribers:    map[chan LogEntry]struct{}{},
+	}
+	s.ingestDozzleEvent("node-1", []byte(`{"t":"group","m":{"unexpected":true},"rm":"failed group message","ts":1700000000000,"id":8,"l":"info","c":"container-1"}`), false)
+	if len(s.logs) != 1 || s.logs[0].Message != "failed group message" {
+		t.Fatalf("expected group fallback to preserve raw message, got %#v", s.logs)
+	}
+}
+
+func TestContainerLogsExpandsExistingCacheToRequestedRange(t *testing.T) {
+	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-jsonl")
+		_, _ = fmt.Fprintln(w, `{"t":"single","m":"older selected log","rm":"older selected log","ts":1700000000000,"id":2,"l":"info","c":"container-1"}`)
+	}))
+	defer dozzle.Close()
+
+	current := LogEntry{ID: 1, Timestamp: time.Now().UnixMilli(), Message: "current selected log", Node: "node", Container: "api", nodeID: "node-1"}
+	s := &server{
+		nodes:                 []Node{{ID: "node-1", Name: "node", baseURL: dozzle.URL, hostID: "host-1"}},
+		logs:                  []LogEntry{current},
+		nextLogID:             1,
+		historyRange:          "1w",
+		rules:                 map[string]bool{},
+		containerNames:        map[string]map[string]string{"node-1": {"container-1": "api"}},
+		containerLogs:         map[string][]LogEntry{containerLogKey("node-1", "container-1"): {current}},
+		nodeContexts:          map[string]context.Context{"node-1": context.Background()},
+		subscribers:           map[chan LogEntry]struct{}{},
+		streams:               map[string]struct{}{},
+		nodeCancels:           map[string]context.CancelFunc{},
+		historyLoads:          map[string]struct{}{},
+		historyLoadGeneration: map[string]uint64{},
+	}
+
+	response := httptest.NewRecorder()
+	s.handleContainerLogs(response, httptest.NewRequest(http.MethodGet, "/api/logs/container?node=node-1&container=container-1&range=1w", nil))
+	var payload containerLogsResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode container response: %v", err)
+	}
+	if !payload.Loading {
+		t.Fatal("expected existing short cache to start loading the requested week")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && s.historyLoading() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.historyLoading() {
+		t.Fatal("container range expansion did not finish")
+	}
+	if got := s.containerLogs[containerLogKey("node-1", "container-1")]; len(got) != 2 {
+		t.Fatalf("expected both cached and older container logs, got %#v", got)
+	}
+}
+
 func TestLogRangeNarrowsWithoutClearingCache(t *testing.T) {
 	now := time.Now().UnixMilli()
 	existing := LogEntry{ID: 1, Timestamp: now, Message: "current log", Level: "info", Node: "node", Container: "api", nodeID: "node-1"}
@@ -542,4 +909,255 @@ func (s *server) historyLoading() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.historyPending > 0
+}
+
+func TestClearLogCacheHandler(t *testing.T) {
+	s := newServer()
+	s.mu.Lock()
+	s.logs = []LogEntry{{ID: 1, Message: "one"}, {ID: 2, Message: "two"}}
+	s.containerLogs["node::container"] = []LogEntry{{ID: 1}}
+	s.historyCoverage["node::container"] = time.Now()
+	s.evictedLogs = 3
+	s.lastEvictedAt = 123
+	s.mu.Unlock()
+
+	response := httptest.NewRecorder()
+	s.handleClearLogCache(response, httptest.NewRequest(http.MethodPost, "/api/logs/cache/clear", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", response.Code)
+	}
+	var payload struct {
+		Cleared int          `json:"cleared"`
+		Storage storageStats `json:"storage"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode clear cache response: %v", err)
+	}
+	if payload.Cleared != 2 {
+		t.Fatalf("expected 2 cleared logs, got %d", payload.Cleared)
+	}
+	if payload.Storage.Used != 0 || payload.Storage.Capacity != maxStoredLogs || payload.Storage.Evicted != 0 {
+		t.Fatalf("unexpected storage stats after clear: %#v", payload.Storage)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.logs) != 0 || len(s.containerLogs) != 0 || len(s.historyCoverage) != 0 {
+		t.Fatalf("expected caches to be empty, got logs=%d containerLogs=%d coverage=%d", len(s.logs), len(s.containerLogs), len(s.historyCoverage))
+	}
+	if s.evictedLogs != 0 || s.lastEvictedAt != 0 {
+		t.Fatalf("expected eviction stats reset, got evicted=%d lastEvictedAt=%d", s.evictedLogs, s.lastEvictedAt)
+	}
+
+	methodResponse := httptest.NewRecorder()
+	s.handleClearLogCache(methodResponse, httptest.NewRequest(http.MethodGet, "/api/logs/cache/clear", nil))
+	if methodResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status 405 for GET, got %d", methodResponse.Code)
+	}
+}
+
+// Verifies the exact response shape the frontend consumes when the cache is
+// non-empty, and that a second clear is a no-op reporting zero.
+func TestClearLogCacheReportsCountAndResetsStats(t *testing.T) {
+	s := newServer()
+	s.mu.Lock()
+	for i := 1; i <= 25; i++ {
+		s.logs = append(s.logs, LogEntry{ID: int64(i), Message: "seed"})
+	}
+	s.containerLogs["node::api"] = s.logs
+	s.historyCoverage["node::api"] = time.Now()
+	s.evictedLogs = 7
+	s.lastEvictedAt = 99999
+	s.processed = 25
+	s.mu.Unlock()
+
+	decode := func(rec *httptest.ResponseRecorder) (int, storageStats) {
+		t.Helper()
+		var payload struct {
+			Cleared int          `json:"cleared"`
+			Storage storageStats `json:"storage"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return payload.Cleared, payload.Storage
+	}
+
+	first := httptest.NewRecorder()
+	s.handleClearLogCache(first, httptest.NewRequest(http.MethodPost, "/api/logs/cache/clear", nil))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first clear status = %d, want 200", first.Code)
+	}
+	cleared, storage := decode(first)
+	if cleared != 25 {
+		t.Fatalf("cleared = %d, want 25", cleared)
+	}
+	if storage.Used != 0 || storage.Percent != 0 || storage.Evicted != 0 || storage.LastEvictedAt != 0 {
+		t.Fatalf("storage not reset: %#v", storage)
+	}
+
+	s.mu.RLock()
+	keptProcessed := s.processed
+	s.mu.RUnlock()
+	if keptProcessed != 25 {
+		t.Fatalf("processed counter should be preserved, got %d", keptProcessed)
+	}
+
+	second := httptest.NewRecorder()
+	s.handleClearLogCache(second, httptest.NewRequest(http.MethodPost, "/api/logs/cache/clear", nil))
+	clearedAgain, _ := decode(second)
+	if clearedAgain != 0 {
+		t.Fatalf("second clear reported %d, want 0", clearedAgain)
+	}
+}
+
+// --- storage backend selection -------------------------------------------
+
+func TestBackendForRequestDistinguishesLocalFromRemote(t *testing.T) {
+	cases := []struct {
+		name       string
+		remoteAddr string
+		want       configBackend
+	}{
+		{name: "ipv4 loopback", remoteAddr: "127.0.0.1:51234", want: backendFile},
+		{name: "ipv6 loopback", remoteAddr: "[::1]:51234", want: backendFile},
+		{name: "ipv6 mapped ipv4 loopback", remoteAddr: "[::ffff:127.0.0.1]:51234", want: backendFile},
+		{name: "loopback without port", remoteAddr: "127.0.0.1", want: backendFile},
+		{name: "lan address", remoteAddr: "192.168.4.84:51234", want: backendBrowser},
+		{name: "public address", remoteAddr: "124.174.71.198:51234", want: backendBrowser},
+		{name: "ipv6 mapped lan address", remoteAddr: "[::ffff:192.168.4.84]:51234", want: backendBrowser},
+		{name: "garbage", remoteAddr: "not-an-address", want: backendBrowser},
+		{name: "empty", remoteAddr: "", want: backendBrowser},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/api/config/info", nil)
+			request.RemoteAddr = testCase.remoteAddr
+			if got := backendForRequest(request); got != testCase.want {
+				t.Fatalf("backendForRequest(%q) = %s, want %s", testCase.remoteAddr, got, testCase.want)
+			}
+		})
+	}
+}
+
+// A remote caller must never be able to write to the owner's configuration.
+func TestNodeWritesRejectedForRemoteCaller(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+
+	s := newServer()
+	body := bytes.NewBufferString(`{"name":"injected","url":"http://127.0.0.1:9999"}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/nodes", body)
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "124.174.71.198:51234"
+	response := httptest.NewRecorder()
+
+	s.handleNodes(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("remote node create returned %d, want 403", response.Code)
+	}
+	if _, err := os.Stat(nodesFilePath()); err == nil {
+		t.Fatal("a remote request created the node configuration file")
+	}
+}
+
+func TestNodeWriteAllowedForLocalCaller(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+
+	s := newServer()
+	body := bytes.NewBufferString(`{"name":"local","url":"http://127.0.0.1:9999"}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/nodes", body)
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "127.0.0.1:51234"
+	response := httptest.NewRecorder()
+
+	s.handleNodes(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("local node create returned %d, want 201: %s", response.Code, response.Body.String())
+	}
+	nodes, err := s.store.listNodes()
+	if err != nil {
+		t.Fatalf("list stored nodes: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected the node to be persisted, got %d", len(nodes))
+	}
+}
+
+// The panel must not hand a visitor the server's directory layout.
+func TestConfigInfoHidesPathsFromRemoteCaller(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+
+	s := newServer()
+	request := httptest.NewRequest(http.MethodGet, "/api/config/info", nil)
+	request.RemoteAddr = "8.8.8.8:51234"
+	response := httptest.NewRecorder()
+	s.handleConfigInfo(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("config info returned %d, want 200", response.Code)
+	}
+	var remote configInfoResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &remote); err != nil {
+		t.Fatalf("decode remote config info: %v", err)
+	}
+	if remote.LocalMode {
+		t.Fatal("remote caller was reported as local")
+	}
+	if remote.CanReveal {
+		t.Fatal("remote caller was offered a file-manager button")
+	}
+	if remote.Directory != "" || remote.NodesPath != "" || remote.ModelsPath != "" || remote.DisplayDir != "" {
+		t.Fatalf("remote caller received server paths: %+v", remote)
+	}
+
+	localRequest := httptest.NewRequest(http.MethodGet, "/api/config/info", nil)
+	localRequest.RemoteAddr = "127.0.0.1:51234"
+	localResponse := httptest.NewRecorder()
+	s.handleConfigInfo(localResponse, localRequest)
+	var local configInfoResponse
+	if err := json.Unmarshal(localResponse.Body.Bytes(), &local); err != nil {
+		t.Fatalf("decode local config info: %v", err)
+	}
+	if !local.LocalMode {
+		t.Fatal("loopback caller was not reported as local")
+	}
+	if local.Directory != configRoot {
+		t.Fatalf("local directory = %q, want %q", local.Directory, configRoot)
+	}
+}
+
+// The bootstrap tells the client which store to use, and it must follow the
+// same rule as the write guards.
+func TestBootstrapReportsStorageMode(t *testing.T) {
+	for _, testCase := range []struct {
+		remoteAddr string
+		want       string
+	}{
+		{remoteAddr: "127.0.0.1:51234", want: string(backendFile)},
+		{remoteAddr: "124.174.71.198:51234", want: string(backendBrowser)},
+	} {
+		s := &server{
+			logs: nil, rules: map[string]bool{}, ruleOrder: defaultRuleOrder(),
+			containerLogs: map[string][]LogEntry{}, historyCoverage: map[string]time.Time{},
+			nodeContexts: map[string]context.Context{}, nodeCancels: map[string]context.CancelFunc{},
+		}
+		request := httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil)
+		request.RemoteAddr = testCase.remoteAddr
+		response := httptest.NewRecorder()
+		s.handleBootstrap(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("bootstrap returned %d, want 200", response.Code)
+		}
+		var payload bootstrapResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode bootstrap: %v", err)
+		}
+		if payload.StorageMode != testCase.want {
+			t.Fatalf("bootstrap storageMode for %s = %q, want %q", testCase.remoteAddr, payload.StorageMode, testCase.want)
+		}
+	}
 }

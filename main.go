@@ -5,12 +5,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
-	"database/sql"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"html"
 	"io"
 	"io/fs"
@@ -26,7 +26,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -39,7 +38,6 @@ const (
 	defaultMaxStoredLogs = 100000
 	maxAllowedStoredLogs = 1000000
 	maxContainerLogs     = 5000
-	defaultDatabaseName  = "log_agent"
 )
 
 var maxStoredLogs = defaultMaxStoredLogs
@@ -159,34 +157,45 @@ type aiProviderMessage struct {
 	Content any    `json:"content"`
 }
 
-type databaseSettings struct {
-	Enabled  bool   `json:"enabled"`
-	DSN      string `json:"dsn,omitempty"`
-	Host     string `json:"host,omitempty"`
-	Port     string `json:"port,omitempty"`
-	User     string `json:"user,omitempty"`
-	Password string `json:"password,omitempty"`
-	Name     string `json:"name,omitempty"`
+// configBackend selects where the dashboard keeps nodes and AI providers.
+//
+// There are two ways to reach this dashboard, and they must not interfere:
+//
+//   - backendFile: the page was opened on the machine running the service
+//     (over loopback). The configuration is genuinely the user's own, so it is
+//     read from and written to nodes.json / models.json, and the file can be
+//     opened in a file manager.
+//   - backendBrowser: the page was opened from anywhere else, so the caller is
+//     a visitor on someone else's deployment. Their nodes and API keys belong
+//     to them and must never be written to the server's disk, so everything
+//     stays in their browser's local storage.
+//
+// The backend is derived per request from the source address, never chosen by
+// the user and never persisted: the same service is legitimately both things
+// to two different callers at the same time.
+type configBackend string
+
+const (
+	backendBrowser configBackend = "browser"
+	backendFile    configBackend = "file"
+)
+
+// backendForRequest reports which storage the caller should use.
+func backendForRequest(r *http.Request) configBackend {
+	if isLoopbackRequest(r) {
+		return backendFile
+	}
+	return backendBrowser
 }
 
 type appSettings struct {
-	Environment string           `json:"environment"`
-	Database    databaseSettings `json:"database"`
-	AdminToken  string           `json:"admin_token,omitempty"`
+	Environment string `json:"environment"`
+	AdminToken  string `json:"admin_token,omitempty"`
 }
 
 type settingsResponse struct {
-	Environment string `json:"environment"`
-	Database    struct {
-		Enabled       bool   `json:"enabled"`
-		Configured    bool   `json:"configured"`
-		DSNConfigured bool   `json:"dsnConfigured"`
-		DSN           string `json:"dsn,omitempty"`
-		Host          string `json:"host,omitempty"`
-		Port          string `json:"port,omitempty"`
-		User          string `json:"user,omitempty"`
-	} `json:"database"`
-	AdminTokenConfigured bool `json:"adminTokenConfigured"`
+	Environment          string `json:"environment"`
+	AdminTokenConfigured bool   `json:"adminTokenConfigured"`
 }
 
 type aiChatResponse struct {
@@ -197,7 +206,7 @@ type aiChatResponse struct {
 
 type server struct {
 	mu                    sync.RWMutex
-	db                    *sql.DB
+	store                 *configStore
 	nodes                 []Node
 	logs                  []LogEntry
 	processed             int
@@ -262,11 +271,24 @@ type bootstrapResponse struct {
 	Rules          map[string]bool `json:"rules"`
 	RuleOrder      []string        `json:"ruleOrder"`
 	Storage        storageStats    `json:"storage"`
+	// StorageMode tells the client whether to keep nodes and AI providers here
+	// or in its own local storage.
+	StorageMode string `json:"storageMode"`
 }
 
 type containerLogsResponse struct {
 	Logs    []LogEntry `json:"logs"`
 	Loading bool       `json:"loading,omitempty"`
+}
+
+type containerHistoryPageResponse struct {
+	Logs       []LogEntry `json:"logs"`
+	HasMore    bool       `json:"hasMore"`
+	NextBefore int64      `json:"nextBefore,omitempty"`
+}
+
+type containerHistorySearchResponse struct {
+	Logs []LogEntry `json:"logs"`
 }
 
 type storageStats struct {
@@ -279,9 +301,28 @@ type storageStats struct {
 
 func main() {
 	s := newServer()
-	address := ":8099"
-	log.Printf("Log Agent is running at http://localhost%s", address)
+	address := listenAddress()
+	log.Printf("Log Agent is running at http://localhost:%s", strings.TrimPrefix(address, ":"))
 	log.Fatal(http.ListenAndServe(address, newHTTPHandler(s)))
+}
+
+// listenAddress resolves the listen address. PORT (or LOG_AGENT_PORT) lets a
+// user run a second instance next to a Dozzle install that already owns 8099.
+func listenAddress() string {
+	for _, name := range []string{"LOG_AGENT_PORT", "PORT"} {
+		raw := strings.TrimSpace(os.Getenv(name))
+		if raw == "" {
+			continue
+		}
+		raw = strings.TrimPrefix(raw, ":")
+		port, err := strconv.Atoi(raw)
+		if err != nil || port < 1 || port > 65535 {
+			log.Printf("ignoring invalid %s=%q; falling back to 8099", name, raw)
+			continue
+		}
+		return ":" + strconv.Itoa(port)
+	}
+	return ":8099"
 }
 
 func newHTTPHandler(s *server) http.Handler {
@@ -289,7 +330,10 @@ func newHTTPHandler(s *server) http.Handler {
 	mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/logs/container", s.handleContainerLogs)
+	mux.HandleFunc("/api/logs/container/page", s.handleContainerHistoryPage)
+	mux.HandleFunc("/api/logs/container/search", s.handleContainerHistorySearch)
 	mux.HandleFunc("/api/logs/range", s.handleLogRange)
+	mux.HandleFunc("/api/logs/cache/clear", s.handleClearLogCache)
 	mux.HandleFunc("/api/rules", s.handleRules)
 	mux.HandleFunc("/api/ai/status", s.handleAIStatus)
 	mux.HandleFunc("/api/ai/chat", s.handleAIChat)
@@ -298,10 +342,12 @@ func newHTTPHandler(s *server) http.Handler {
 	mux.HandleFunc("/api/commands/upload", s.handleCommandFileUpload)
 	mux.HandleFunc("/api/commands/execute", s.handleCommandExecute)
 	mux.HandleFunc("/api/settings", s.handleSettings)
-	mux.HandleFunc("/api/settings/database/test", s.handleDatabaseSettingsTest)
-	mux.HandleFunc("/api/settings/database", s.handleDatabaseSettings)
 	mux.HandleFunc("/api/settings/admin", s.handleAdminSettings)
 	mux.HandleFunc("/api/settings/environment", s.handleEnvironmentSettings)
+	mux.HandleFunc("/api/config/info", s.handleConfigInfo)
+	mux.HandleFunc("/api/config/reveal", s.handleConfigReveal)
+	mux.HandleFunc("/api/config/export", s.handleConfigExport)
+	mux.HandleFunc("/api/config/import", s.handleConfigImport)
 	mux.HandleFunc("/api/nodes", s.handleNodes)
 	mux.HandleFunc("/api/nodes/", s.handleNode)
 	mux.HandleFunc("/api/stream", s.handleStream)
@@ -691,22 +737,16 @@ func newServer() *server {
 		nodeContexts:          make(map[string]context.Context),
 		nodeCancels:           make(map[string]context.CancelFunc),
 		settings:              settings,
+		store:                 newConfigStore(),
 	}
-	if !databaseConfigured(settings) {
-		log.Printf("node database is not configured; using memory-only node storage")
-		return s
-	}
-	db, err := openNodeDatabase(settings)
-	if err != nil {
-		log.Printf("open node database failed: %v; using memory-only node storage", err)
-		return s
-	}
-	s.db = db
+	// Nodes and AI providers live in two JSON files, so a fresh install needs
+	// no database and no configuration step. The resolved path is logged
+	// because it depends on whether the executable's directory is writable.
+	log.Printf("node storage: %s and %s", nodesFilePath(), modelsFilePath())
 	if err := s.loadNodes(); err != nil {
-		log.Fatalf("load nodes from database: %v", err)
-	}
-	if err := s.ensureAIProfileTable(); err != nil {
-		log.Fatalf("ensure model_info table: %v", err)
+		// A corrupt or unreadable file must not stop the service: report it and
+		// start empty so the user can still reach the settings page to fix it.
+		log.Printf("load node configuration failed: %v; starting with no nodes", err)
 	}
 	s.startPersistedNodes()
 	return s
@@ -730,18 +770,6 @@ func configuredLogCacheCapacity() int {
 	return capacity
 }
 
-func (s *server) ensureAIProfileTable() error {
-	if s.db == nil {
-		return nil
-	}
-	return ensureAIProfileTable(s.db)
-}
-
-func ensureAIProfileTable(db *sql.DB) error {
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS model_info (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(200) NOT NULL, base_url VARCHAR(500) NOT NULL, api_key VARCHAR(1000) NOT NULL, type TINYINT NOT NULL DEFAULT 2, model_name VARCHAR(200) NOT NULL, create_time DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
-	return err
-}
-
 func settingsFilePath() string {
 	if path := strings.TrimSpace(os.Getenv("LOG_AGENT_SETTINGS_FILE")); path != "" {
 		return path
@@ -754,22 +782,9 @@ func defaultAppSettings() appSettings {
 	if environment == "" {
 		environment = "production"
 	}
-	databaseName := strings.TrimSpace(os.Getenv("DOZZLE_DB_NAME"))
-	if databaseName == "" {
-		databaseName = defaultDatabaseName
-	}
 	return appSettings{
 		Environment: environment,
-		Database: databaseSettings{
-			Enabled:  strings.TrimSpace(os.Getenv("DOZZLE_DB_DSN")) != "" || strings.TrimSpace(os.Getenv("DOZZLE_DB_HOST")) != "",
-			DSN:      strings.TrimSpace(os.Getenv("DOZZLE_DB_DSN")),
-			Host:     strings.TrimSpace(os.Getenv("DOZZLE_DB_HOST")),
-			Port:     strings.TrimSpace(os.Getenv("DOZZLE_DB_PORT")),
-			User:     strings.TrimSpace(os.Getenv("DOZZLE_DB_USER")),
-			Password: os.Getenv("DOZZLE_DB_PASSWORD"),
-			Name:     databaseName,
-		},
-		AdminToken: os.Getenv("LOG_AGENT_ADMIN_TOKEN"),
+		AdminToken:  os.Getenv("LOG_AGENT_ADMIN_TOKEN"),
 	}
 }
 
@@ -799,10 +814,6 @@ func loadAppSettings() appSettings {
 	if strings.TrimSpace(saved.Environment) != "" {
 		settings.Environment = strings.TrimSpace(saved.Environment)
 	}
-	settings.Database = saved.Database
-	if !settings.Database.Enabled && (strings.TrimSpace(settings.Database.DSN) != "" || strings.TrimSpace(settings.Database.Host) != "") {
-		settings.Database.Enabled = true
-	}
 	if saved.AdminToken != "" {
 		settings.AdminToken = saved.AdminToken
 	} else {
@@ -816,111 +827,49 @@ func saveAppSettings(settings appSettings) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(settingsFilePath(), append(content, '\n'), 0600)
-}
-
-func databaseConfigured(settings appSettings) bool {
-	return settings.Database.Enabled && (strings.TrimSpace(settings.Database.DSN) != "" || strings.TrimSpace(settings.Database.Host) != "")
-}
-
-func openNodeDatabase(settings appSettings) (*sql.DB, error) {
-	dsn := strings.TrimSpace(settings.Database.DSN)
-	if dsn == "" {
-		host := strings.TrimSpace(settings.Database.Host)
-		port := strings.TrimSpace(settings.Database.Port)
-		user := strings.TrimSpace(settings.Database.User)
-		database := strings.TrimSpace(settings.Database.Name)
-		if database == "" {
-			database = defaultDatabaseName
-		}
-		if host == "" || user == "" {
-			return nil, fmt.Errorf("database host and user are required")
-		}
-		if port == "" {
-			port = "3306"
-		}
-		config := mysql.Config{
-			User:      user,
-			Passwd:    settings.Database.Password,
-			Net:       "tcp",
-			Addr:      net.JoinHostPort(host, port),
-			DBName:    database,
-			ParseTime: true,
-			Loc:       time.Local,
-			Params:    map[string]string{"charset": "utf8mb4"},
-		}
-		dsn = config.FormatDSN()
+	if err := os.MkdirAll(configDir(), 0o700); err != nil {
+		return err
 	}
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return db, nil
+	return writeFileAtomic(settingsFilePath(), append(content, '\n'))
 }
 
 func (s *server) loadNodes() error {
-	loaded, err := loadNodesFromDatabase(s.db)
+	return s.loadNodesFromStore()
+}
+
+// loadNodesFromStore reads nodes.json and hydrates the live node list, wiring
+// up each node's context and cancel func exactly as the database path does.
+func (s *server) loadNodesFromStore() error {
+	if s.store == nil {
+		return nil
+	}
+	records, err := s.store.listNodes()
 	if err != nil {
 		return err
+	}
+	loaded := make([]Node, 0, len(records))
+	for _, record := range records {
+		baseURL, containerID, parseErr := parseDozzleURL(record.Address)
+		if parseErr != nil {
+			log.Printf("skip node %q: %v", record.Name, parseErr)
+			continue
+		}
+		loaded = append(loaded, Node{
+			ID:          nodeIDForDB(record.ID),
+			dbID:        record.ID,
+			Name:        record.Name,
+			URL:         record.Address,
+			Style:       record.Style,
+			Initial:     initialForName(record.Name),
+			Status:      "connecting",
+			baseURL:     baseURL,
+			containerID: containerID,
+		})
 	}
 	s.mu.Lock()
 	s.nodes = loaded
 	s.mu.Unlock()
 	return nil
-}
-
-func loadNodesFromDatabase(db *sql.DB) ([]Node, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	rows, err := db.QueryContext(ctx, `SELECT id, name, address, style FROM vps_info ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	loaded := make([]Node, 0)
-	for rows.Next() {
-		var dbID int64
-		var name, address string
-		var style sql.NullString
-		if err := rows.Scan(&dbID, &name, &address, &style); err != nil {
-			return nil, err
-		}
-		name = strings.TrimSpace(name)
-		address = normalizeNodeAddress(address)
-		node := Node{
-			ID:      nodeIDForDB(dbID),
-			Name:    name,
-			URL:     address,
-			Style:   strings.TrimSpace(style.String),
-			Initial: initialForName(name),
-			Status:  "connecting",
-			dbID:    dbID,
-		}
-		if node.Style == "" {
-			node.Style = "HTTP / WebSocket"
-		}
-		baseURL, containerID, parseErr := parseDozzleURL(address)
-		if parseErr != nil {
-			node.Status = "error"
-			node.Warning = true
-			node.Error = parseErr.Error()
-		} else {
-			node.baseURL = baseURL
-			node.containerID = containerID
-		}
-		loaded = append(loaded, node)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return loaded, nil
 }
 
 func (s *server) startPersistedNodes() {
@@ -969,44 +918,24 @@ func normalizeNodeStyle(style string) string {
 }
 
 func (s *server) insertNodeRecord(name, address, style string) (int64, error) {
-	if s.db == nil {
+	if s.store == nil {
 		return 0, nil
 	}
-	result, err := s.db.Exec(`INSERT INTO vps_info (name, address, style, create_time) VALUES (?, ?, ?, ?)`, name, address, normalizeNodeStyle(style), time.Now())
-	if err != nil {
-		return 0, err
-	}
-	dbID, err := result.LastInsertId()
-	if err != nil || dbID <= 0 {
-		if err == nil {
-			err = fmt.Errorf("database did not return inserted node id")
-		}
-		return 0, err
-	}
-	return dbID, nil
+	return s.store.insertNode(name, address, style)
 }
 
 func (s *server) updateNodeRecord(dbID int64, name, address, style string) error {
-	if s.db == nil || dbID <= 0 {
+	if s.store == nil || dbID <= 0 {
 		return nil
 	}
-	result, err := s.db.Exec(`UPDATE vps_info SET name = ?, address = ?, style = ? WHERE id = ?`, name, address, normalizeNodeStyle(style), dbID)
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err == nil && affected == 0 {
-		return sql.ErrNoRows
-	}
-	return err
+	return s.store.updateNode(dbID, name, address, style)
 }
 
 func (s *server) deleteNodeRecord(dbID int64) error {
-	if s.db == nil || dbID <= 0 {
+	if s.store == nil || dbID <= 0 {
 		return nil
 	}
-	_, err := s.db.Exec(`DELETE FROM vps_info WHERE id = ?`, dbID)
-	return err
+	return s.store.deleteNode(dbID)
 }
 
 func (s *server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -1040,6 +969,26 @@ func (s *server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, bootstrapResponse{
 		Nodes: append([]Node{}, s.nodes...), Logs: logs, Processed: s.processed, Range: s.historyRange,
 		HistoryLoading: s.historyPending > 0, Rules: copyRules(s.rules), RuleOrder: copyRuleOrder(s.ruleOrder), Storage: storage,
+		StorageMode: string(backendForRequest(r)),
+	})
+}
+
+func (s *server) handleClearLogCache(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.mu.Lock()
+	cleared := len(s.logs)
+	s.logs = nil
+	s.containerLogs = make(map[string][]LogEntry)
+	s.historyCoverage = make(map[string]time.Time)
+	s.evictedLogs = 0
+	s.lastEvictedAt = 0
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cleared": cleared,
+		"storage": storageStats{Used: 0, Capacity: maxStoredLogs},
 	})
 }
 
@@ -1149,32 +1098,136 @@ func (s *server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rangeKey, ok := normalizeLogRange(r.URL.Query().Get("range"))
+	if !ok {
+		s.mu.RLock()
+		rangeKey = s.historyRange
+		s.mu.RUnlock()
+	}
 	key := containerLogKey(nodeID, containerID)
 	s.mu.RLock()
 	logs := append([]LogEntry{}, s.containerLogs[key]...)
 	s.mu.RUnlock()
 
-	loading := false
-	if len(logs) == 0 {
-		loading = s.ensureContainerHistory(nodeID, containerID)
-	}
+	loading := s.ensureContainerHistory(nodeID, containerID, rangeKey)
 	writeJSON(w, http.StatusOK, containerLogsResponse{Logs: logs, Loading: loading})
 }
 
-func (s *server) ensureContainerHistory(nodeID, containerID string) bool {
+// handleContainerHistorySearch searches the entire requested time range at
+// Dozzle. It deliberately does not reuse the capped in-memory browse cache:
+// a busy container can have far more than 5,000 records in a week, and a
+// search must not silently omit matches that happen to be on older pages.
+func (s *server) handleContainerHistorySearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node"))
+	containerID := strings.TrimSpace(r.URL.Query().Get("container"))
+	needle := strings.ToLower(strings.Join(strings.Fields(r.URL.Query().Get("q")), " "))
+	if nodeID == "" || containerID == "" || needle == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "node, container and q are required"})
+		return
+	}
+	if len([]rune(needle)) > 512 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q is too long"})
+		return
+	}
+	rangeKey, ok := normalizeLogRange(r.URL.Query().Get("range"))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be one of 30m, 5h, 1d, 1w"})
+		return
+	}
+	s.mu.RLock()
+	node, found := s.nodeByIDLocked(nodeID)
+	s.mu.RUnlock()
+	if !found || node.hostID == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "container node is unavailable"})
+		return
+	}
+	duration, _ := logRangeDuration(rangeKey)
+	now := time.Now().UTC()
+	ctx, cancel := context.WithTimeout(r.Context(), historyFetchTimeout)
+	defer cancel()
+	logs, err := s.searchDozzleHistory(ctx, node, node.hostID, containerID, now.Add(-duration), now, needle)
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		writeJSON(w, status, map[string]string{"error": "筛选完整时间范围日志失败: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, containerHistorySearchResponse{Logs: logs})
+}
+
+func (s *server) handleContainerHistoryPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	nodeID, containerID := strings.TrimSpace(r.URL.Query().Get("node")), strings.TrimSpace(r.URL.Query().Get("container"))
+	before, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("before")), 10, 64)
+	if nodeID == "" || containerID == "" || err != nil || before <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "node, container and before are required"})
+		return
+	}
+	rangeKey, ok := normalizeLogRange(r.URL.Query().Get("range"))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid range"})
+		return
+	}
+	s.mu.RLock()
+	node, found := s.nodeByIDLocked(nodeID)
+	s.mu.RUnlock()
+	if !found || node.hostID == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "container node is unavailable"})
+		return
+	}
+	duration, _ := logRangeDuration(rangeKey)
+	from := time.Now().UTC().Add(-duration)
+	to := time.UnixMilli(before).UTC().Add(-time.Millisecond)
+	if !to.After(from) {
+		writeJSON(w, http.StatusOK, containerHistoryPageResponse{Logs: []LogEntry{}, HasMore: false})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), historyFetchTimeout)
+	defer cancel()
+	oldest, count, logs, err := s.fetchDozzleHistorySearchPage(ctx, node, node.hostID, containerID, from, to, "")
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "加载更早日志失败: " + err.Error()})
+		return
+	}
+	hasMore := count == dozzleHistoryPageSize && !oldest.IsZero() && oldest.After(from)
+	next := int64(0)
+	if hasMore {
+		next = oldest.UnixMilli()
+	}
+	writeJSON(w, http.StatusOK, containerHistoryPageResponse{Logs: logs, HasMore: hasMore, NextBefore: next})
+}
+
+func (s *server) ensureContainerHistory(nodeID, containerID, rangeKey string) bool {
+	duration, ok := logRangeDuration(rangeKey)
+	if !ok {
+		return false
+	}
+	desiredFrom := time.Now().UTC().Add(-duration)
 	key := containerLogKey(nodeID, containerID)
 	s.mu.RLock()
 	node, nodeOK := s.nodeByIDLocked(nodeID)
 	ctx := s.nodeContexts[nodeID]
-	rangeKey := s.historyRange
 	generation := s.historyGeneration
 	_, alreadyLoading := s.historyLoads[key]
+	coverage, covered := s.historyCoverage[key]
 	s.mu.RUnlock()
 	if !nodeOK || node.hostID == "" || ctx == nil {
 		return false
 	}
+	if covered && !coverage.After(desiredFrom) {
+		return false
+	}
 	if !alreadyLoading {
-		s.launchHistoryFetch(ctx, node, node.hostID, containerID, rangeKey, generation)
+		s.launchHistoryFetchWindow(ctx, node, node.hostID, containerID, desiredFrom, time.Now().UTC(), generation, true)
 	}
 	s.mu.RLock()
 	_, loading := s.historyLoads[key]
@@ -1205,6 +1258,17 @@ func (s *server) handleLogRange(w http.ResponseWriter, r *http.Request) {
 			requestedNodeIDs[nodeID] = struct{}{}
 		}
 	}
+	requestedContainers := make(map[string]map[string]struct{})
+	for _, scope := range r.URL.Query()["container"] {
+		parts := strings.SplitN(strings.TrimSpace(scope), "::", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			continue
+		}
+		if requestedContainers[parts[0]] == nil {
+			requestedContainers[parts[0]] = make(map[string]struct{})
+		}
+		requestedContainers[parts[0]][parts[1]] = struct{}{}
+	}
 
 	s.mu.Lock()
 	nodes := append([]Node{}, s.nodes...)
@@ -1214,12 +1278,30 @@ func (s *server) handleLogRange(w http.ResponseWriter, r *http.Request) {
 			scopedNodeIDs[node.ID] = struct{}{}
 		}
 	}
+	for nodeID := range requestedContainers {
+		for _, node := range nodes {
+			if node.ID == nodeID {
+				scopedNodeIDs[nodeID] = struct{}{}
+				break
+			}
+		}
+	}
 	scopeIDs := make([]string, 0, len(scopedNodeIDs))
 	for nodeID := range scopedNodeIDs {
 		scopeIDs = append(scopeIDs, nodeID)
 	}
 	sort.Strings(scopeIDs)
-	scopeKey := strings.Join(scopeIDs, ",")
+	containerScopeIDs := make([]string, 0)
+	for nodeID, containerIDs := range requestedContainers {
+		if _, selected := scopedNodeIDs[nodeID]; !selected {
+			continue
+		}
+		for containerID := range containerIDs {
+			containerScopeIDs = append(containerScopeIDs, containerLogKey(nodeID, containerID))
+		}
+	}
+	sort.Strings(containerScopeIDs)
+	scopeKey := "nodes=" + strings.Join(scopeIDs, ",") + "|containers=" + strings.Join(containerScopeIDs, ",")
 	scopeChanged := s.historyNodeScope != scopeKey
 	if s.historyRange == rangeKey && !scopeChanged {
 		s.mu.Unlock()
@@ -1260,20 +1342,26 @@ func (s *server) handleLogRange(w http.ResponseWriter, r *http.Request) {
 			if node.hostID == "" {
 				continue
 			}
+			if selectedContainerIDs := requestedContainers[node.ID]; len(selectedContainerIDs) > 0 {
+				for containerID := range selectedContainerIDs {
+					s.addHistoryTargetLocked(&targets, node, containerID, from, now, true)
+				}
+				continue
+			}
 			containerIDs := s.containerNames[node.ID]
 			if len(containerIDs) > 0 {
 				for containerID := range containerIDs {
-					s.addHistoryTargetLocked(&targets, node, containerID, from, now)
+					s.addHistoryTargetLocked(&targets, node, containerID, from, now, false)
 				}
 				continue
 			}
 			if node.containerID != "" {
-				s.addHistoryTargetLocked(&targets, node, node.containerID, from, now)
+				s.addHistoryTargetLocked(&targets, node, node.containerID, from, now, false)
 				continue
 			}
 			for _, container := range node.Containers {
 				if container.ID != "" {
-					s.addHistoryTargetLocked(&targets, node, container.ID, from, now)
+					s.addHistoryTargetLocked(&targets, node, container.ID, from, now, false)
 				}
 			}
 		}
@@ -1281,7 +1369,7 @@ func (s *server) handleLogRange(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	for _, target := range targets {
-		s.launchHistoryFetchWindow(target.ctx, target.node, target.node.hostID, target.containerID, target.from, target.to, generation)
+		s.launchHistoryFetchWindow(target.ctx, target.node, target.node.hostID, target.containerID, target.from, target.to, generation, target.allowWhenSharedCacheFull)
 	}
 	status := "filtered"
 	if strictReload {
@@ -1293,14 +1381,15 @@ func (s *server) handleLogRange(w http.ResponseWriter, r *http.Request) {
 }
 
 type historyTarget struct {
-	node        Node
-	containerID string
-	ctx         context.Context
-	from        time.Time
-	to          time.Time
+	node                     Node
+	containerID              string
+	ctx                      context.Context
+	from                     time.Time
+	to                       time.Time
+	allowWhenSharedCacheFull bool
 }
 
-func (s *server) addHistoryTargetLocked(targets *[]historyTarget, node Node, containerID string, from, to time.Time) {
+func (s *server) addHistoryTargetLocked(targets *[]historyTarget, node Node, containerID string, from, to time.Time, allowWhenSharedCacheFull bool) {
 	key := containerLogKey(node.ID, containerID)
 	boundary, hasBoundary := s.historyCoverage[key]
 	if earliest, ok := s.earliestContainerLogLocked(node.ID, containerID); ok && (!hasBoundary || earliest.Before(boundary)) {
@@ -1316,7 +1405,7 @@ func (s *server) addHistoryTargetLocked(targets *[]historyTarget, node Node, con
 		to = boundary.Add(time.Millisecond)
 	}
 	*targets = append(*targets, historyTarget{
-		node: node, containerID: containerID, ctx: s.nodeContexts[node.ID], from: from, to: to,
+		node: node, containerID: containerID, ctx: s.nodeContexts[node.ID], from: from, to: to, allowWhenSharedCacheFull: allowWhenSharedCacheFull,
 	})
 }
 
@@ -1358,10 +1447,10 @@ func (s *server) launchHistoryFetch(parent context.Context, node Node, hostID, c
 		return
 	}
 	now := time.Now().UTC()
-	s.launchHistoryFetchWindow(parent, node, hostID, containerID, now.Add(-duration), now, generation)
+	s.launchHistoryFetchWindow(parent, node, hostID, containerID, now.Add(-duration), now, generation, false)
 }
 
-func (s *server) launchHistoryFetchWindow(parent context.Context, node Node, hostID, containerID string, from, to time.Time, generation uint64) {
+func (s *server) launchHistoryFetchWindow(parent context.Context, node Node, hostID, containerID string, from, to time.Time, generation uint64, allowWhenSharedCacheFull bool) {
 	if !from.Before(to) {
 		return
 	}
@@ -1396,7 +1485,7 @@ func (s *server) launchHistoryFetchWindow(parent context.Context, node Node, hos
 			}
 			s.mu.Unlock()
 		}()
-		s.fetchDozzleHistory(parent, node, hostID, containerID, from, to, generation)
+		s.fetchDozzleHistoryWithCachePolicy(parent, node, hostID, containerID, from, to, generation, allowWhenSharedCacheFull)
 	}()
 }
 
@@ -1414,9 +1503,8 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 type settingsUpdateRequest struct {
-	Environment string           `json:"environment"`
-	Database    databaseSettings `json:"database"`
-	AdminToken  string           `json:"adminToken"`
+	Environment string `json:"environment"`
+	AdminToken  string `json:"adminToken"`
 }
 
 func (s *server) currentAdminToken() string {
@@ -1432,17 +1520,10 @@ func authorizedAdminRequest(r *http.Request, token string) bool {
 }
 
 func settingsView(settings appSettings) settingsResponse {
-	var response settingsResponse
-	response.Environment = settings.Environment
-	response.Database.Enabled = settings.Database.Enabled
-	response.Database.Configured = databaseConfigured(settings)
-	response.Database.DSNConfigured = strings.TrimSpace(settings.Database.DSN) != ""
-	response.Database.Host = strings.TrimSpace(settings.Database.Host)
-	response.Database.Port = strings.TrimSpace(settings.Database.Port)
-	response.Database.User = strings.TrimSpace(settings.Database.User)
-	response.Database.DSN = ""
-	response.AdminTokenConfigured = strings.TrimSpace(settings.AdminToken) != ""
-	return response
+	return settingsResponse{
+		Environment:          settings.Environment,
+		AdminTokenConfigured: strings.TrimSpace(settings.AdminToken) != "",
+	}
 }
 
 func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -1486,231 +1567,14 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		settings.AdminToken = strings.TrimSpace(request.AdminToken)
 	}
 
-	database := request.Database
-	database.DSN = strings.TrimSpace(database.DSN)
-	database.Host = strings.TrimSpace(database.Host)
-	database.Port = strings.TrimSpace(database.Port)
-	database.User = strings.TrimSpace(database.User)
-	database.Name = strings.TrimSpace(database.Name)
-	if database.Name == "" {
-		database.Name = previous.Database.Name
-		if database.Name == "" {
-			database.Name = defaultDatabaseName
-		}
-	}
-	if !database.Enabled {
-		database = databaseSettings{}
-	} else if database.DSN == "" && database.Host == "" && database.User == "" && database.Name == "" {
-		// An empty form keeps the existing connection, including its secret.
-		database = previous.Database
-	} else {
-		if database.Password == "" && database.Host == previous.Database.Host && database.User == previous.Database.User && database.Name == previous.Database.Name {
-			database.Password = previous.Database.Password
-		}
-		if database.Port == "" {
-			database.Port = "3306"
-		}
-	}
-	settings.Database = database
-	if settings.Database.Enabled && strings.TrimSpace(settings.Database.DSN) == "" && strings.TrimSpace(settings.Database.Host) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "database DSN or host is required"})
-		return
-	}
-
-	var nextDB *sql.DB
-	var loaded []Node
-	if databaseConfigured(settings) {
-		var err error
-		nextDB, err = openNodeDatabase(settings)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("database connection failed: %v", err)})
-			return
-		}
-		if err := ensureAIProfileTable(nextDB); err != nil {
-			_ = nextDB.Close()
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("database initialization failed: %v", err)})
-			return
-		}
-		loaded, err = loadNodesFromDatabase(nextDB)
-		if err != nil {
-			_ = nextDB.Close()
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("load nodes failed: %v", err)})
-			return
-		}
-	}
 	if err := saveAppSettings(settings); err != nil {
-		if nextDB != nil {
-			_ = nextDB.Close()
-		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save settings failed: %v", err)})
 		return
 	}
 
-	s.replaceDatabase(settings, nextDB, loaded)
-	writeJSON(w, http.StatusOK, settingsView(settings))
-}
-
-func normalizeDatabaseUpdate(previous, database databaseSettings) (databaseSettings, error) {
-	database.DSN = strings.TrimSpace(database.DSN)
-	database.Host = strings.TrimSpace(database.Host)
-	database.Port = strings.TrimSpace(database.Port)
-	database.User = strings.TrimSpace(database.User)
-	database.Name = strings.TrimSpace(database.Name)
-	if !database.Enabled {
-		return databaseSettings{}, nil
-	}
-	if database.DSN == "" && database.Host == "" && database.User == "" && database.Name == "" {
-		return previous, nil
-	}
-	if database.Name == "" {
-		database.Name = previous.Name
-		if database.Name == "" {
-			database.Name = defaultDatabaseName
-		}
-	}
-	if database.Password == "" && database.Host == previous.Host && database.User == previous.User && database.Name == previous.Name {
-		database.Password = previous.Password
-	}
-	if database.Port == "" {
-		database.Port = "3306"
-	}
-	if database.DSN == "" && database.Host == "" {
-		return databaseSettings{}, fmt.Errorf("database DSN or host is required")
-	}
-	return database, nil
-}
-
-func decodeDatabaseSettings(w http.ResponseWriter, r *http.Request) (databaseSettings, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-	var request struct {
-		Database databaseSettings `json:"database"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid database settings"})
-		return databaseSettings{}, false
-	}
-	return request.Database, true
-}
-
-func (s *server) replaceDatabase(settings appSettings, nextDB *sql.DB, loaded []Node) {
 	s.mu.Lock()
-	oldDB := s.db
-	oldCancels := make([]context.CancelFunc, 0, len(s.nodeCancels))
-	for _, cancel := range s.nodeCancels {
-		if cancel != nil {
-			oldCancels = append(oldCancels, cancel)
-		}
-	}
 	s.settings = settings
-	s.db = nextDB
-	if nextDB != nil {
-		s.nodes = loaded
-	}
-	s.nodeContexts = make(map[string]context.Context)
-	s.nodeCancels = make(map[string]context.CancelFunc)
-	s.containerNames = make(map[string]map[string]string)
-	s.containerLogs = make(map[string][]LogEntry)
-	s.historyCoverage = make(map[string]time.Time)
-	s.historyLoads = make(map[string]struct{})
-	s.historyLoadGeneration = make(map[string]uint64)
-	s.streams = make(map[string]struct{})
 	s.mu.Unlock()
-	for _, cancel := range oldCancels {
-		cancel()
-	}
-	if oldDB != nil && oldDB != nextDB {
-		_ = oldDB.Close()
-	}
-	if nextDB != nil {
-		s.startPersistedNodes()
-	}
-}
-
-func (s *server) handleDatabaseSettingsTest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	if token := s.currentAdminToken(); token != "" && !authorizedAdminRequest(r, token) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
-		return
-	}
-	database, ok := decodeDatabaseSettings(w, r)
-	if !ok {
-		return
-	}
-	s.mu.RLock()
-	previous := s.settings
-	s.mu.RUnlock()
-	database, err := normalizeDatabaseUpdate(previous.Database, database)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if !databaseConfigured(appSettings{Database: database}) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先启用数据库并填写 DSN 或数据库地址"})
-		return
-	}
-	testSettings := previous
-	testSettings.Database = database
-	db, err := openNodeDatabase(testSettings)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("database connection failed: %v", err)})
-		return
-	}
-	_ = db.Close()
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "数据库连接测试成功"})
-}
-
-func (s *server) handleDatabaseSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	if token := s.currentAdminToken(); token != "" && !authorizedAdminRequest(r, token) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
-		return
-	}
-	database, ok := decodeDatabaseSettings(w, r)
-	if !ok {
-		return
-	}
-	s.mu.RLock()
-	previous := s.settings
-	s.mu.RUnlock()
-	database, err := normalizeDatabaseUpdate(previous.Database, database)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	settings := previous
-	settings.Database = database
-	var nextDB *sql.DB
-	var loaded []Node
-	if databaseConfigured(settings) {
-		nextDB, err = openNodeDatabase(settings)
-		if err == nil {
-			err = ensureAIProfileTable(nextDB)
-		}
-		if err == nil {
-			loaded, err = loadNodesFromDatabase(nextDB)
-		}
-		if err != nil {
-			if nextDB != nil {
-				_ = nextDB.Close()
-			}
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("database initialization failed: %v", err)})
-			return
-		}
-	}
-	if err := saveAppSettings(settings); err != nil {
-		if nextDB != nil {
-			_ = nextDB.Close()
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save database settings failed: %v", err)})
-		return
-	}
-	s.replaceDatabase(settings, nextDB, loaded)
 	writeJSON(w, http.StatusOK, settingsView(settings))
 }
 
@@ -1792,11 +1656,7 @@ func (s *server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleAIProfiles(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		if s.db == nil {
-			writeJSON(w, http.StatusOK, map[string]any{"profiles": []any{}})
-			return
-		}
-		profiles, err := loadAIProfilesFromDatabase(s.db)
+		profiles, err := s.loadAIProfileViews()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load AI profiles failed"})
 			return
@@ -1804,8 +1664,8 @@ func (s *server) handleAIProfiles(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"profiles": profiles})
 		return
 	}
-	if s.db == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database is not configured"})
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "AI profile storage is not available"})
 		return
 	}
 	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
@@ -1816,13 +1676,20 @@ func (s *server) handleAIProfiles(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
 		return
 	}
+	// Provider records carry API keys; a remote caller must keep its own in its
+	// browser rather than uploading them to this host.
+	if !requireFileBackend(w, r) {
+		return
+	}
 	if r.Method == http.MethodDelete {
 		var id int64
 		if _, err := fmt.Sscanf(r.URL.Query().Get("id"), "%d", &id); err != nil || id <= 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid profile id"})
 			return
 		}
-		if _, err := s.db.Exec(`DELETE FROM model_info WHERE id = ?`, id); err != nil {
+		// upsertModel keeps the stored key when the request omits one, so
+		// editing a provider does not wipe its credentials.
+		if err := s.store.deleteModel(id); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete AI profile failed"})
 			return
 		}
@@ -1861,20 +1728,12 @@ func (s *server) handleAIProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	_, scanErr := fmt.Sscanf(request.ID, "ai-profile-db-%d", &id)
-	var err error
-	if scanErr == nil && id > 0 {
-		if strings.TrimSpace(request.APIKey) == "" {
-			_, err = s.db.Exec(`UPDATE model_info SET name=?, base_url=?, type=?, model_name=? WHERE id=?`, request.Name, request.BaseURL, profileType, strings.Join(modelNames, ","), id)
-		} else {
-			_, err = s.db.Exec(`UPDATE model_info SET name=?, base_url=?, api_key=?, type=?, model_name=? WHERE id=?`, request.Name, request.BaseURL, strings.TrimSpace(request.APIKey), profileType, strings.Join(modelNames, ","), id)
-		}
-	} else {
-		var result sql.Result
-		result, err = s.db.Exec(`INSERT INTO model_info (name, base_url, api_key, type, model_name, create_time) VALUES (?, ?, ?, ?, ?, ?)`, request.Name, request.BaseURL, strings.TrimSpace(request.APIKey), profileType, strings.Join(modelNames, ","), time.Now())
-		if err == nil {
-			id, err = result.LastInsertId()
-		}
+	if scanErr != nil || id <= 0 {
+		id = 0
 	}
+	// upsertModel keeps the stored key when the request omits one, so editing
+	// a provider does not wipe its credentials.
+	id, err := s.store.upsertModel(id, request.Name, request.BaseURL, request.APIKey, int(profileType), modelNames)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save AI profile failed"})
 		return
@@ -1896,38 +1755,29 @@ type aiProfileView struct {
 	Models  []aiModelView `json:"models"`
 }
 
-func loadAIProfilesFromDatabase(db *sql.DB) ([]aiProfileView, error) {
-	rows, err := db.Query(`SELECT id, name, base_url, type, model_name FROM model_info ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	profiles := make([]aiProfileView, 0)
-	for rows.Next() {
-		var id int64
-		var name, baseURL, modelNames string
-		var profileType int
-		if err := rows.Scan(&id, &name, &baseURL, &profileType, &modelNames); err != nil {
-			return nil, err
-		}
+// profileViewsFromStored converts file-backed records into the same shape the
+// database path returns, so the model picker does not care which backend is
+// active.
+func profileViewsFromStored(records []storedModel) []aiProfileView {
+	profiles := make([]aiProfileView, 0, len(records))
+	for _, record := range records {
 		profile := aiProfileView{
-			ID:      fmt.Sprintf("ai-profile-db-%d", id),
-			Name:    strings.TrimSpace(name),
-			BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+			ID:      fmt.Sprintf("ai-profile-db-%d", record.ID),
+			Name:    strings.TrimSpace(record.Name),
+			BaseURL: strings.TrimRight(strings.TrimSpace(record.BaseURL), "/"),
 			Type:    "openai",
 			Enabled: true,
 		}
-		if profileType == 1 {
+		if record.Type == 1 {
 			profile.Type = "anthropic"
 		}
-		for index, modelName := range strings.Split(modelNames, ",") {
+		for index, modelName := range strings.Split(record.ModelName, ",") {
 			modelName = strings.TrimSpace(modelName)
 			if modelName == "" {
 				continue
 			}
 			profile.Models = append(profile.Models, aiModelView{
-				ID:   fmt.Sprintf("db-model-%d-%d", id, index),
+				ID:   fmt.Sprintf("db-model-%d-%d", record.ID, index),
 				Name: modelName,
 			})
 		}
@@ -1935,21 +1785,42 @@ func loadAIProfilesFromDatabase(db *sql.DB) ([]aiProfileView, error) {
 			profiles = append(profiles, profile)
 		}
 	}
-	return profiles, rows.Err()
+	return profiles
+}
+
+// loadAIProfileViews returns the configured providers from the JSON store.
+func (s *server) loadAIProfileViews() ([]aiProfileView, error) {
+	if s.store == nil {
+		return []aiProfileView{}, nil
+	}
+	records, err := s.store.listModels()
+	if err != nil {
+		return nil, err
+	}
+	return profileViewsFromStored(records), nil
 }
 
 func (s *server) loadAIProfileSecret(id int64, modelName string) (aiProfile, error) {
-	if s.db == nil || id <= 0 {
+	if id <= 0 {
 		return aiProfile{}, errors.New("AI profile is not available")
 	}
 	var profile aiProfile
 	var profileType int
 	var modelNames string
-	err := s.db.QueryRow(`SELECT name, base_url, api_key, type, model_name FROM model_info WHERE id = ?`, id).
-		Scan(&profile.Name, &profile.BaseURL, &profile.APIKey, &profileType, &modelNames)
+
+	if s.store == nil {
+		return aiProfile{}, errors.New("AI profile is not available")
+	}
+	record, err := s.store.findModel(id)
 	if err != nil {
 		return aiProfile{}, err
 	}
+	profile.Name = record.Name
+	profile.BaseURL = record.BaseURL
+	profile.APIKey = record.APIKey
+	profileType = record.Type
+	modelNames = record.ModelName
+
 	profile.Type = "openai"
 	if profileType == 1 {
 		profile.Type = "anthropic"
@@ -2314,6 +2185,22 @@ func anthropicProviderMessages(messages []aiMessage, attachments []aiAttachment)
 	return providerMessages
 }
 
+// requireFileBackend rejects a configuration write that did not originate on
+// the machine running the service.
+//
+// A caller reaching us from elsewhere uses its own browser storage, so it has
+// no business creating nodes on this server. Without this check, any visitor
+// could append entries to the owner's nodes.json.
+func requireFileBackend(w http.ResponseWriter, r *http.Request) bool {
+	if backendForRequest(r) == backendFile {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{
+		"error": "该页面未在本机打开，节点配置保存在浏览器本地",
+	})
+	return false
+}
+
 func (s *server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
 		s.unbindNode(w, r.URL.Query().Get("id"))
@@ -2321,6 +2208,9 @@ func (s *server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !requireFileBackend(w, r) {
 		return
 	}
 	var request nodeRequest
@@ -2381,12 +2271,19 @@ func (s *server) handleNode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
+	// Deleting from another machine would remove a node the owner configured.
+	if !requireFileBackend(w, r) {
+		return
+	}
 	s.unbindNode(w, id)
 }
 
 func (s *server) updateNode(w http.ResponseWriter, r *http.Request, id string) {
 	if id == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "node id is required"})
+		return
+	}
+	if !requireFileBackend(w, r) {
 		return
 	}
 	var request nodeRequest
@@ -2422,7 +2319,6 @@ func (s *server) updateNode(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	cancel := s.nodeCancels[id]
-	ctx, newCancel := context.WithCancel(context.Background())
 	updated := s.nodes[index]
 	updated.Name = name
 	updated.URL = rawURL
@@ -2442,6 +2338,9 @@ func (s *server) updateNode(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("update node failed: %v", err)})
 		return
 	}
+	// The node context replaces the previous one only once the persisted
+	// update succeeded, so the error path above cannot leak a cancel func.
+	ctx, newCancel := context.WithCancel(context.Background())
 	s.nodes[index] = updated
 	s.nodeContexts[id] = ctx
 	s.nodeCancels[id] = newCancel
@@ -2879,6 +2778,10 @@ func (s *server) releaseContainerStream(streamKey string) {
 }
 
 func (s *server) fetchDozzleHistory(parent context.Context, node Node, hostID, containerID string, from, to time.Time, generation uint64) {
+	s.fetchDozzleHistoryWithCachePolicy(parent, node, hostID, containerID, from, to, generation, false)
+}
+
+func (s *server) fetchDozzleHistoryWithCachePolicy(parent context.Context, node Node, hostID, containerID string, from, to time.Time, generation uint64, allowWhenSharedCacheFull bool) {
 	// A single unavailable or very busy container must not keep the page in a
 	// loading state indefinitely. Normal pagination remains unbounded so the
 	// selected node's requested range is complete whenever it fits the cache.
@@ -2895,8 +2798,11 @@ func (s *server) fetchDozzleHistory(parent context.Context, node Node, hostID, c
 		// Once the shared cache is full, older pages would immediately be
 		// discarded by insertNewestLog. Finish the task instead of keeping the
 		// dashboard in a perpetual “loading history” state.
-		if s.historyCacheAtCapacity() {
+		if !allowWhenSharedCacheFull && s.historyCacheAtCapacity() {
 			completed = true
+			return
+		}
+		if allowWhenSharedCacheFull && s.containerHistoryAtCapacity(node.ID, containerID) {
 			return
 		}
 		oldest, count, err := s.fetchDozzleHistoryPage(ctx, node, hostID, containerID, from, pageTo, generation)
@@ -2919,7 +2825,7 @@ func (s *server) fetchDozzleHistory(parent context.Context, node Node, hostID, c
 			completed = true
 			return
 		}
-		if s.historyCacheAtCapacity() {
+		if !allowWhenSharedCacheFull && s.historyCacheAtCapacity() {
 			completed = true
 			return
 		}
@@ -2930,6 +2836,12 @@ func (s *server) fetchDozzleHistory(parent context.Context, node Node, hostID, c
 		}
 		pageTo = nextTo
 	}
+}
+
+func (s *server) containerHistoryAtCapacity(nodeID, containerID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return maxContainerLogs > 0 && len(s.containerLogs[containerLogKey(nodeID, containerID)]) >= maxContainerLogs
 }
 
 func (s *server) historyCacheAtCapacity() bool {
@@ -2988,6 +2900,121 @@ func (s *server) fetchDozzleHistoryPage(ctx context.Context, node Node, hostID, 
 		return time.Time{}, 0, fmt.Errorf("read Dozzle history failed: %w", err)
 	}
 	return oldest, count, nil
+}
+
+// searchDozzleHistory walks the remote API's time cursor until the beginning
+// of the chosen range. Unlike normal browsing, it keeps only matching rows,
+// so the per-container display cache limit never truncates search results.
+func (s *server) searchDozzleHistory(ctx context.Context, node Node, hostID, containerID string, from, to time.Time, needle string) ([]LogEntry, error) {
+	pageTo := to
+	matches := make([]LogEntry, 0)
+	for {
+		oldest, count, page, err := s.fetchDozzleHistorySearchPage(ctx, node, hostID, containerID, from, pageTo, needle)
+		if err != nil {
+			return nil, err
+		}
+		matches = append(matches, page...)
+		if count == 0 || oldest.IsZero() || !oldest.Before(pageTo) || count < dozzleHistoryPageSize || !oldest.After(from) {
+			break
+		}
+		nextTo := oldest.Add(-time.Millisecond)
+		if !nextTo.After(from) || !nextTo.Before(pageTo) {
+			break
+		}
+		pageTo = nextTo
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].Timestamp > matches[j].Timestamp })
+	return matches, nil
+}
+
+func (s *server) fetchDozzleHistorySearchPage(ctx context.Context, node Node, hostID, containerID string, from, to time.Time, needle string) (time.Time, int, []LogEntry, error) {
+	query := url.Values{}
+	query.Set("stdout", "1")
+	query.Set("stderr", "1")
+	for _, level := range []string{"debug", "info", "warn", "error", "fatal", "trace", "unknown"} {
+		query.Add("levels", level)
+	}
+	query.Set("from", from.Format(time.RFC3339Nano))
+	query.Set("to", to.Format(time.RFC3339Nano))
+	endpoint := fmt.Sprintf("%s/api/hosts/%s/containers/%s/logs?%s", node.baseURL, url.PathEscape(hostID), url.PathEscape(containerID), query.Encode())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return time.Time{}, 0, nil, err
+	}
+	request.Header.Set("Accept", "application/x-jsonl")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return time.Time{}, 0, nil, fmt.Errorf("read Dozzle history failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return time.Time{}, 0, nil, fmt.Errorf("Dozzle history returned HTTP %d", response.StatusCode)
+	}
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 64*1024), 16<<20)
+	oldest := time.Time{}
+	count := 0
+	entries := make([]LogEntry, 0)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var event dozzleLogEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		count++
+		if event.Timestamp > 0 {
+			eventTime := time.UnixMilli(event.Timestamp).UTC()
+			if oldest.IsZero() || eventTime.Before(oldest) {
+				oldest = eventTime
+			}
+		}
+		s.ingestDozzleEventWithAppend(node.ID, []byte(line), func(parsed dozzleLogEvent, message string) {
+			entry := searchableLogEntry(node, containerID, parsed, message)
+			if strings.Contains(normalizeSearchValue(entry.Node+" "+entry.Container+" "+entry.Message), needle) {
+				entries = append(entries, entry)
+			}
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return time.Time{}, 0, nil, fmt.Errorf("read Dozzle history failed: %w", err)
+	}
+	return oldest, count, entries, nil
+}
+
+func normalizeSearchValue(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+func searchableLogEntry(node Node, requestedContainerID string, event dozzleLogEvent, message string) LogEntry {
+	containerID := event.Container
+	if containerID == "" {
+		containerID = requestedContainerID
+	}
+	containerName := containerID
+	for _, container := range node.Containers {
+		if container.ID == containerID && container.Name != "" {
+			containerName = container.Name
+			break
+		}
+	}
+	if containerName == "" {
+		containerName = "unknown"
+	}
+	timestamp := event.Timestamp
+	if timestamp <= 0 {
+		timestamp = time.Now().UnixMilli()
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(node.ID + "\x00" + containerID + "\x00" + strconv.FormatInt(timestamp, 10) + "\x00" + strconv.FormatUint(uint64(event.ID), 10) + "\x00" + message))
+	id := -int64(hash.Sum64() & uint64(0x7fffffffffffffff))
+	if id == 0 {
+		id = -1
+	}
+	eventTime := time.UnixMilli(timestamp).Local()
+	return LogEntry{ID: id, Date: eventTime.Format("2006/01/02"), Time: eventTime.Format("15:04:05"), Timestamp: timestamp, Level: normalizeLogLevel(event.Level), Node: node.Name, Container: containerName, Message: message, nodeID: node.ID, remoteID: event.ID}
 }
 
 func (s *server) isHistoryGenerationCurrent(generation uint64) bool {
@@ -3112,20 +3139,32 @@ func (s *server) ingestDozzleEventWithAppend(nodeID string, data []byte, appendL
 	}
 	if event.Type == "group" {
 		var lines []dozzleLogLine
-		if err := json.Unmarshal(event.Message, &lines); err != nil {
-			return
-		}
-		grouped := make([]string, 0, len(lines))
-		for _, line := range lines {
-			if message := stripTerminalControlCodes(strings.TrimRight(html.UnescapeString(line.Message), "\r\n")); message != "" {
-				grouped = append(grouped, message)
+		if err := json.Unmarshal(event.Message, &lines); err == nil {
+			grouped := make([]string, 0, len(lines))
+			for _, line := range lines {
+				if message := stripTerminalControlCodes(strings.TrimRight(html.UnescapeString(line.Message), "\r\n")); message != "" {
+					grouped = append(grouped, message)
+				}
+			}
+			if len(grouped) > 0 {
+				// Dozzle emits one `group` event for multi-line output such as a
+				// Java stack trace. Keep it as one log record in source order rather
+				// than inserting one separately sortable record per stack-frame line.
+				appendLog(event, strings.Join(grouped, "\n"))
+				return
 			}
 		}
-		if len(grouped) > 0 {
-			// Dozzle emits one `group` event for multi-line output such as a
-			// Java stack trace. Keep it as one log record in source order rather
-			// than inserting one separately sortable record per stack-frame line.
-			appendLog(event, strings.Join(grouped, "\n"))
+		// Dozzle versions can emit a group payload that is not an array of
+		// message lines. Preserve its raw text instead of silently losing it.
+		fallback := strings.TrimSpace(stripTerminalControlCodes(html.UnescapeString(event.Raw)))
+		if fallback == "" {
+			var plain string
+			if json.Unmarshal(event.Message, &plain) == nil {
+				fallback = strings.TrimSpace(stripTerminalControlCodes(html.UnescapeString(plain)))
+			}
+		}
+		if fallback != "" {
+			appendLog(event, fallback)
 		}
 		return
 	}

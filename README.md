@@ -43,42 +43,75 @@ AI 日志助手会将最近 12 个会话保存在当前浏览器中，可通过�
 - 统一查看多个 Dozzle 节点，支持节点切换、日志级别筛选和关键词搜索
 - 日志实时流采用 Server-Sent Events（SSE）推送
 - 支持暂停 / 继续接收、清空过滤条件和 CSV 导出
-- 支持新增 Dozzle 节点，配置通过 Go API 保存到当前进程内存
+- 支持新增 Dozzle 节点，节点与 AI 供应商配置按访问来源自动存入本机 JSON 文件或访客浏览器
 - 支持敏感信息脱敏、结构化字段提取、健康检查过滤等加工开关
 - 前端资源通过 `embed` 打包进 Go 服务，单个项目即可运行
 
-服务端会连接真实 Dozzle v10 实例：读取实例配置和容器事件，拉取容器历史日志，并通过 Dozzle SSE 接收实时日志。添加地址可以填写 Dozzle 根地址，也可以填写具体容器页面地址（例如 `/container/<container-id>`）。配置数据库后，节点信息会在服务重启后自动恢复。
+服务端会连接真实 Dozzle v10 实例：读取实例配置和容器事件，拉取容器历史日志，并通过 Dozzle SSE 接收实时日志。添加地址可以填写 Dozzle 根地址，也可以填写具体容器页面地址（例如 `/container/<container-id>`）。节点信息会写入本地配置文件，服务重启后自动恢复。
 
-页面顶部的齿轮按钮可以打开“系统设置”，在不重新部署服务的情况下配置运行环境、MySQL 和管理员 key。保存数据库配置时会立即测试连接并切换；配置会保存在服务目录下的 `log-agent-settings.json`，该文件已加入 `.gitignore`。
+页面顶部的齿轮按钮可以打开“系统设置”，在不重新部署服务的情况下配置运行环境和管理员 key。在本机打开时，还可以查看、导出、导入上表中的本地配置文件；从其他机器打开时，设置面板只显示“配置保存在此浏览器”。
 
-## 节点数据库配置
+## 配置文件
 
-节点信息可以持久化到 MySQL 的 `log_agent.vps_info` 表，AI 供应商信息使用固定的 `model_info` 表。数据库名默认固定为 `log_agent`，页面无需填写库名或表名。推荐首次启动服务后直接在页面设置数据库。环境变量仍然兼容，并会作为没有本地配置文件时的初始值：
+节点和 AI 供应商分别保存在两个 JSON 文件中，无需安装数据库：
+
+| 文件 | 内容 |
+| --- | --- |
+| `nodes.json` | Dozzle 节点地址、名称和样式 |
+| `models.json` | AI 供应商名称、Base URL、模型列表和 API key |
+
+默认位置是**可执行文件旁边的 `data` 文件夹**：
+
+```
+dozzle-ops.exe
+data/
+├─ nodes.json
+└─ models.json
+```
+
+这样做的好处是：整个目录拷到另一台机器就是完整迁移；双击 exe 和从命令行启动读的是同一份文件（路径不依赖工作目录）；想手工改配置直接就能看到。
+
+### 两种存储位置（自动判定，无需选择）
+
+页面从哪里打开，决定配置存在哪里。**这件事由服务端按请求来源自动判定，页面上没有开关**：
+
+| 打开方式 | 配置存放位置 | 设置面板 |
+| --- | --- | --- |
+| 在本机打开（`localhost` / `127.0.0.1`） | 本机 `data/nodes.json`、`data/models.json` | 显示真实路径，并提供「打开文件目录」「导出配置」按钮 |
+| 从其他机器打开（局域网 IP / 域名 / 公网） | 该访客**自己浏览器的 localStorage** | 不显示任何路径或文件按钮 |
+
+也就是说：**exe 只跟本机 JSON 文件打交道，线上网页只跟浏览器缓存打交道，两者互不干扰、互不同步。** 之所以这样设计，是因为浏览器无法读取服务器（或访客自己电脑）上的文件——服务端只能把配置存进访客的浏览器里。反过来，本机打开时也不用担心配置被别的访客看到。
+
+访客在浏览器里配的节点和 AI 供应商只属于他自己那台机器上的那个浏览器，清除浏览器数据会一并清掉；宿主机的 JSON 文件不会因此产生任何变化。
+
+> 一台机器一份配置。在**本机**通过任意地址（`localhost` / `127.0.0.1`）打开，读写的都是同一份 `data/` 文件。
+
+若可执行文件所在目录不可写（例如放在 `C:\Program Files\` 或系统的只读路径下），会自动退回到用户配置目录：Windows `%AppData%\logAgent`，macOS `~/Library/Application Support/logAgent`，Linux `~/.config/logAgent`。实际生效的位置始终显示在设置面板里。
+
+如需固定到某个位置，可设置 `LOG_AGENT_CONFIG_DIR`：
 
 ```bash
-export DOZZLE_DB_HOST=数据库地址
-export DOZZLE_DB_PORT=3306
-export DOZZLE_DB_USER=数据库用户
-export DOZZLE_DB_PASSWORD=数据库密码
-export DOZZLE_DB_NAME=log_agent  # 可选，默认就是 log_agent
+export LOG_AGENT_CONFIG_DIR=/etc/log-agent
 ```
 
 Windows PowerShell 请使用 `$env:` 设置环境变量，且必须在同一个窗口中启动服务：
 
 ```powershell
-$env:DOZZLE_DB_HOST = "数据库地址"
-$env:DOZZLE_DB_PORT = "3306"
-$env:DOZZLE_DB_USER = "数据库用户"
-$env:DOZZLE_DB_PASSWORD = "数据库密码"
-$env:DOZZLE_DB_NAME = "log_agent" # 可选，默认就是 log_agent
+$env:LOG_AGENT_CONFIG_DIR = "D:\log-agent-config"
 go run .
 ```
 
 如需通过环境变量预置管理员 key 和环境，可设置 `LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`；之后也可以在页面设置中修改。
 
-启动日志中应看到数据库连接成功；如果看到 `memory-only node storage`，说明当前尚未启用数据库持久化。也可以通过 `LOG_AGENT_SETTINGS_FILE` 指定配置文件路径。
+服务默认监听 `:8099`。若该端口已被占用（例如本机已装了 Dozzle），可用 `LOG_AGENT_PORT`（或 `PORT`）指定其他端口：
 
-服务启动时会读取 `vps_info` 表中的 `name`、`address`、`style` 字段；新增、修改和解绑节点时也会同步写入数据库。未配置数据库环境变量时，服务仍可启动，但节点配置只保存在内存中。
+```bash
+LOG_AGENT_PORT=9099 ./dozzle-ops
+```
+
+启动日志中应看到 `node storage: <目录>\nodes.json and <目录>\models.json`。也可以通过 `LOG_AGENT_SETTINGS_FILE` 指定服务配置文件（存放运行环境和管理员 key）的路径。
+
+> `models.json` 中的 API key 以明文保存，请勿把该文件提交到版本库或同步到公开位置。若文件被手工编辑出语法错误，服务会忽略无法解析的条目并在日志中提示，不会因此启动失败。
 
 日志在内存缓存中默认最多保存 100,000 条。缓存达到上限后，后续每新增一条日志都会淘汰时间最早的一条，因此缓存条数不会超过上限。可通过 `LOG_AGENT_MAX_STORED_LOGS` 调整上限，取值范围为 1～1,000,000；缓存越大，占用的内存越多。
 

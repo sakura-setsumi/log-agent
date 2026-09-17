@@ -1,6 +1,8 @@
 # Local tooling and editor settings
 .codex/
 .idea/
+# Agent working memory (session notes, screenshots) - not project source.
+.workbuddy-ai/
 
 # Build artifacts
 log-agent.exe
@@ -15,3 +17,6 @@ dist/
 .env.*
 !.env.example
 log-agent-settings.json
+# The portable config folder, created beside the executable. It can hold
+# plaintext API keys, so it must never be committed.
+data/

@@ -13,6 +13,7 @@ const aiProfilesStorageKey = 'log-agent-ai-profiles';
 const aiActiveProfileStorageKey = 'log-agent-ai-active-profile';
 const aiActiveModelStorageKey = 'log-agent-ai-active-model';
 const assistantSessionsStorageKey = 'log-agent-ai-sessions';
+const browserNodesStorageKey = 'log-agent-browser-nodes';
 const maxAssistantSessions = 12;
 
 const state = {
@@ -33,6 +34,11 @@ const state = {
   ruleState: { mask: true, structure: true, noise: false },
   ruleOrder: ['mask', 'structure', 'noise'],
   containerLogCache: {},
+  configInfo: null,
+  storageMode: '',
+  fullRangeSearchLogs: [],
+  fullRangeSearchKey: '',
+  fullRangeSearchLoading: false,
   assistantContext: [],
   assistantMessages: [],
   assistantAttachments: [],
@@ -53,6 +59,10 @@ let assistantRequestController = null;
 let assistantRequestId = 0;
 let loadedContainerSelectionKey = '';
 let containerLogRetryTimer;
+let fullRangeSearchTimer;
+let fullRangeSearchRequest = 0;
+let olderLogsLoading = false;
+const olderLogExhausted = new Set();
 let backendRefreshTimer;
 let historySyncTimer;
 let historyRequestVersion = 0;
@@ -63,7 +73,6 @@ let initialLogPreviewLimit = 0;
 let initialLogPreviewTimer;
 let aiAdminToken = '';
 let aiAdminTokenResolver = null;
-let appSettingsDatabaseDraft = null;
 let logRenderTimer;
 let logScrollFrame;
 let streamBatchTimer;
@@ -749,7 +758,10 @@ function clearAssistantContext() {
 }
 
 function beginLogAnalysis(log) {
-  const orderedLogs = logsForActiveContainer();
+  const searchKey = fullRangeSearchKey();
+  const orderedLogs = searchKey && state.fullRangeSearchKey === searchKey
+    ? state.fullRangeSearchLogs
+    : logsForActiveContainer();
   const selectedIndex = orderedLogs.findIndex((item) => item.id === log.id);
   if (selectedIndex < 0) return;
 
@@ -769,7 +781,7 @@ function beginLogAnalysis(log) {
 }
 
 function analyzeLogFromButton(button) {
-  const log = logsForActiveContainer().find((item) => item.id === Number(button.dataset.analyzeLog));
+  const log = logByID(button.dataset.analyzeLog);
   if (!log) return;
   state.selectedLog = log.id;
   state.activeAnalysisLogId = String(log.id);
@@ -851,16 +863,21 @@ async function saveAIProfile(event) {
     return;
   }
   const profile = { id: id || `ai-profile-${Date.now()}-${Math.random().toString(36).slice(2)}`, name, baseURL, apiKey, type: String(form.get('connectionType') || 'openai'), enabled: Boolean(form.get('enabled')), models };
-  if (!aiAdminToken) aiAdminToken = await requestAIAdminToken();
-  if (!aiAdminToken) { showToast('未提供管理员令牌，模型未写入数据库'); return; }
-  try {
-    const response = await fetch('/api/ai/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Log-Agent-Admin-Token': aiAdminToken }, body: JSON.stringify(profile) });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || '模型保存失败');
-    profile.id = payload.id || profile.id;
-  } catch (error) {
-    showToast(error.message || '模型保存失败');
-    return;
+  // A visitor on someone else's deployment keeps its providers — and therefore
+  // its API keys — in this browser. Uploading them to that host would leak
+  // credentials to a machine the visitor does not control.
+  if (!isBrowserStorageMode()) {
+    if (!aiAdminToken) aiAdminToken = await requestAIAdminToken();
+    if (!aiAdminToken) { showToast('未提供管理员令牌，模型未保存'); return; }
+    try {
+      const response = await fetch('/api/ai/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Log-Agent-Admin-Token': aiAdminToken }, body: JSON.stringify(profile) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || '模型保存失败');
+      profile.id = payload.id || profile.id;
+    } catch (error) {
+      showToast(error.message || '模型保存失败');
+      return;
+    }
   }
   const index = state.aiProfiles.findIndex((item) => item.id === profile.id);
   if (index >= 0) state.aiProfiles[index] = profile; else state.aiProfiles.push(profile);
@@ -877,7 +894,7 @@ async function deleteAIProfile(id) {
   const profile = state.aiProfiles.find((item) => item.id === id);
   if (!profile || !window.confirm(`确定删除 AI 配置“${profile.name}”吗？`)) return;
   const dbID = profile.id.match(/^ai-profile-db-(\d+)$/)?.[1];
-  if (dbID) {
+  if (dbID && !isBrowserStorageMode()) {
     if (!aiAdminToken) aiAdminToken = await requestAIAdminToken();
     if (!aiAdminToken) { showToast('未提供管理员令牌，模型未删除'); return; }
     const response = await fetch(`/api/ai/profiles?id=${dbID}`, { method: 'DELETE', headers: { Accept: 'application/json', 'X-Log-Agent-Admin-Token': aiAdminToken } });
@@ -1013,40 +1030,24 @@ async function syncAIStatus() {
   renderAssistant();
 }
 
-function fillAppSettingsForm(payload, { databaseDraft = null } = {}) {
+function fillAppSettingsForm(payload) {
   const form = $('#app-settings-form');
   if (!form) return;
-  const draft = databaseDraft || (!payload.database?.configured ? appSettingsDatabaseDraft : null);
   const environment = payload.environment || 'production';
   if (!Array.from(form.elements.environment.options).some((option) => option.value === environment)) {
     form.elements.environment.add(new Option(environment, environment));
   }
   form.elements.environment.value = environment;
-  form.elements.dbEnabled.checked = Boolean(payload.database?.enabled);
-  form.elements.dbDsn.value = '';
-  form.elements.dbDsn.placeholder = payload.database?.dsnConfigured ? '已配置，留空保持不变' : '例如：user:password@tcp(127.0.0.1:3306)/log_agent';
-  form.elements.dbHost.value = payload.database?.host || '';
-  form.elements.dbPort.value = payload.database?.port || '';
-  form.elements.dbUser.value = payload.database?.user || '';
-  form.elements.dbPassword.value = '';
   form.elements.currentAdminToken.value = '';
   form.elements.adminToken.value = '';
-  $('#settings-db-status').textContent = payload.database?.configured ? '已连接' : '未配置';
   $('#settings-admin-status').textContent = payload.adminTokenConfigured ? '已配置' : '未配置';
-  if (draft) {
-    form.elements.dbEnabled.checked = Boolean(draft.enabled);
-    form.elements.dbDsn.value = draft.dsn || '';
-    form.elements.dbHost.value = draft.host || '';
-    form.elements.dbPort.value = draft.port || '';
-    form.elements.dbUser.value = draft.user || '';
-    form.elements.dbPassword.value = draft.password || '';
-    if (!payload.database?.configured && draft.enabled) $('#settings-db-status').textContent = '未保存';
-  }
 }
 
 async function openAppSettings() {
   const modal = $('#app-settings-modal');
   modal.classList.remove('hidden');
+  updateStorageModeUI();
+  loadConfigInfo();
   try {
     const response = await fetch('/api/settings', { headers: { Accept: 'application/json' } });
     const payload = await response.json().catch(() => ({}));
@@ -1058,25 +1059,114 @@ async function openAppSettings() {
   }
 }
 
+// Reads the on-disk configuration location so the settings panel can show the
+// real paths instead of a hardcoded guess.
+async function loadConfigInfo() {
+  const status = $('#settings-config-status');
+  try {
+    const response = await fetch('/api/config/info', { headers: { Accept: 'application/json' } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || '配置信息读取失败');
+    state.configInfo = payload;
+    $('#settings-nodes-path').textContent = payload.nodesPath || '—';
+    $('#settings-models-path').textContent = payload.modelsPath || '—';
+    // A visitor never reaches files, so the panel must not claim a file
+    // location it cannot see. updateStorageModeUI already fills the note.
+    status.textContent = payload.localMode ? '本地 JSON 文件' : '此浏览器';
+    // openAppSettings() calls updateStorageModeUI() before this fetch settles,
+    // so re-apply it now that localMode is known for sure.
+    updateStorageModeUI();
+    // The reveal button drives the machine that runs the service, so it is
+    // only meaningful when a desktop session was detected.
+    const reveal = $('#settings-config-reveal');
+    if (reveal) {
+      reveal.disabled = !payload.canReveal;
+      reveal.title = payload.canReveal ? '' : '当前系统未检测到桌面环境';
+    }
+  } catch (error) {
+    status.textContent = '读取失败';
+    showToast(error.message || '配置信息读取失败');
+  }
+}
+
+function configAdminHeaders() {
+  const token = String($('#app-settings-form')?.elements.currentAdminToken?.value || '').trim() || aiAdminToken;
+  const headers = { Accept: 'application/json' };
+  if (token) headers['X-Log-Agent-Admin-Token'] = token;
+  return headers;
+}
+
+async function revealConfigDirectory() {
+  const button = $('#settings-config-reveal');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/config/reveal', { method: 'POST', headers: configAdminHeaders() });
+    const payload = await readSettingsResponse(response, '打开配置目录失败');
+    showToast(`已在文件管理器中打开 ${payload.directory || '配置目录'}`);
+  } catch (error) {
+    showToast(error.message || '打开配置目录失败');
+  } finally {
+    button.disabled = state.configInfo?.canReveal === false;
+  }
+}
+
+async function exportConfiguration() {
+  const button = $('#settings-config-export');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/config/export', { headers: configAdminHeaders() });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '导出配置失败');
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `log-agent-config-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast('配置已导出');
+  } catch (error) {
+    showToast(error.message || '导出配置失败');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function importConfiguration(file) {
+  if (!file) return;
+  if (!window.confirm('导入将覆盖当前全部节点与模型配置，确定继续吗？')) return;
+  try {
+    const text = await file.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      throw new Error('配置文件不是合法的 JSON');
+    }
+    const response = await fetch('/api/config/import', {
+      method: 'POST',
+      headers: { ...configAdminHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(parsed),
+    });
+    const payload = await readSettingsResponse(response, '导入配置失败');
+    showToast(`已导入 ${payload.nodes || 0} 个节点、${payload.providers || 0} 个模型配置`);
+    // Nodes were rebuilt server-side; refresh so the sidebar reflects them.
+    await syncGoBackend();
+    loadConfigInfo();
+  } catch (error) {
+    showToast(error.message || '导入配置失败');
+  } finally {
+    const input = $('#settings-config-file');
+    if (input) input.value = '';
+  }
+}
+
 function closeAppSettings() {
   $('#app-settings-modal').classList.add('hidden');
   $('#app-settings-form')?.reset();
-}
-
-function appSettingsDatabasePayload(form) {
-  return {
-    enabled: form.elements.dbEnabled.checked,
-    dsn: String(form.elements.dbDsn.value || '').trim(),
-    host: String(form.elements.dbHost.value || '').trim(),
-    port: String(form.elements.dbPort.value || '').trim(),
-    user: String(form.elements.dbUser.value || '').trim(),
-    password: String(form.elements.dbPassword.value || ''),
-  };
-}
-
-function rememberDatabaseDraft(form) {
-  appSettingsDatabaseDraft = appSettingsDatabasePayload(form);
-  return appSettingsDatabaseDraft;
 }
 
 function appSettingsAuthHeaders(form) {
@@ -1105,53 +1195,11 @@ async function readSettingsResponse(response, fallbackMessage) {
   return payload;
 }
 
-async function testDatabaseSettings() {
-  const form = $('#app-settings-form');
-  if (!ensureSettingsAdminToken(form)) return;
-  const button = $('#settings-db-test');
-  const { headers } = appSettingsAuthHeaders(form);
-  button.disabled = true;
-  try {
-    const response = await fetch('/api/settings/database/test', { method: 'POST', headers, body: JSON.stringify({ database: appSettingsDatabasePayload(form) }) });
-    const payload = await readSettingsResponse(response, '数据库连接测试失败');
-    $('#settings-db-status').textContent = '连接成功';
-    showToast(payload.message || '数据库连接测试成功');
-  } catch (error) {
-    $('#settings-db-status').textContent = '连接失败';
-    showToast(error.message || '数据库连接测试失败');
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function saveDatabaseSettings() {
-  const form = $('#app-settings-form');
-  if (!ensureSettingsAdminToken(form)) return;
-  const button = $('#settings-db-save');
-  const { headers, currentAdminToken } = appSettingsAuthHeaders(form);
-  button.disabled = true;
-  try {
-    const response = await fetch('/api/settings/database', { method: 'PUT', headers, body: JSON.stringify({ database: appSettingsDatabasePayload(form) }) });
-    const payload = await readSettingsResponse(response, '数据库保存失败');
-    appSettingsDatabaseDraft = null;
-    if (currentAdminToken) aiAdminToken = currentAdminToken;
-    fillAppSettingsForm(payload);
-    $('#settings-db-status').textContent = payload.database?.configured ? '已连接' : '未配置';
-    showToast('数据库设置已保存');
-    await syncGoBackend({ incremental: true });
-  } catch (error) {
-    showToast(error.message || '数据库保存失败');
-  } finally {
-    button.disabled = false;
-  }
-}
-
 async function saveAdminSettings() {
   const form = $('#app-settings-form');
   if (!ensureSettingsAdminToken(form)) return;
   const button = $('#settings-admin-save');
   const adminToken = String(form.elements.adminToken.value || '').trim();
-  const databaseDraft = rememberDatabaseDraft(form);
   const { headers, currentAdminToken } = appSettingsAuthHeaders(form);
   button.disabled = true;
   try {
@@ -1159,9 +1207,8 @@ async function saveAdminSettings() {
     const payload = await readSettingsResponse(response, '管理员 key 保存失败');
     if (adminToken) aiAdminToken = adminToken;
     else if (currentAdminToken) aiAdminToken = currentAdminToken;
-    fillAppSettingsForm(payload, { databaseDraft });
-    const databasePending = databaseDraft.enabled && (databaseDraft.dsn || databaseDraft.host || databaseDraft.user);
-    showToast(databasePending && !payload.database?.configured ? '管理员 key 已保存；数据库信息尚未保存，请点击“保存数据库”' : '管理员 key 已保存');
+    fillAppSettingsForm(payload);
+    showToast('管理员 key 已保存');
   } catch (error) {
     showToast(error.message || '管理员 key 保存失败');
   } finally {
@@ -1173,7 +1220,6 @@ async function saveAppSettings(event) {
   event.preventDefault();
   const form = $('#app-settings-form');
   if (!ensureSettingsAdminToken(form)) return;
-  const databaseDraft = rememberDatabaseDraft(form);
   const submitButton = $('#app-settings-form button[type="submit"]');
   const { headers } = appSettingsAuthHeaders(form);
   submitButton.disabled = true;
@@ -1183,10 +1229,9 @@ async function saveAppSettings(event) {
       body: JSON.stringify({ environment: String(form.elements.environment.value || '').trim() })
     });
     const payload = await readSettingsResponse(response, '运行环境保存失败');
-    fillAppSettingsForm(payload, { databaseDraft });
+    fillAppSettingsForm(payload);
     closeAppSettings();
-    const databasePending = databaseDraft.enabled && (databaseDraft.dsn || databaseDraft.host || databaseDraft.user);
-    showToast(databasePending && !payload.database?.configured ? '运行环境已保存；数据库信息尚未保存' : '运行环境已保存');
+    showToast('运行环境已保存');
   } catch (error) {
     showToast(error.message || '运行环境保存失败');
   } finally {
@@ -1393,6 +1438,66 @@ function logsForActiveContainer() {
   return sortLogsNewest(Array.from(merged.values()));
 }
 
+function normalizedLogSearch(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function logByID(id) {
+  const target = Number(id);
+  return [...state.fullRangeSearchLogs, ...logsForActiveContainer()].find((item) => item.id === target);
+}
+
+// The remote full-range scan is only driven by the in-panel search box, so it
+// is only usable while the global search box is empty. Otherwise filteredLogs()
+// would reuse a result set that was fetched for a different query and render
+// an empty list.
+function fullRangeSearchKey() {
+  if (state.globalQuery.trim()) return '';
+  const query = normalizedLogSearch(state.query);
+  return query && state.selectedContainers.length
+    ? `${state.range}|${state.selectedContainers.join('|')}|${query}`
+    : '';
+}
+
+function clearFullRangeSearch() {
+  if (fullRangeSearchTimer) clearTimeout(fullRangeSearchTimer);
+  fullRangeSearchTimer = null;
+  fullRangeSearchRequest += 1;
+  state.fullRangeSearchLogs = [];
+  state.fullRangeSearchKey = '';
+  state.fullRangeSearchLoading = false;
+}
+
+function scheduleFullRangeSearch() {
+  const key = fullRangeSearchKey();
+  if (!key || !goServerConnected) return;
+  const request = ++fullRangeSearchRequest;
+  state.fullRangeSearchLoading = true;
+  fullRangeSearchTimer = setTimeout(async () => {
+    const targets = selectedContainerTargets();
+    const query = normalizedLogSearch(state.query);
+    try {
+      const responses = await Promise.all(targets.map(async (target) => {
+        const params = new URLSearchParams({ node: target.nodeId, container: target.containerId, range: state.range, q: query });
+        const response = await fetch(`/api/logs/container/search?${params.toString()}`, { headers: { Accept: 'application/json' } });
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '完整时间范围筛选失败');
+        return response.json();
+      }));
+      if (request !== fullRangeSearchRequest || key !== fullRangeSearchKey()) return;
+      state.fullRangeSearchLogs = sortLogsNewest(responses.flatMap((payload) => payload.logs || []));
+      state.fullRangeSearchKey = key;
+    } catch (error) {
+      if (request === fullRangeSearchRequest) showToast(error.message || '完整时间范围筛选失败');
+    } finally {
+      if (request === fullRangeSearchRequest) {
+        state.fullRangeSearchLoading = false;
+        resetLogPagination();
+        renderLogs();
+      }
+    }
+  }, 320);
+}
+
 function compareLogsNewest(left, right) {
   return (Number(right.timestamp) || 0) - (Number(left.timestamp) || 0) || right.id - left.id;
 }
@@ -1471,7 +1576,7 @@ async function loadSelectedContainerLogs() {
   try {
     await Promise.all(targets.map(async (target) => {
       const cacheKey = containerKey(target.nodeId, target.containerId);
-      const query = new URLSearchParams({ node: target.nodeId, container: target.containerId });
+      const query = new URLSearchParams({ node: target.nodeId, container: target.containerId, range: state.range });
       const response = await fetch(`/api/logs/container?${query.toString()}`, { headers: { Accept: 'application/json' } });
       if (!response.ok) throw new Error('容器日志加载失败');
       const payload = await response.json();
@@ -1562,6 +1667,29 @@ function updateStorage(storage) {
     ? new Date(lastEvictedAt).toLocaleTimeString('zh-CN', { hour12: false })
     : '时间未知';
   $('#metric-storage-policy').textContent = `累计淘汰 ${evicted.toLocaleString('en-US')} 条 · 最近 ${lastEvicted}`;
+}
+
+async function clearLogCache() {
+  const button = $('#storage-clear-cache');
+  if (!button || button.disabled) return;
+  if (!window.confirm('确定清除全部已缓存的日志吗？此操作不可恢复，缓存将重新开始累积。')) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/logs/cache/clear', { method: 'POST', headers: { Accept: 'application/json' } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || '清除缓存失败');
+    state.logs = [];
+    state.containerLogCache = {};
+    resetLogPagination();
+    renderLogs();
+    updateStorage(payload.storage);
+    const cleared = Number(payload.cleared) || 0;
+    showToast(cleared ? `已清除 ${cleared.toLocaleString('en-US')} 条缓存日志` : '缓存已是空的');
+  } catch (error) {
+    showToast(error.message || '清除缓存失败，请稍后重试');
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function syncRuleButtons() {
@@ -1765,6 +1893,7 @@ function renderNodes() {
     const nodeId = item.dataset.nodeId;
     state.selectedNodes = [nodeId];
     state.selectedContainers = [];
+    clearFullRangeSearch();
     loadedContainerSelectionKey = '';
     if (!state.expandedNodes.includes(nodeId)) state.expandedNodes.push(nodeId);
     state.containerLogCache = {};
@@ -1786,6 +1915,7 @@ function renderNodes() {
     state.selectedContainers = alreadySelected
       ? state.selectedContainers.filter((value) => value !== key)
       : [...state.selectedContainers, key];
+    clearFullRangeSearch();
     const selectedNodeIds = nodeIdsForContainerKeys(state.selectedContainers);
     state.selectedNodes = selectedNodeIds.length ? selectedNodeIds : [nodeId];
     if (!state.expandedNodes.includes(nodeId)) state.expandedNodes.push(nodeId);
@@ -1835,20 +1965,65 @@ function highlightMessage(message) {
 }
 
 function filteredLogs() {
-  const normalizeSearchText = (value) => String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-  const query = normalizeSearchText(`${state.query} ${state.globalQuery}`);
+  const query = normalizedLogSearch(`${state.query} ${state.globalQuery}`);
   const selectedNodeIds = new Set(state.selectedNodes);
   const selectedTargets = selectedContainerTargets();
   const now = Date.now();
-  return logsForActiveContainer().filter((log) => {
+  const currentSearchKey = fullRangeSearchKey();
+  const source = currentSearchKey && state.fullRangeSearchKey === currentSearchKey
+    ? state.fullRangeSearchLogs
+    : logsForActiveContainer();
+  return source.filter((log) => {
     const logNodeId = nodeIdByName(log.node);
     const nodeMatch = !state.selectedNodes.length || selectedNodeIds.has(logNodeId);
     const containerMatch = !state.selectedContainers.length || selectedTargets.some((target) => target.nodeId === logNodeId && (log.container === target.name || log.container === target.containerId));
     const levelMatch = state.level === 'all' || log.level === state.level;
-    const queryMatch = !query || normalizeSearchText(`${log.node} ${log.container} ${log.message}`).includes(query);
+    const queryMatch = !query || normalizedLogSearch(`${log.node} ${log.container} ${log.message}`).includes(query);
     const noiseMatch = state.ruleState.noise ? !log.message.includes('/healthz') : true;
     return isLogInSelectedRange(log, now) && nodeMatch && containerMatch && levelMatch && queryMatch && noiseMatch;
   }).reverse();
+}
+
+async function loadOlderSelectedContainerLogs() {
+  const targets = selectedContainerTargets();
+  if (!targets.length || state.fullRangeSearchLoading || olderLogsLoading) return;
+  olderLogsLoading = true;
+  $('#older-log-loader')?.classList.remove('hidden');
+  try {
+    const pages = await Promise.all(targets.map(async (target) => {
+      const key = containerKey(target.nodeId, target.containerId);
+      if (olderLogExhausted.has(`${state.range}|${key}`)) return { key, logs: [], hasMore: false };
+      const cached = state.containerLogCache[key] || [];
+      const oldest = cached.reduce((value, log) => Math.min(value, Number(log.timestamp) || value), Number.POSITIVE_INFINITY);
+      if (!Number.isFinite(oldest)) return { key, logs: [], hasMore: false };
+      const params = new URLSearchParams({ node: target.nodeId, container: target.containerId, range: state.range, before: String(oldest) });
+      const response = await fetch(`/api/logs/container/page?${params.toString()}`, { headers: { Accept: 'application/json' } });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '加载更早日志失败');
+      return { key, ...(await response.json()) };
+    }));
+    let added = 0;
+    pages.forEach((page) => {
+      added += (page.logs || []).length;
+      state.containerLogCache[page.key] = mergeLogs(state.containerLogCache[page.key] || [], page.logs || []);
+      if (!page.hasMore) olderLogExhausted.add(`${state.range}|${page.key}`);
+    });
+    lastVirtualWindowKey = '';
+    renderLogs({ preserveScroll: true });
+    if (!added) showToast('已到所选时间范围的最早日志');
+  } catch (error) {
+    showToast(error.message || '加载更早日志失败');
+  } finally {
+    olderLogsLoading = false;
+    $('#older-log-loader')?.classList.add('hidden');
+  }
+}
+
+function maybeLoadOlderLogs() {
+  if (olderLogsLoading || state.fullRangeSearchLoading || fullRangeSearchKey()) return;
+  const stream = $('#log-stream');
+  const reachedBrowseCap = state.selectedContainers.some((key) => (state.containerLogCache[key] || []).length >= 5000);
+  const atOldestVisibleRow = Boolean(stream) && stream.scrollTop <= 2;
+  if (reachedBrowseCap && atOldestVisibleRow) loadOlderSelectedContainerLogs();
 }
 
 function resetLogPagination() {
@@ -1935,7 +2110,9 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   const stagedResults = renderLimit > 0 ? allResults.slice(-renderLimit) : allResults;
   const { start, end } = logVirtualWindow(stagedResults.length, stream, stickToBottom);
   const results = stagedResults.slice(start, end);
-  const loadedLabel = state.historyLoading
+  const loadedLabel = state.fullRangeSearchLoading
+    ? `正在筛选完整${rangeLabels[state.range] || '时间范围'}日志…`
+    : state.historyLoading
     ? `历史日志加载中 · 已发现 ${allResults.length} 条`
     : `显示 ${allResults.length} 条`;
   $('#all-count').textContent = allResults.length.toLocaleString('en-US');
@@ -2025,7 +2202,7 @@ function updateDetailPanel() {
 
 function updatePreview() {
   if (!$('#preview-code')) return;
-  const log = state.logs.find((item) => item.id === state.selectedLog) || state.logs[0];
+  const log = logByID(state.selectedLog) || state.logs[0];
   if (!log) {
     $('#preview-code').textContent = '暂无日志数据';
     return;
@@ -2069,7 +2246,10 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
     const previousHistoryLoading = state.historyLoading;
     const incomingLogs = payload.logs || [];
     const stageInitialLogs = updateLogView && !initialLogPreviewRendered && incomingLogs.length > 0;
-    nodes.splice(0, nodes.length, ...(payload.nodes || []));
+    applyStorageMode(payload.storageMode);
+    // In browser mode the server's node list is always empty by design: this
+    // visitor's nodes live in localStorage and must survive the refresh.
+    nodes.splice(0, nodes.length, ...(isBrowserStorageMode() ? loadBrowserNodes() : (payload.nodes || [])));
     state.selectedNodes = state.selectedNodes.filter((id) => getNode(id));
     state.expandedNodes = state.expandedNodes.filter((id) => getNode(id));
     const serverCapacity = Number(payload.storage?.capacity);
@@ -2244,7 +2424,106 @@ function closeNodeModal() {
   $('#node-submit-button').textContent = '连接并添加';
 }
 
+// ---------------------------------------------------------------------------
+// Storage mode
+//
+// The dashboard can be opened two ways and they keep separate data:
+//
+//   file    - the page is on the machine running the service, so nodes and
+//             providers belong in the service's JSON files.
+//   browser - the page is a visitor on someone else's deployment, so its nodes
+//             and API keys stay in this browser and never reach that host.
+//
+// The server decides which applies (from the request's source address) and
+// reports it via /api/bootstrap; the client never guesses, because a wrong
+// guess would mean uploading credentials to a stranger or losing them.
+// ---------------------------------------------------------------------------
+
+function isBrowserStorageMode() {
+  return state.storageMode === 'browser';
+}
+
+// applyStorageMode only records which backend serves this page. It must not
+// touch `nodes` here: syncGoBackend replaces that array immediately after this
+// call, so anything merged in would be discarded on the same tick. The replace
+// site is what consults isBrowserStorageMode().
+function applyStorageMode(mode) {
+  const next = mode === 'browser' ? 'browser' : 'file';
+  if (state.storageMode === next) return;
+  const isFirstResolve = state.storageMode === '';
+  state.storageMode = next;
+  if (!isFirstResolve) showToast('存储位置已切换，正在重新加载');
+  updateStorageModeUI();
+}
+
+function loadBrowserNodes() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(browserNodesStorageKey) || '[]');
+    if (!Array.isArray(saved)) return [];
+    return saved.map((node) => ({
+      ...node,
+      id: String(node.id || ''),
+      status: node.status === 'online' ? 'online' : 'connecting',
+    })).filter((node) => node.id && node.name && node.url);
+  } catch (error) {
+    return [];
+  }
+}
+
+function persistBrowserNodes() {
+  if (!isBrowserStorageMode()) return;
+  try {
+    localStorage.setItem(browserNodesStorageKey, JSON.stringify(nodes.map((node) => ({
+      id: node.id,
+      name: node.name,
+      url: node.url,
+      style: node.style,
+      initial: node.initial,
+    }))));
+  } catch (error) {
+    showToast('浏览器本地存储不可用，节点配置无法保存');
+  }
+}
+
+// updateStorageModeUI hides the file-backed controls when the configuration is
+// not reachable from this browser, and explains why in the panel.
+function updateStorageModeUI() {
+  const browser = isBrowserStorageMode();
+  const section = $('#settings-config-storage');
+  const note = $('#settings-config-note');
+  const actions = $('#settings-config-actions');
+  const paths = $('#settings-config-paths');
+  if (section) section.classList.toggle('hidden', browser);
+  if (paths) paths.classList.toggle('hidden', browser);
+  if (actions) actions.classList.toggle('hidden', browser);
+  if (note) {
+    note.textContent = browser
+      ? '当前页面未在本机打开，节点与模型配置保存在此浏览器中，不会上传到服务器。'
+      : '节点与模型保存在程序目录下的 data 文件夹，整个目录拷到别的机器即可带走配置。保存模型密钥的文件含明文凭据，请勿分享或同步到公开位置。';
+  }
+}
+
 async function persistNodeToGo(name, url, style) {
+  // A visitor on a remote deployment keeps its nodes in this browser.
+  if (isBrowserStorageMode()) {
+    const node = {
+      id: `node-local-${Date.now()}`,
+      name,
+      url,
+      style: style || 'HTTP / WebSocket',
+      initial: String(name || '?').trim().charAt(0) || '?',
+      status: 'connecting',
+      latency: 0,
+      version: '',
+      containers: [],
+    };
+    nodes.push(node);
+    persistBrowserNodes();
+    renderNodes();
+    updateDetailPanel();
+    showToast('节点已添加到此浏览器');
+    return node;
+  }
   if (!goServerConnected) {
     showToast('服务端未连接，暂时无法添加节点');
     return null;
@@ -2272,6 +2551,16 @@ async function persistNodeToGo(name, url, style) {
 }
 
 async function updateNodeToGo(id, name, url, style) {
+  if (isBrowserStorageMode()) {
+    const index = nodes.findIndex((item) => item.id === id);
+    if (index < 0) return null;
+    nodes[index] = { ...nodes[index], name, url, style: style || nodes[index].style, initial: String(name || '?').trim().charAt(0) || '?' };
+    persistBrowserNodes();
+    renderNodes();
+    updateDetailPanel();
+    showToast('节点已更新');
+    return nodes[index];
+  }
   if (!goServerConnected) {
     showToast('服务端未连接，暂时无法修改节点');
     return null;
@@ -2300,6 +2589,24 @@ async function updateNodeToGo(id, name, url, style) {
 }
 
 async function unbindNode(node) {
+  if (isBrowserStorageMode()) {
+    if (!window.confirm(`确定解绑 Dozzle 节点“${node.name}”吗？`)) return;
+    const index = nodes.findIndex((item) => item.id === node.id);
+    if (index >= 0) nodes.splice(index, 1);
+    state.selectedNodes = state.selectedNodes.filter((id) => id !== node.id);
+    state.selectedContainers = state.selectedContainers.filter((value) => !value.startsWith(`${node.id}::`));
+    state.expandedNodes = state.expandedNodes.filter((id) => id !== node.id);
+    state.selectedLog = 0;
+    resetLogPagination();
+    persistBrowserNodes();
+    renderNodes();
+    renderLogs();
+    updateDetailPanel();
+    updatePreview();
+    persistSelection();
+    showToast('节点已从此浏览器移除');
+    return;
+  }
   if (!goServerConnected) {
     showToast('服务端未连接，暂时无法解绑节点');
     return;
@@ -2749,6 +3056,7 @@ function bindEvents() {
     }
     const nextRange = event.target.value;
     state.range = rangeLabels[nextRange] ? nextRange : '30m';
+    clearFullRangeSearch();
     // Keep the collected logs and selected container caches. Narrowing a
     // range is only a view-level slice; widening it asks the backend for the
     // older interval that is not cached yet.
@@ -2759,6 +3067,10 @@ function bindEvents() {
     try {
       const rangeQuery = new URLSearchParams({ range: state.range });
       state.selectedNodes.forEach((nodeId) => rangeQuery.append('node', nodeId));
+      // When a container is selected, request its history directly. Asking for
+      // every container on the node can fill the shared cache before the
+      // selected container's older pages are reached.
+      state.selectedContainers.forEach((scope) => rangeQuery.append('container', scope));
       const response = await fetch(`/api/logs/range?${rangeQuery.toString()}`, { method: 'POST' });
       if (!response.ok) throw new Error('时间范围加载失败');
       const rangePayload = await response.json().catch(() => ({}));
@@ -2788,7 +3100,13 @@ function bindEvents() {
     renderLogs();
   }));
   const logSearch = $('#log-search');
-  logSearch.addEventListener('input', (event) => { state.query = event.target.value; resetLogPagination(); renderLogs(); });
+  logSearch.addEventListener('input', (event) => {
+    state.query = event.target.value;
+    clearFullRangeSearch();
+    resetLogPagination();
+    renderLogs();
+    scheduleFullRangeSearch();
+  });
   logSearch.addEventListener('paste', (event) => {
     const text = event.clipboardData?.getData('text/plain');
     if (typeof text !== 'string') return;
@@ -2815,7 +3133,10 @@ function bindEvents() {
     renderLogs();
     updatePreview();
   });
-  $('#log-stream').addEventListener('scroll', scheduleLogWindowRender);
+  $('#log-stream').addEventListener('scroll', () => {
+    maybeLoadOlderLogs();
+    scheduleLogWindowRender();
+  });
   $('#pause-button').addEventListener('click', async () => {
     state.paused = !state.paused;
     $('#pause-button').classList.toggle('paused', state.paused);
@@ -2845,16 +3166,14 @@ function bindEvents() {
     if (!state.paused && connected && state.historyLoading) scheduleHistorySync();
   });
   $('#clear-button').addEventListener('click', () => { state.query = ''; $('#log-search').value = ''; resetLogPagination(); renderLogs(); showToast('已清空当前过滤条件'); });
+  $('#storage-clear-cache')?.addEventListener('click', clearLogCache);
   bindAssistantEvents();
   $('#settings-button').addEventListener('click', openAppSettings);
   $('#app-settings-form').addEventListener('submit', saveAppSettings);
-  $('#settings-db-test').addEventListener('click', testDatabaseSettings);
-  $('#settings-db-save').addEventListener('click', saveDatabaseSettings);
   $('#settings-admin-save').addEventListener('click', saveAdminSettings);
-  ['dbEnabled', 'dbDsn', 'dbHost', 'dbPort', 'dbUser', 'dbPassword'].forEach((name) => {
-    $('#app-settings-form').elements[name].addEventListener('input', () => rememberDatabaseDraft($('#app-settings-form')));
-    $('#app-settings-form').elements[name].addEventListener('change', () => rememberDatabaseDraft($('#app-settings-form')));
-  });
+  $('#settings-config-reveal')?.addEventListener('click', revealConfigDirectory);
+  $('#settings-config-export')?.addEventListener('click', exportConfiguration);
+  $('#settings-config-file')?.addEventListener('change', (event) => importConfiguration(event.target.files?.[0]));
   $$('[data-close-app-settings]').forEach((button) => button.addEventListener('click', closeAppSettings));
   bindBackdropDismissal($('#app-settings-modal'), closeAppSettings);
   $('#ai-profile-form').addEventListener('submit', saveAIProfile);
@@ -2886,12 +3205,29 @@ function bindEvents() {
     if (action === 'disable-all') await persistRuleGroup({ mask: false, structure: false, noise: false }, '全部规则已停用');
     if (action === 'reset') await persistRuleGroup({ mask: true, structure: true, noise: false }, '规则已恢复默认设置');
   }));
+  // Resolve outside-click ancestry during the capture phase. Several click
+  // handlers re-render the DOM (for example selecting an assistant session
+  // rebuilds the session list), which detaches event.target. A detached node
+  // has no ancestors, so calling closest() later would wrongly report an
+  // outside click and collapse the assistant dock.
   document.addEventListener('click', (event) => {
-    if (!event.target.closest('#pipeline-actions')) closePipelineMenu();
-    if (!event.target.closest('#assistant-model-picker')) closeAIModelMenu();
-    if (!event.target.closest('#assistant-session-menu') && !event.target.closest('#assistant-session-toggle')) closeAssistantSessionMenu();
-    if (!event.target.closest('#assistant-dock') && !event.target.closest('#assistant-attachment-preview-modal')) $('#assistant-dock').classList.remove('open');
-  });
+    const target = event.target;
+    const inside = (selector) => Boolean(target && target.closest && target.closest(selector));
+    const outside = {
+      pipeline: !inside('#pipeline-actions'),
+      modelPicker: !inside('#assistant-model-picker'),
+      sessionMenu: !inside('#assistant-session-menu') && !inside('#assistant-session-toggle'),
+      assistantDock: !inside('#assistant-dock') && !inside('#assistant-attachment-preview-modal'),
+    };
+    // Apply on the bubble phase so inner handlers can still suppress the
+    // default behavior first, but always using the pre-render ancestry.
+    queueMicrotask(() => {
+      if (outside.pipeline) closePipelineMenu();
+      if (outside.modelPicker) closeAIModelMenu();
+      if (outside.sessionMenu) closeAssistantSessionMenu();
+      if (outside.assistantDock) $('#assistant-dock').classList.remove('open');
+    });
+  }, true);
   $$('.toggle').forEach((button) => button.addEventListener('click', async () => {
     const rule = button.dataset.ruleToggle || button.closest('.pipeline-item')?.dataset.rule;
     if (!rule) return;

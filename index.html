@@ -7,7 +7,7 @@
     <title>日志中枢 · Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="preload" href="loading.gif" as="image" type="image/gif" />
-    <link rel="stylesheet" href="styles.css?v=command-editor-import-109" />
+    <link rel="stylesheet" href="styles.css?v=localhost-file-mode-110" />
   </head>
   <body>
     <div class="app-shell">
@@ -103,7 +103,10 @@
               <div class="metric-top"><span>日志缓存使用率</span><span class="metric-icon">◒</span></div>
               <div class="metric-value" id="metric-storage">—</div>
               <div class="metric-foot" id="metric-storage-foot">等待数据</div>
-              <div class="metric-policy" id="metric-storage-policy">满额后自动淘汰最早日志</div>
+              <div class="metric-policy-row">
+                <div class="metric-policy" id="metric-storage-policy">满额后自动淘汰最早日志</div>
+                <button class="cache-clear-button" id="storage-clear-cache" type="button" title="清空内存中已缓存的全部日志（不可恢复）">清除缓存</button>
+              </div>
             </article>
           </section>
 
@@ -148,6 +151,7 @@
               </div>
 
               <div class="log-table-head"><span>日期</span><span>时间</span><span>级别</span><span>来源 / 容器</span><span>消息</span><span></span></div>
+              <div class="older-log-loader hidden" id="older-log-loader" role="status"><img class="loading-animation" src="loading.gif" alt="正在加载更早日志" /><span>正在加载更早日志</span></div>
               <div class="log-stream" id="log-stream" role="log" aria-live="polite">
                 <div class="empty-state hidden" id="empty-state">
                   <div class="empty-icon">⌁</div><strong>暂无日志数据</strong><span>连接 Dozzle 节点后，日志会显示在这里。</span>
@@ -310,18 +314,22 @@
     <div class="modal-backdrop hidden" id="app-settings-modal" role="dialog" aria-modal="true" aria-labelledby="app-settings-title">
       <div class="modal-card app-settings-card">
         <div class="modal-header"><div><div class="section-kicker">APPLICATION SETTINGS</div><h2 id="app-settings-title">系统设置</h2></div><button class="close-button" data-close-app-settings type="button">×</button></div>
-        <p class="modal-description">配置运行环境、数据库持久化和管理员 key。保存数据库配置前会先测试连接。</p>
+        <p class="modal-description">配置运行环境、配置存储和管理员 key。</p>
         <form id="app-settings-form">
           <label>运行环境<select name="environment"><option value="development">开发环境</option><option value="test">测试环境</option><option value="staging">预发布环境</option><option value="production">生产环境</option></select></label>
-          <div class="settings-section">
-            <div class="settings-section-heading"><strong>数据库持久化</strong><span id="settings-db-status">未配置</span></div>
-            <label class="settings-checkbox"><input name="dbEnabled" type="checkbox" /><span>启用 MySQL 节点和模型配置持久化</span></label>
-            <label>MySQL DSN（可选）<input name="dbDsn" type="text" autocomplete="off" placeholder="已配置时留空可保持不变" /></label>
-            <div class="form-grid"><label>数据库地址<input name="dbHost" type="text" placeholder="127.0.0.1" /></label><label>端口<input name="dbPort" type="text" inputmode="numeric" placeholder="3306" /></label></div>
-            <label>用户名<input name="dbUser" type="text" autocomplete="username" /></label>
-            <label>数据库密码<input name="dbPassword" type="password" autocomplete="new-password" placeholder="留空保持已保存的密码" /></label>
-            <div class="form-note"><span>⌁</span> 节点表 <code>vps_info</code>、AI 供应商表 <code>model_info</code> 为固定表名，默认数据库为 <code>log_agent</code>。</div>
-            <div class="settings-actions"><button type="button" class="secondary-button compact-button" id="settings-db-test">测试连接</button><button type="button" class="primary-button compact-button" id="settings-db-save">保存数据库</button></div>
+          <div class="settings-section" id="settings-config-storage">
+            <div class="settings-section-heading"><strong>配置存储</strong><span id="settings-config-status">读取中…</span></div>
+            <div class="config-path-list" id="settings-config-paths">
+              <div class="config-path-row"><span>节点配置</span><code id="settings-nodes-path">—</code></div>
+              <div class="config-path-row"><span>模型配置</span><code id="settings-models-path">—</code></div>
+            </div>
+            <div class="form-note"><span>⌁</span> <span id="settings-config-note">节点与模型保存在程序目录下的 <code>data</code> 文件夹，整个目录拷到别的机器即可带走配置。保存模型密钥的文件含明文凭据，请勿分享或同步到公开位置。</span></div>
+            <div class="settings-actions" id="settings-config-actions">
+              <button type="button" class="secondary-button compact-button" id="settings-config-reveal">打开文件目录</button>
+              <button type="button" class="secondary-button compact-button" id="settings-config-export">导出配置</button>
+              <label class="secondary-button compact-button settings-file-button" for="settings-config-import">导入配置</label>
+              <input type="file" id="settings-config-file" accept="application/json,.json" class="hidden" />
+            </div>
           </div>
           <div class="settings-section">
             <div class="settings-section-heading"><strong>管理员 key</strong><span id="settings-admin-status">未配置</span></div>
@@ -329,7 +337,7 @@
             <label>新的管理员 key<input name="adminToken" type="password" autocomplete="new-password" placeholder="留空保持不变" /></label>
             <div class="settings-actions"><button type="button" class="primary-button compact-button" id="settings-admin-save">保存管理员 key</button></div>
           </div>
-          <div class="form-note"><span>⌁</span> 密码和 key 不会回显；配置保存在服务端本地文件中。</div>
+          <div class="form-note"><span>⌁</span> 密码和 key 不会回显。</div>
           <div class="modal-actions"><button type="button" class="secondary-button" data-close-app-settings>取消</button><button class="primary-button" type="submit">保存运行环境</button></div>
         </form>
       </div>
@@ -360,7 +368,7 @@
     </div>
 
     <div class="toast hidden" id="toast"><span class="toast-icon">✓</span><span id="toast-message">已更新</span></div>
-    <script src="app.js?v=command-favorite-icon-53"></script>
+    <script src="app.js?v=localhost-file-mode-61"></script>
     <script src="assistant-ui.js?v=modal-dismiss-3"></script>
     <script src="bootstrap.js?v=bootstrap-2"></script>
   </body>
