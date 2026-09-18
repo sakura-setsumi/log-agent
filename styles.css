@@ -51,10 +51,12 @@ button { color: inherit; cursor: pointer; }
 .metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 31px; }.metric-card { position: relative; min-height: 134px; overflow: hidden; padding: 17px 18px; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(135deg, rgba(255,255,255,.028), rgba(255,255,255,.006)); }.metric-card::after { content: ""; position: absolute; width: 80px; height: 80px; right: -24px; bottom: -34px; border: 1px solid currentColor; border-radius: 50%; opacity: .08; box-shadow: 0 0 0 13px currentColor, 0 0 0 27px transparent; }.accent-orange { color: var(--orange); }.accent-teal { color: var(--teal); }.accent-purple { color: var(--purple); }.accent-blue { color: var(--blue); }.metric-top { display: flex; justify-content: space-between; color: var(--muted); font-size:13px; }.metric-icon { color: currentColor; font-size:16px; }.metric-value { margin-top: 14px; color: var(--text); font-size:30px; line-height: 1; letter-spacing: -.04em; font-weight: 650; }.unit { margin-left: 2px; color: var(--muted); font-size:16px; font-weight: 500; }.metric-foot { display: flex; gap: 6px; align-items: center; margin-top: 13px; color: var(--muted-2); font-size:12px; }.metric-policy { position: relative; z-index: 1; margin-top: 5px; color: var(--muted-2); font-size: 10px; line-height: 1.35; }.trend-up { color: var(--teal); }.storage-progress { width: 90px; height: 4px; margin-top: 12px; overflow: hidden; border-radius: 4px; background: #2e343c; }.storage-progress span { display: block; width: 68%; height: 100%; border-radius: inherit; background: var(--blue); }
 .metric-policy-row { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; }
 .metric-policy-row .metric-policy { margin-top: 0; }
-.config-path-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 10px; }
-.config-path-row { display: flex; align-items: center; gap: 10px; font-size: 12px; }
-.config-path-row > span { flex-shrink: 0; width: 62px; color: var(--muted); }
-.config-path-row code { flex: 1; min-width: 0; padding: 5px 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; color: var(--muted-2); background: var(--surface-soft); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+/* The reveal affordance lives in the modal header. Its presence is the only
+   cue that this page is backed by files rather than browser storage. */
+.modal-header-actions { display: flex; align-items: center; gap: 10px; }
+.settings-reveal-link { flex-shrink: 0; color: var(--teal); font-size: 12px; text-decoration: none; border-bottom: 1px dashed rgba(55, 208, 191, .5); transition: color .18s ease, border-color .18s ease; }
+.settings-reveal-link:hover { color: #6ee7d7; border-bottom-color: #6ee7d7; }
+.settings-reveal-link[data-busy="1"] { opacity: .55; pointer-events: none; }
 .settings-file-button { display: inline-flex; align-items: center; cursor: pointer; }
 /* The storage-mode split toggles this on whole sections, so the rule has to be
    unscoped; !important keeps it ahead of the display rules those blocks set. */

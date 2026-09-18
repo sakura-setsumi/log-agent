@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -21,15 +20,19 @@ import (
 // path would turn "open the config folder" into an arbitrary program execution
 // primitive, since the handler hands the path to a shell command.
 //
-// The dashboard can be reached two ways, and the panel adapts:
+// The dashboard can be reached two ways, and the settings panel adapts:
 //
 //   - From the machine running the service (the browser sent the request over
 //     loopback). The configuration files are the user's own, so the panel
-//     shows their real paths and offers open-folder / export / import.
+//     offers an "open containing folder" link, plus export and import.
 //   - From anywhere else. The caller is a visitor to someone else's
 //     deployment; the files sit on the server's disk and are not reachable
-//     from their browser. The panel hides the paths and the file operations,
-//     because a directory listing is useless to them.
+//     from their browser. The panel offers none of that.
+//
+// The response deliberately carries no filesystem paths at all. The UI never
+// renders one: the presence of the reveal link is the only cue the user gets
+// about which backend is in play, so there is no reason to send the server's
+// directory layout anywhere.
 //
 // Note this is about reachability of the file operations, not about where the
 // configuration lives: the dashboard's own node/model data always comes from
@@ -40,23 +43,18 @@ import (
 // rewrites it, so it cannot be trusted; the connection's peer address can.
 // X-Forwarded-For is deliberately ignored, since a client can set it freely.
 
-// configInfoResponse describes the on-disk configuration for the settings UI.
+// configInfoResponse describes the configuration backend for the settings UI.
 type configInfoResponse struct {
 	// LocalMode reports whether this caller can reach the configuration files.
-	// When false the path fields below are empty strings.
 	LocalMode bool `json:"localMode"`
 	// CanReveal reports whether opening a file browser is meaningful: the
 	// caller must be local and the platform must have a desktop.
-	CanReveal     bool   `json:"canReveal"`
-	Directory     string `json:"directory"`
-	DisplayDir    string `json:"displayDirectory"`
-	NodesPath     string `json:"nodesPath"`
-	ModelsPath    string `json:"modelsPath"`
-	NodesExists   bool   `json:"nodesExists"`
-	ModelsExist   bool   `json:"modelsExist"`
-	HasAdminToken bool   `json:"hasAdminToken"`
-	NodesCount    int    `json:"nodesCount"`
-	ModelsCount   int    `json:"modelsCount"`
+	CanReveal     bool `json:"canReveal"`
+	NodesExists   bool `json:"nodesExists"`
+	ModelsExist   bool `json:"modelsExist"`
+	HasAdminToken bool `json:"hasAdminToken"`
+	NodesCount    int  `json:"nodesCount"`
+	ModelsCount   int  `json:"modelsCount"`
 }
 
 func (s *server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +63,6 @@ func (s *server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodePath, modelPath := nodesFilePath(), modelsFilePath()
-	directory := configDir()
 
 	nodesCount, modelsCount := 0, 0
 	if s.store != nil {
@@ -78,7 +75,7 @@ func (s *server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	local := isLoopbackRequest(r)
-	response := configInfoResponse{
+	writeJSON(w, http.StatusOK, configInfoResponse{
 		LocalMode:     local,
 		CanReveal:     local && hasDesktopSession(),
 		NodesExists:   fileExists(nodePath),
@@ -86,17 +83,7 @@ func (s *server) handleConfigInfo(w http.ResponseWriter, r *http.Request) {
 		HasAdminToken: s.currentAdminToken() != "",
 		NodesCount:    nodesCount,
 		ModelsCount:   modelsCount,
-	}
-	// A visitor gets no filesystem paths: they cannot act on them, and the
-	// server's directory layout is not theirs to know.
-	if local {
-		response.Directory = directory
-		response.DisplayDir = configPathForDisplay(directory)
-		response.NodesPath = configPathForDisplay(nodePath)
-		response.ModelsPath = configPathForDisplay(modelPath)
-	}
-
-	writeJSON(w, http.StatusOK, response)
+	})
 }
 
 // isLoopbackRequest reports whether the request reached us over the loopback
@@ -183,7 +170,7 @@ func (s *server) handleConfigReveal(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("无法打开目录: %v", err)})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"opened": true, "directory": dir})
+	writeJSON(w, http.StatusOK, map[string]any{"opened": true})
 }
 
 // openInFileManager launches the platform file browser for dir.
@@ -356,18 +343,4 @@ func (s *server) reloadNodesFromStore() error {
 	}
 	s.startPersistedNodes()
 	return nil
-}
-
-// configPathForDisplay shortens a path under the home directory to a ~ form
-// without hiding which directory it refers to.
-func configPathForDisplay(path string) string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return path
-	}
-	relative, err := filepath.Rel(home, path)
-	if err != nil || strings.HasPrefix(relative, "..") {
-		return path
-	}
-	return filepath.Join("~", relative)
 }

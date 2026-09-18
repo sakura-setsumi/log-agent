@@ -7,7 +7,7 @@
     <title>日志中枢 · Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="preload" href="loading.gif" as="image" type="image/gif" />
-    <link rel="stylesheet" href="styles.css?v=localhost-file-mode-110" />
+    <link rel="stylesheet" href="styles.css?v=settings-reveal-link-111" />
   </head>
   <body>
     <div class="app-shell">
@@ -313,19 +313,13 @@
 
     <div class="modal-backdrop hidden" id="app-settings-modal" role="dialog" aria-modal="true" aria-labelledby="app-settings-title">
       <div class="modal-card app-settings-card">
-        <div class="modal-header"><div><div class="section-kicker">APPLICATION SETTINGS</div><h2 id="app-settings-title">系统设置</h2></div><button class="close-button" data-close-app-settings type="button">×</button></div>
+        <div class="modal-header"><div><div class="section-kicker">APPLICATION SETTINGS</div><h2 id="app-settings-title">系统设置</h2></div><div class="modal-header-actions"><a class="settings-reveal-link hidden" id="settings-config-reveal" href="#" role="button">打开文件目录</a><button class="close-button" data-close-app-settings type="button">×</button></div></div>
         <p class="modal-description">配置运行环境、配置存储和管理员 key。</p>
         <form id="app-settings-form">
           <label>运行环境<select name="environment"><option value="development">开发环境</option><option value="test">测试环境</option><option value="staging">预发布环境</option><option value="production">生产环境</option></select></label>
           <div class="settings-section" id="settings-config-storage">
-            <div class="settings-section-heading"><strong>配置存储</strong><span id="settings-config-status">读取中…</span></div>
-            <div class="config-path-list" id="settings-config-paths">
-              <div class="config-path-row"><span>节点配置</span><code id="settings-nodes-path">—</code></div>
-              <div class="config-path-row"><span>模型配置</span><code id="settings-models-path">—</code></div>
-            </div>
             <div class="form-note"><span>⌁</span> <span id="settings-config-note">节点与模型保存在程序目录下的 <code>data</code> 文件夹，整个目录拷到别的机器即可带走配置。保存模型密钥的文件含明文凭据，请勿分享或同步到公开位置。</span></div>
             <div class="settings-actions" id="settings-config-actions">
-              <button type="button" class="secondary-button compact-button" id="settings-config-reveal">打开文件目录</button>
               <button type="button" class="secondary-button compact-button" id="settings-config-export">导出配置</button>
               <label class="secondary-button compact-button settings-file-button" for="settings-config-import">导入配置</label>
               <input type="file" id="settings-config-file" accept="application/json,.json" class="hidden" />
@@ -368,7 +362,7 @@
     </div>
 
     <div class="toast hidden" id="toast"><span class="toast-icon">✓</span><span id="toast-message">已更新</span></div>
-    <script src="app.js?v=localhost-file-mode-61"></script>
+    <script src="app.js?v=settings-reveal-link-62"></script>
     <script src="assistant-ui.js?v=modal-dismiss-3"></script>
     <script src="bootstrap.js?v=bootstrap-2"></script>
   </body>

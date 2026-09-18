@@ -555,15 +555,18 @@ func writeE2EPixel(t *testing.T) string {
 }
 
 // storageModeView is what the settings panel looks like to a given caller.
+//
+// The reveal link is the whole storage-mode signal in the UI: there is no
+// status text and no path row any more, so RevealHidden is what Mode derives
+// from.
 type storageModeView struct {
 	Mode            string `json:"mode"`
-	Status          string `json:"status"`
 	Note            string `json:"note"`
 	SectionHidden   bool   `json:"sectionHidden"`
-	PathsHidden     bool   `json:"pathsHidden"`
 	ActionsHidden   bool   `json:"actionsHidden"`
-	NodesPath       string `json:"nodesPath"`
-	RevealDisabled  bool   `json:"revealDisabled"`
+	RevealPresent   bool   `json:"revealPresent"`
+	RevealHidden    bool   `json:"revealHidden"`
+	HeaderHasReveal bool   `json:"headerHasReveal"`
 	LocalStorageKey string `json:"localStorageKey"`
 }
 
@@ -571,6 +574,9 @@ type storageModeView struct {
 // the httptest loopback address (file mode) and once with a forged non-loopback
 // RemoteAddr (browser mode). The rule the user asked for is fixed, not a user
 // choice, so the page must reflect whatever /api/bootstrap reported.
+//
+// The single intended difference between the two panels is the reveal link in
+// the modal header, so that link's visibility is what each subtest asserts on.
 func TestE2EStorageModeFollowsRequestOrigin(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
@@ -637,13 +643,12 @@ func TestE2EStorageModeFollowsRequestOrigin(t *testing.T) {
 			chromedp.Evaluate(`openAppSettings()`, nil),
 			chromedp.Sleep(2*time.Second),
 			chromedp.Evaluate(`JSON.stringify({
-				status: document.querySelector('#settings-config-status')?.textContent || '',
 				note: document.querySelector('#settings-config-note')?.textContent || '',
 				sectionHidden: !!document.querySelector('#settings-config-storage')?.classList.contains('hidden'),
-				pathsHidden: !!document.querySelector('#settings-config-paths')?.classList.contains('hidden'),
 				actionsHidden: !!document.querySelector('#settings-config-actions')?.classList.contains('hidden'),
-				nodesPath: document.querySelector('#settings-nodes-path')?.textContent || '',
-				revealDisabled: !!(document.querySelector('#settings-config-reveal')||{}).disabled,
+				revealPresent: !!document.querySelector('#settings-config-reveal'),
+				revealHidden: !!document.querySelector('#settings-config-reveal')?.classList.contains('hidden'),
+				headerHasReveal: !!document.querySelector('#app-settings-modal .modal-header-actions #settings-config-reveal'),
 				localStorageKey: String(!!localStorage.getItem('log-agent-browser-nodes')),
 			})`, &raw),
 		); err != nil {
@@ -653,29 +658,37 @@ func TestE2EStorageModeFollowsRequestOrigin(t *testing.T) {
 		if err := json.Unmarshal([]byte(raw), &view); err != nil {
 			t.Fatalf("decode panel view %q: %v", raw, err)
 		}
-		// The status text is the only mode signal a user sees.
-		if view.Status == "本地 JSON 文件" {
-			view.Mode = "file"
-		} else if view.Status == "此浏览器" {
+		if !view.RevealPresent {
+			t.Fatalf("the reveal link must exist in the markup for both modes")
+		}
+		// The link's visibility is the only mode signal a user sees.
+		if view.RevealHidden {
 			view.Mode = "browser"
+		} else {
+			view.Mode = "file"
 		}
 		return view
 	}
 
-	t.Run("local caller sees file paths and actions", func(t *testing.T) {
+	t.Run("local caller sees the reveal link", func(t *testing.T) {
 		web := newServer(t)
 		view := inspect(t, web.URL)
 		if view.Mode != "file" {
 			t.Fatalf("local caller mode = %q, want file", view.Mode)
 		}
-		if view.SectionHidden || view.PathsHidden || view.ActionsHidden {
-			t.Fatalf("local caller must see the storage section: %+v", view)
+		if view.RevealHidden {
+			t.Fatalf("local caller must see the file-manager link: %+v", view)
 		}
-		if view.NodesPath == "" || view.NodesPath == "—" {
-			t.Fatalf("local caller must see the resolved node path, got %q", view.NodesPath)
+		// The header is where the link was asked to live, so pin the place down
+		// in case a future layout change moves it back into the section body.
+		if !view.HeaderHasReveal {
+			t.Fatalf("the reveal link must sit in the modal header: %+v", view)
 		}
-		if view.Status != "本地 JSON 文件" {
-			t.Fatalf("local caller status = %q, want 本地 JSON 文件", view.Status)
+		if view.SectionHidden || view.ActionsHidden {
+			t.Fatalf("export and import must stay available locally: %+v", view)
+		}
+		if !strings.Contains(view.Note, "data") {
+			t.Fatalf("local caller note must describe file storage, got %q", view.Note)
 		}
 	})
 
@@ -711,18 +724,18 @@ func TestE2EStorageModeFollowsRequestOrigin(t *testing.T) {
 		if view.Mode != "browser" {
 			t.Fatalf("remote caller mode = %q, want browser", view.Mode)
 		}
-		// The whole point of browser mode: no filesystem affordances at all.
-		if !view.SectionHidden {
-			t.Fatal("remote caller must not see the file-backed storage section")
-		}
-		if view.NodesPath != "" && view.NodesPath != "—" {
-			t.Fatalf("remote caller leaked a node path: %q", view.NodesPath)
-		}
-		if view.Status != "此浏览器" {
-			t.Fatalf("remote caller status = %q, want 此浏览器", view.Status)
+		// The whole point of browser mode: no filesystem affordance at all. The
+		// link is the only one, so hiding it is the complete requirement.
+		if !view.RevealHidden {
+			t.Fatal("remote caller must not see the file-manager link")
 		}
 		if !strings.Contains(view.Note, "浏览器") {
 			t.Fatalf("remote caller note must explain browser storage, got %q", view.Note)
+		}
+		// Export and import are storage-agnostic (they read and write whatever
+		// backend is active), so they stay visible in both modes.
+		if view.SectionHidden || view.ActionsHidden {
+			t.Fatalf("export and import must stay available remotely: %+v", view)
 		}
 	})
 }

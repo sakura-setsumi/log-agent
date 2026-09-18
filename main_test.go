@@ -1086,8 +1086,14 @@ func TestNodeWriteAllowedForLocalCaller(t *testing.T) {
 	}
 }
 
-// The panel must not hand a visitor the server's directory layout.
-func TestConfigInfoHidesPathsFromRemoteCaller(t *testing.T) {
+// The settings panel exposes exactly one storage affordance: the reveal link in
+// its header. A visitor to someone else's deployment must never be offered it,
+// because the configuration files are not on their machine.
+//
+// The response deliberately carries no filesystem paths at all, so there is
+// nothing left to leak here; what this pins down is that the two booleans that
+// gate the link stay false for a remote caller.
+func TestConfigInfoHidesFileAccessFromRemoteCaller(t *testing.T) {
 	configRoot := t.TempDir()
 	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
 	resetConfigDirCache(t)
@@ -1108,12 +1114,12 @@ func TestConfigInfoHidesPathsFromRemoteCaller(t *testing.T) {
 		t.Fatal("remote caller was reported as local")
 	}
 	if remote.CanReveal {
-		t.Fatal("remote caller was offered a file-manager button")
-	}
-	if remote.Directory != "" || remote.NodesPath != "" || remote.ModelsPath != "" || remote.DisplayDir != "" {
-		t.Fatalf("remote caller received server paths: %+v", remote)
+		t.Fatal("remote caller was offered the file-manager link")
 	}
 
+	// A loopback caller is the owner of the files, so the link is allowed. Only
+	// localMode is asserted unconditionally: canReveal additionally depends on
+	// the platform having a desktop, which a headless CI box does not.
 	localRequest := httptest.NewRequest(http.MethodGet, "/api/config/info", nil)
 	localRequest.RemoteAddr = "127.0.0.1:51234"
 	localResponse := httptest.NewRecorder()
@@ -1125,8 +1131,8 @@ func TestConfigInfoHidesPathsFromRemoteCaller(t *testing.T) {
 	if !local.LocalMode {
 		t.Fatal("loopback caller was not reported as local")
 	}
-	if local.Directory != configRoot {
-		t.Fatalf("local directory = %q, want %q", local.Directory, configRoot)
+	if local.CanReveal != hasDesktopSession() {
+		t.Fatalf("local canReveal = %t, want %t (desktop session)", local.CanReveal, hasDesktopSession())
 	}
 }
 

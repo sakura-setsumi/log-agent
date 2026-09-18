@@ -1059,32 +1059,20 @@ async function openAppSettings() {
   }
 }
 
-// Reads the on-disk configuration location so the settings panel can show the
-// real paths instead of a hardcoded guess.
+// Reads where the configuration lives so the settings panel can expose the
+// file-manager link. The paths themselves are deliberately never rendered:
+// the link is the only affordance, so its presence is what tells the user
+// whether this page is backed by files or by browser storage.
 async function loadConfigInfo() {
-  const status = $('#settings-config-status');
   try {
     const response = await fetch('/api/config/info', { headers: { Accept: 'application/json' } });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || '配置信息读取失败');
     state.configInfo = payload;
-    $('#settings-nodes-path').textContent = payload.nodesPath || '—';
-    $('#settings-models-path').textContent = payload.modelsPath || '—';
-    // A visitor never reaches files, so the panel must not claim a file
-    // location it cannot see. updateStorageModeUI already fills the note.
-    status.textContent = payload.localMode ? '本地 JSON 文件' : '此浏览器';
     // openAppSettings() calls updateStorageModeUI() before this fetch settles,
     // so re-apply it now that localMode is known for sure.
     updateStorageModeUI();
-    // The reveal button drives the machine that runs the service, so it is
-    // only meaningful when a desktop session was detected.
-    const reveal = $('#settings-config-reveal');
-    if (reveal) {
-      reveal.disabled = !payload.canReveal;
-      reveal.title = payload.canReveal ? '' : '当前系统未检测到桌面环境';
-    }
   } catch (error) {
-    status.textContent = '读取失败';
     showToast(error.message || '配置信息读取失败');
   }
 }
@@ -1096,18 +1084,19 @@ function configAdminHeaders() {
   return headers;
 }
 
-async function revealConfigDirectory() {
-  const button = $('#settings-config-reveal');
-  if (!button || button.disabled) return;
-  button.disabled = true;
+async function revealConfigDirectory(event) {
+  if (event) event.preventDefault();
+  const link = $('#settings-config-reveal');
+  if (!link || link.classList.contains('hidden') || link.dataset.busy === '1') return;
+  link.dataset.busy = '1';
   try {
     const response = await fetch('/api/config/reveal', { method: 'POST', headers: configAdminHeaders() });
-    const payload = await readSettingsResponse(response, '打开配置目录失败');
-    showToast(`已在文件管理器中打开 ${payload.directory || '配置目录'}`);
+    await readSettingsResponse(response, '打开配置目录失败');
+    showToast('已在文件管理器中打开配置目录');
   } catch (error) {
     showToast(error.message || '打开配置目录失败');
   } finally {
-    button.disabled = state.configInfo?.canReveal === false;
+    link.dataset.busy = '0';
   }
 }
 
@@ -2485,21 +2474,26 @@ function persistBrowserNodes() {
   }
 }
 
-// updateStorageModeUI hides the file-backed controls when the configuration is
-// not reachable from this browser, and explains why in the panel.
+// updateStorageModeUI is the single place that reflects the storage backend in
+// the settings panel. The reveal link is the whole signal: present when this
+// page is served from the machine that owns the files, absent otherwise. The
+// note text explains the difference without naming a path.
 function updateStorageModeUI() {
   const browser = isBrowserStorageMode();
-  const section = $('#settings-config-storage');
   const note = $('#settings-config-note');
-  const actions = $('#settings-config-actions');
-  const paths = $('#settings-config-paths');
-  if (section) section.classList.toggle('hidden', browser);
-  if (paths) paths.classList.toggle('hidden', browser);
-  if (actions) actions.classList.toggle('hidden', browser);
+  const section = $('#settings-config-storage');
+  const reveal = $('#settings-config-reveal');
+  if (section) section.classList.toggle('hidden', false);
   if (note) {
     note.textContent = browser
       ? '当前页面未在本机打开，节点与模型配置保存在此浏览器中，不会上传到服务器。'
       : '节点与模型保存在程序目录下的 data 文件夹，整个目录拷到别的机器即可带走配置。保存模型密钥的文件含明文凭据，请勿分享或同步到公开位置。';
+  }
+  if (reveal) {
+    // canReveal is false on a desktop-less host, where opening a file manager
+    // is meaningless; treat that the same as browser mode and hide the link.
+    const show = !browser && state.configInfo?.canReveal !== false;
+    reveal.classList.toggle('hidden', !show);
   }
 }
 
