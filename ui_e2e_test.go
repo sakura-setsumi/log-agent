@@ -739,3 +739,242 @@ func TestE2EStorageModeFollowsRequestOrigin(t *testing.T) {
 		}
 	})
 }
+
+// aiProfileStorageView is what the model-settings panel shows after a load.
+type aiProfileStorageView struct {
+	ProfileNames    []string `json:"profileNames"`
+	LocalStorageLen int      `json:"localStorageLen"`
+	StorageMode     string   `json:"storageMode"`
+}
+
+// TestE2EAIProfilesComeFromFileNotBrowserCache pins down the storage source of
+// the model settings panel.
+//
+// The bug this covers: loadAIProfilesFromFile() used to merge the providers it
+// fetched into whatever localStorage already held, and returned early when the
+// file was empty. A browser that had stale providers cached therefore kept
+// showing them on a file-backed page, and the merge wrote the file's providers
+// back into localStorage, so a machine's plaintext API keys travelled to every
+// later remote visit. The file has to be the authority in file mode.
+func TestE2EAIProfilesComeFromFileNotBrowserCache(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+
+	// A file-backed store holding exactly one provider.
+	staleName := "来自浏览器缓存的残留供应商"
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+	t.Cleanup(func() { *configDirCache() = configDirState{} })
+
+	store := newConfigStore()
+	if _, err := store.upsertModel(0, "文件里的供应商", "https://api.example.com/v1", "sk-from-file", 0, []string{"file-model"}); err != nil {
+		t.Fatalf("seed models.json: %v", err)
+	}
+
+	s := &server{
+		nodes:                 []Node{},
+		logs:                  []LogEntry{},
+		historyRange:          "30m",
+		rules:                 map[string]bool{},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+		store:                 store,
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Flag("headless", true),
+		chromedp.NoSandbox,
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	t.Cleanup(cancel)
+
+	// Seed localStorage with a provider that only ever existed in the browser,
+	// then load the page: it must not appear, because this page is file-backed.
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.Evaluate(`localStorage.setItem('log-agent-ai-profiles', JSON.stringify([{
+			id: 'ai-profile-stale-1',
+			name: '`+staleName+`',
+			baseURL: 'https://stale.example.com/v1',
+			apiKey: 'sk-stale-should-not-surface',
+			type: 'openai',
+			enabled: true,
+			models: [{ id: 'stale-model-1', name: 'stale-model' }],
+		}]))`, nil),
+	); err != nil {
+		t.Fatalf("seed browser cache: %v", err)
+	}
+
+	// Reload so bootstrap runs with the stale cache already in place.
+	var view aiProfileStorageView
+	var raw string
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.Sleep(2*time.Second),
+		chromedp.Evaluate(`JSON.stringify({
+			profileNames: state.aiProfiles.map((profile) => profile.name),
+			localStorageLen: JSON.parse(localStorage.getItem('log-agent-ai-profiles') || '[]').length,
+			storageMode: state.storageMode,
+		})`, &raw),
+	); err != nil {
+		t.Fatalf("inspect model settings: %v", err)
+	}
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode model settings view %q: %v", raw, err)
+	}
+
+	if view.StorageMode != "file" {
+		t.Fatalf("loopback page should be file-backed, got mode %q", view.StorageMode)
+	}
+	for _, name := range view.ProfileNames {
+		if name == staleName {
+			t.Fatalf("file-backed page surfaced a cached provider: %+v", view.ProfileNames)
+		}
+	}
+	if len(view.ProfileNames) != 1 || view.ProfileNames[0] != "文件里的供应商" {
+		t.Fatalf("file-backed page must show exactly models.json contents, got %+v", view.ProfileNames)
+	}
+	// The file's provider must not be copied into the browser cache either.
+	// Otherwise a stale copy survives here, and the next visit that does render
+	// from localStorage (a remote visitor, or this machine after the file is
+	// emptied) shows providers that no longer exist on disk.
+	//
+	// Note this is a leak of configuration, not of credentials: aiProfileView
+	// deliberately omits APIKey, so the key never reaches the browser at all.
+	// That is why the assertion is on the cache contents rather than on a secret.
+	if view.LocalStorageLen != 1 {
+		t.Fatalf("file mode must not rewrite the browser cache, len=%d", view.LocalStorageLen)
+	}
+	var cacheRaw string
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`localStorage.getItem('log-agent-ai-profiles') || '[]'`, &cacheRaw),
+	); err != nil {
+		t.Fatalf("read browser cache: %v", err)
+	}
+	if strings.Contains(cacheRaw, "文件里的供应商") {
+		t.Fatalf("file-mode provider leaked into the browser cache: %s", cacheRaw)
+	}
+	if !strings.Contains(cacheRaw, staleName) {
+		t.Fatalf("the browser cache should still hold only its own provider, got %s", cacheRaw)
+	}
+}
+
+// TestE2EBrowserModeKeepsItsOwnProviders is the other half of the storage split:
+// a remote visitor must still see the providers it configured itself. The fix
+// that stops file mode from reading the browser cache must not turn into
+// "ignore localStorage everywhere".
+func TestE2EBrowserModeKeepsItsOwnProviders(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+
+	// The store is empty, so anything rendered here can only come from the
+	// browser's own cache.
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	resetConfigDirCache(t)
+	t.Cleanup(func() { *configDirCache() = configDirState{} })
+
+	s := &server{
+		nodes:                 []Node{},
+		logs:                  []LogEntry{},
+		historyRange:          "30m",
+		rules:                 map[string]bool{},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+		store:                 newConfigStore(),
+	}
+	handler := newHTTPHandler(s)
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = "124.174.71.198:51234"
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Flag("headless", true),
+		chromedp.NoSandbox,
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	t.Cleanup(cancel)
+
+	ownName := "访客自己的供应商"
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.Evaluate(`localStorage.setItem('log-agent-ai-profiles', JSON.stringify([{
+			id: 'visitor-1',
+			name: '`+ownName+`',
+			baseURL: 'https://visitor.example.com/v1',
+			apiKey: 'sk-visitor',
+			type: 'openai',
+			enabled: true,
+			models: [{ id: 'visitor-model-1', name: 'visitor-model' }],
+		}]))`, nil),
+	); err != nil {
+		t.Fatalf("seed visitor cache: %v", err)
+	}
+
+	var view aiProfileStorageView
+	var raw string
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.Sleep(2*time.Second),
+		chromedp.Evaluate(`JSON.stringify({
+			profileNames: state.aiProfiles.map((profile) => profile.name),
+			localStorageLen: JSON.parse(localStorage.getItem('log-agent-ai-profiles') || '[]').length,
+			storageMode: state.storageMode,
+		})`, &raw),
+	); err != nil {
+		t.Fatalf("inspect model settings: %v", err)
+	}
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode model settings view %q: %v", raw, err)
+	}
+	if view.StorageMode != "browser" {
+		t.Fatalf("remote page should be browser-backed, got mode %q", view.StorageMode)
+	}
+	if len(view.ProfileNames) != 1 || view.ProfileNames[0] != ownName {
+		t.Fatalf("remote page must show its own cached providers, got %+v", view.ProfileNames)
+	}
+}

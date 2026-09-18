@@ -224,7 +224,21 @@ function normalizeAIProvider(profile, index = 0) {
   };
 }
 
+// loadAIProfiles restores this browser's own providers.
+//
+// It is deliberately a no-op in file mode. There the configuration belongs to
+// the machine running the service, and /api/ai/profiles is the authority;
+// starting from localStorage would make stale cached providers reappear on a
+// page that is supposed to show only what is in models.json. bootstrap.js calls
+// this before the storage mode is known, so applyStorageMode re-runs it once
+// the mode resolves.
 function loadAIProfiles() {
+  if (state.storageMode === 'file') {
+    state.aiProfiles = [];
+    state.activeAIProfileId = '';
+    state.activeAIModelId = '';
+    return;
+  }
   try {
     const saved = JSON.parse(localStorage.getItem(aiProfilesStorageKey) || '[]');
     if (Array.isArray(saved)) state.aiProfiles = saved.map(normalizeAIProvider).filter(Boolean);
@@ -323,31 +337,40 @@ function loadAssistantSessions() {
   } catch (error) { state.assistantSessions = []; }
 }
 
-async function loadAIProfilesFromDatabase() {
+async function loadAIProfilesFromFile() {
   try {
     const response = await fetch('/api/ai/profiles', { headers: { Accept: 'application/json' } });
     if (!response.ok) return;
     const payload = await response.json();
-    const databaseProfiles = Array.isArray(payload.profiles) ? payload.profiles.map(normalizeAIProvider).filter(Boolean) : [];
-    if (!databaseProfiles.length) return;
-    const localProfiles = state.aiProfiles.filter((profile) => !/^ai-profile-db-\d+$/.test(profile.id));
-    state.aiProfiles = [...localProfiles, ...databaseProfiles];
+    const storedProfiles = Array.isArray(payload.profiles) ? payload.profiles.map(normalizeAIProvider).filter(Boolean) : [];
+    // The file is the authority in file mode, so this is a replace rather than
+    // a merge. An empty result is a legitimate state (nothing configured yet)
+    // and must clear the list; merging here would keep resurrecting whatever
+    // this browser happens to have cached, so a deleted provider would reappear
+    // on the next load.
+    state.aiProfiles = storedProfiles;
     if (!state.aiProfiles.some((profile) => profile.id === state.activeAIProfileId)) {
-      state.activeAIProfileId = databaseProfiles[0]?.id || '';
-      state.activeAIModelId = databaseProfiles[0]?.models[0]?.id || '';
+      state.activeAIProfileId = storedProfiles[0]?.id || '';
+      state.activeAIModelId = storedProfiles[0]?.models[0]?.id || '';
     } else if (!activeAIModel()) {
       state.activeAIModelId = activeAIProfile()?.models[0]?.id || '';
     }
-    persistAIProfiles();
+    // No persistAIProfiles() here on purpose: in file mode localStorage holds
+    // only this browser's own providers, so writing the file's contents into it
+    // would be exactly the cross-contamination this replace is fixing.
     renderAIProviderList();
     renderAIModelList();
     renderAssistant();
   } catch (error) {
-    // Database-backed models are optional; keep local and environment models usable.
+    // Keep whatever is already loaded; a refresh will retry.
   }
 }
 
 function persistAIProfiles() {
+  // In file mode the providers live in models.json, not here. Mirroring them
+  // into localStorage would leave a stale copy that a later localStorage-backed
+  // page would render as if it were current.
+  if (state.storageMode === 'file') return;
   try {
     localStorage.setItem(aiProfilesStorageKey, JSON.stringify(state.aiProfiles));
     if (state.activeAIProfileId) localStorage.setItem(aiActiveProfileStorageKey, state.activeAIProfileId);
@@ -2432,16 +2455,24 @@ function isBrowserStorageMode() {
   return state.storageMode === 'browser';
 }
 
-// applyStorageMode only records which backend serves this page. It must not
-// touch `nodes` here: syncGoBackend replaces that array immediately after this
-// call, so anything merged in would be discarded on the same tick. The replace
-// site is what consults isBrowserStorageMode().
+// applyStorageMode records which backend serves this page and loads the
+// providers that belong to it.
+//
+// It must not touch `nodes` here: syncGoBackend replaces that array immediately
+// after this call, so anything merged in would be discarded on the same tick.
+// The replace site is what consults isBrowserStorageMode(). Providers have no
+// such replace site, so the load happens here instead — and only on the first
+// resolve, because a later switch already reloads the page.
 function applyStorageMode(mode) {
   const next = mode === 'browser' ? 'browser' : 'file';
   if (state.storageMode === next) return;
   const isFirstResolve = state.storageMode === '';
   state.storageMode = next;
   if (!isFirstResolve) showToast('存储位置已切换，正在重新加载');
+  if (isFirstResolve) {
+    loadAIProfiles();
+    if (next === 'file') loadAIProfilesFromFile();
+  }
   updateStorageModeUI();
 }
 

@@ -2,7 +2,9 @@
 // application bootstrap point, which keeps cross-module initialization order explicit.
 initializeTheme();
 restoreSelection();
-loadAIProfiles();
+// Providers are loaded from whichever backend serves this page, but that is not
+// known until /api/bootstrap answers, so applyStorageMode() owns that load. The
+// render calls below only need the empty initial state.
 loadAssistantSessions();
 initializeCustomSelects();
 renderNodes();
@@ -12,7 +14,6 @@ updatePreview();
 renderAssistant();
 bindEvents();
 syncAIStatus();
-loadAIProfilesFromDatabase();
 syncGoBackend({ connectStream: true }).then((connected) => {
   if (connected) {
     backendRefreshTimer = setInterval(() => {
