@@ -73,6 +73,11 @@ let initialLogPreviewLimit = 0;
 let initialLogPreviewTimer;
 let aiAdminToken = '';
 let aiAdminTokenResolver = null;
+// Mirrors the server's hasAdminToken. When it is false the server accepts
+// privileged writes without a token, so prompting for one would block a save
+// that would otherwise succeed — and no answer could ever be correct. Set from
+// /api/config/info at startup and from /api/settings when the panel opens.
+let serverAdminTokenConfigured = false;
 let logRenderTimer;
 let logScrollFrame;
 let streamBatchTimer;
@@ -845,6 +850,21 @@ function requestAIAdminToken() {
   });
 }
 
+// resolveAIAdminToken returns a token to send with a provider write.
+//
+// When the server has no admin token configured it accepts the write without
+// one, so this resolves to an empty string rather than prompting: the prompt
+// would demand a value that cannot possibly be verified, and the caller would
+// be stuck in a loop it cannot exit. `serverAdminTokenConfigured` is refreshed
+// at startup and whenever the settings panel loads, which is also where a
+// token would be set.
+async function resolveAIAdminToken() {
+  if (aiAdminToken) return aiAdminToken;
+  if (!serverAdminTokenConfigured) return '';
+  aiAdminToken = await requestAIAdminToken();
+  return aiAdminToken;
+}
+
 function closeAIAdminTokenPrompt(value = '') {
   $('#ai-admin-token-modal').classList.add('hidden');
   $('#ai-admin-token-input').value = '';
@@ -890,8 +910,8 @@ async function saveAIProfile(event) {
   // its API keys — in this browser. Uploading them to that host would leak
   // credentials to a machine the visitor does not control.
   if (!isBrowserStorageMode()) {
-    if (!aiAdminToken) aiAdminToken = await requestAIAdminToken();
-    if (!aiAdminToken) { showToast('未提供管理员令牌，模型未保存'); return; }
+    aiAdminToken = await resolveAIAdminToken();
+    if (serverAdminTokenConfigured && !aiAdminToken) { showToast('未提供管理员令牌，模型未保存'); return; }
     try {
       const response = await fetch('/api/ai/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Log-Agent-Admin-Token': aiAdminToken }, body: JSON.stringify(profile) });
       const payload = await response.json().catch(() => ({}));
@@ -918,8 +938,8 @@ async function deleteAIProfile(id) {
   if (!profile || !window.confirm(`确定删除 AI 配置“${profile.name}”吗？`)) return;
   const dbID = profile.id.match(/^ai-profile-db-(\d+)$/)?.[1];
   if (dbID && !isBrowserStorageMode()) {
-    if (!aiAdminToken) aiAdminToken = await requestAIAdminToken();
-    if (!aiAdminToken) { showToast('未提供管理员令牌，模型未删除'); return; }
+    aiAdminToken = await resolveAIAdminToken();
+    if (serverAdminTokenConfigured && !aiAdminToken) { showToast('未提供管理员令牌，模型未删除'); return; }
     const response = await fetch(`/api/ai/profiles?id=${dbID}`, { method: 'DELETE', headers: { Accept: 'application/json', 'X-Log-Agent-Admin-Token': aiAdminToken } });
     if (!response.ok) { const payload = await response.json().catch(() => ({})); showToast(payload.error || '模型删除失败'); return; }
   }
@@ -1063,7 +1083,8 @@ function fillAppSettingsForm(payload) {
   form.elements.environment.value = environment;
   form.elements.currentAdminToken.value = '';
   form.elements.adminToken.value = '';
-  $('#settings-admin-status').textContent = payload.adminTokenConfigured ? '已配置' : '未配置';
+  serverAdminTokenConfigured = Boolean(payload.adminTokenConfigured);
+  $('#settings-admin-status').textContent = serverAdminTokenConfigured ? '已配置' : '未配置';
 }
 
 async function openAppSettings() {
@@ -1092,6 +1113,9 @@ async function loadConfigInfo() {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || '配置信息读取失败');
     state.configInfo = payload;
+    // Keeps the provider-save path from prompting for a token the server is
+    // not asking for, even if the settings panel has never been opened.
+    serverAdminTokenConfigured = Boolean(payload.hasAdminToken);
     // openAppSettings() calls updateStorageModeUI() before this fetch settles,
     // so re-apply it now that localMode is known for sure.
     updateStorageModeUI();

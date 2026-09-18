@@ -1677,7 +1677,11 @@ func (s *server) handleAIProfiles(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	if !authorizedAdminRequest(r, s.currentAdminToken()) {
+	// An unconfigured token means "no token is required yet", matching every
+	// other privileged endpoint. Requiring one here regardless would deadlock
+	// first-time setup: the caller cannot satisfy a token that does not exist,
+	// and the prompt asking for it can never be answered correctly.
+	if token := s.currentAdminToken(); token != "" && !authorizedAdminRequest(r, token) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin token required"})
 		return
 	}

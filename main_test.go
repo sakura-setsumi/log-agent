@@ -1220,6 +1220,56 @@ func TestConfigInfoHidesFileAccessFromRemoteCaller(t *testing.T) {
 	}
 }
 
+// TestAIProfileWriteNeedsNoTokenWhenNoneConfigured guards a first-run deadlock.
+//
+// Saving a provider used to demand an admin token unconditionally, while every
+// other privileged endpoint treats "no token configured" as "nothing to check".
+// With no token set the two disagree: the client is prompted for a value, but
+// authorizedAdminRequest compares it against an empty expected value and can
+// never match, so the save is rejected no matter what is typed and the prompt
+// reappears forever. Setup could not be completed through the UI at all.
+func TestAIProfileWriteNeedsNoTokenWhenNoneConfigured(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	resetConfigDirCache(t)
+
+	s := newServer()
+	body := `{"name":"供应商","baseURL":"https://example.com","apiKey":"sk-x","type":"anthropic","models":[{"name":"m"}]}`
+
+	// No token configured: the write must be accepted.
+	create := httptest.NewRequest(http.MethodPost, "/api/ai/profiles", strings.NewReader(body))
+	create.RemoteAddr = "127.0.0.1:51234"
+	createResponse := httptest.NewRecorder()
+	s.handleAIProfiles(createResponse, create)
+	if createResponse.Code != http.StatusOK {
+		t.Fatalf("save without a configured token returned %d (%s), want 200",
+			createResponse.Code, createResponse.Body.String())
+	}
+
+	// Once a token exists, the same request must be rejected unless it matches.
+	s.mu.Lock()
+	s.settings.AdminToken = "secret"
+	s.mu.Unlock()
+
+	rejected := httptest.NewRequest(http.MethodPost, "/api/ai/profiles", strings.NewReader(body))
+	rejected.RemoteAddr = "127.0.0.1:51234"
+	rejectedResponse := httptest.NewRecorder()
+	s.handleAIProfiles(rejectedResponse, rejected)
+	if rejectedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("save without the token returned %d, want 401", rejectedResponse.Code)
+	}
+
+	accepted := httptest.NewRequest(http.MethodPost, "/api/ai/profiles", strings.NewReader(body))
+	accepted.RemoteAddr = "127.0.0.1:51234"
+	accepted.Header.Set("X-Log-Agent-Admin-Token", "secret")
+	acceptedResponse := httptest.NewRecorder()
+	s.handleAIProfiles(acceptedResponse, accepted)
+	if acceptedResponse.Code != http.StatusOK {
+		t.Fatalf("save with the right token returned %d (%s), want 200",
+			acceptedResponse.Code, acceptedResponse.Body.String())
+	}
+}
+
 // The bootstrap tells the client which store to use, and it must follow the
 // same rule as the write guards.
 func TestBootstrapReportsStorageMode(t *testing.T) {
