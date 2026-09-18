@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1041,6 +1042,225 @@ func TestClearLogCacheHandler(t *testing.T) {
 
 // Verifies the exact response shape the frontend consumes when the cache is
 // non-empty, and that a second clear is a no-op reporting zero.
+func TestUpdateNodeContainersPurgesHistoryOfRemovedContainers(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	resetConfigDirCache(t)
+
+	s := newServer()
+	s.mu.Lock()
+	s.nodes = []Node{{ID: "node-db-1", Name: "溯帆", URL: "http://127.0.0.1:1", hostID: "host-1", Status: "connected"}}
+	s.containerNames["node-db-1"] = map[string]string{
+		"70902cc1c45b": "dify-ssrf_proxy-1",
+		"017213ca3c4b": "docker-api-1",
+	}
+	s.containerLogs["node-db-1::70902cc1c45b"] = []LogEntry{{ID: 1, Message: "from the container that was replaced"}}
+	s.containerLogs["node-db-1::017213ca3c4b"] = []LogEntry{{ID: 2, Message: "still alive"}}
+	s.historyCoverage["node-db-1::70902cc1c45b"] = time.Now()
+	s.historyCoverage["node-db-1::017213ca3c4b"] = time.Now()
+	s.logs = []LogEntry{{ID: 1, Message: "from the container that was replaced", nodeID: "node-db-1"}, {ID: 2, Message: "still alive", nodeID: "node-db-1"}}
+	s.historyNodeScope = "nodes=node-db-1|containers="
+	s.mu.Unlock()
+
+	// The remote host replaced dify-ssrf_proxy-1 with docker-nginx-1. The stale
+	// container is gone; docker-api-1 survived.
+	s.updateNodeContainers(context.Background(), "node-db-1", []dozzleContainer{
+		{ID: "017213ca3c4b", Name: "docker-api-1", State: "running"},
+		{ID: "bb9708a43769", Name: "docker-nginx-1", State: "running"},
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, exists := s.containerLogs["node-db-1::70902cc1c45b"]; exists {
+		t.Fatalf("history for the replaced container was not purged: %#v", s.containerLogs)
+	}
+	if _, exists := s.historyCoverage["node-db-1::70902cc1c45b"]; exists {
+		t.Fatalf("history coverage for the replaced container was not purged")
+	}
+	if _, exists := s.containerLogs["node-db-1::017213ca3c4b"]; !exists {
+		t.Fatalf("history for a surviving container must be kept: %#v", s.containerLogs)
+	}
+	if got := s.containerNames["node-db-1"]; len(got) != 2 || got["bb9708a43769"] != "docker-nginx-1" {
+		t.Fatalf("container names were not replaced: %#v", got)
+	}
+	if s.historyNodeScope != "" {
+		t.Fatalf("cached history scope must be invalidated so the window reloads, got %q", s.historyNodeScope)
+	}
+}
+
+// TestUpdateNodeContainersConcurrentlyKeepsNodeOwnership guards the symptom
+// seen in production: two nodes on the same subnet (晞飞科技 and 珈黛AI工坊)
+// ended up holding each other's container lists, so every history request for
+// one of them 404'd against the other's container IDs. Each node's map must
+// only ever contain the set its own event stream delivered.
+func TestUpdateNodeContainersConcurrentlyKeepsNodeOwnership(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	resetConfigDirCache(t)
+
+	s := newServer()
+	s.mu.Lock()
+	s.nodes = []Node{
+		{ID: "node-db-5", Name: "晞飞科技", URL: "http://115.190.52.46:8099", hostID: "host-xf", Status: "connected"},
+		{ID: "node-db-4", Name: "珈黛AI工坊", URL: "http://115.190.52.221:8099", hostID: "host-jd", Status: "connected"},
+	}
+	s.mu.Unlock()
+
+	xf := []dozzleContainer{
+		{ID: "762902c60121", Name: "nginx", State: "running", Host: "host-xf"},
+		{ID: "21aa151d6807", Name: "dify-api-1", State: "running", Host: "host-xf"},
+	}
+	jd := []dozzleContainer{
+		{ID: "d30ffba01831", Name: "dify-init_permissions-1", State: "running", Host: "host-jd"},
+		{ID: "285f5a6b1da7", Name: "dify-weaviate-1", State: "running", Host: "host-jd"},
+	}
+
+	var wg sync.WaitGroup
+	for round := 0; round < 8; round++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			s.updateNodeContainers(context.Background(), "node-db-5", xf)
+		}()
+		go func() {
+			defer wg.Done()
+			s.updateNodeContainers(context.Background(), "node-db-4", jd)
+		}()
+	}
+	wg.Wait()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	gotXF := s.containerNames["node-db-5"]
+	gotJD := s.containerNames["node-db-4"]
+	if len(gotXF) != 2 || gotXF["762902c60121"] != "nginx" || gotXF["21aa151d6807"] != "dify-api-1" {
+		t.Fatalf("晞飞科技 does not hold its own containers: %#v", gotXF)
+	}
+	if len(gotJD) != 2 || gotJD["d30ffba01831"] == "" || gotJD["285f5a6b1da7"] == "" {
+		t.Fatalf("珈黛AI工坊 does not hold its own containers: %#v", gotJD)
+	}
+	if _, swapped := gotXF["285f5a6b1da7"]; swapped {
+		t.Fatalf("晞飞科技 inherited 珈黛AI工坊's container: %#v", gotXF)
+	}
+	if _, swapped := gotJD["21aa151d6807"]; swapped {
+		t.Fatalf("珈黛AI工坊 inherited 晞飞科技's container: %#v", gotJD)
+	}
+}
+
+// TestUpdateNodeContainersRejectsForeignHostPayload covers the failure observed
+// in production behind an HTTP proxy that delivered one node's answer to
+// another node on the same subnet. The containers of 晞飞科技 were committed
+// under 珈黛AI工坊 and vice versa, so every history fetch for those nodes 404'd
+// and the dashboard showed no logs for them at all. A payload whose host tag
+// disagrees with the node it arrived on must be refused rather than stored.
+func TestUpdateNodeContainersRejectsForeignHostPayload(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	resetConfigDirCache(t)
+
+	s := newServer()
+	s.mu.Lock()
+	s.nodes = []Node{
+		{ID: "node-db-4", Name: "珈黛AI工坊", URL: "http://115.190.52.221:8099", hostID: "host-jd", Status: "connected"},
+	}
+	s.containerNames["node-db-4"] = map[string]string{"018522750d15": "postgres"}
+	s.mu.Unlock()
+
+	// 晞飞科技's containers arrive on 珈黛AI工坊's request.
+	s.updateNodeContainers(context.Background(), "node-db-4", []dozzleContainer{
+		{ID: "762902c60121", Name: "nginx", State: "running", Host: "host-xf"},
+		{ID: "21aa151d6807", Name: "dify-api-1", State: "running", Host: "host-xf"},
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if got := s.containerNames["node-db-4"]; len(got) != 1 || got["018522750d15"] != "postgres" {
+		t.Fatalf("a foreign host payload must not replace the node's containers: %#v", got)
+	}
+	for _, node := range s.nodes {
+		if node.ID != "node-db-4" {
+			continue
+		}
+		if node.Status != "error" {
+			t.Fatalf("node status should surface the mismatch, got %q", node.Status)
+		}
+		if !strings.Contains(node.Error, "host-xf") || !strings.Contains(node.Error, "host-jd") {
+			t.Fatalf("error should name both hosts, got %q", node.Error)
+		}
+	}
+}
+
+func TestUpdateNodeContainersKeepsHistoryWhenSetIsUnchanged(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	resetConfigDirCache(t)
+
+	s := newServer()
+	s.mu.Lock()
+	s.nodes = []Node{{ID: "node-db-1", Name: "溯帆", URL: "http://127.0.0.1:1", hostID: "host-1", Status: "connected"}}
+	s.containerNames["node-db-1"] = map[string]string{"017213ca3c4b": "docker-api-1"}
+	s.containerLogs["node-db-1::017213ca3c4b"] = []LogEntry{{ID: 1, Message: "keep me"}}
+	s.historyCoverage["node-db-1::017213ca3c4b"] = time.Now()
+	s.historyNodeScope = "nodes=node-db-1|containers="
+	s.mu.Unlock()
+
+	// Dozzle re-emits containers-changed on every connect and on state churn.
+	// An identical set must not throw away history the user is reading.
+	s.updateNodeContainers(context.Background(), "node-db-1", []dozzleContainer{
+		{ID: "017213ca3c4b", Name: "docker-api-1", State: "running"},
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if logs := s.containerLogs["node-db-1::017213ca3c4b"]; len(logs) != 1 {
+		t.Fatalf("unchanged container set must not purge history, got %#v", logs)
+	}
+	if s.historyNodeScope != "nodes=node-db-1|containers=" {
+		t.Fatalf("unchanged container set must not invalidate the history scope, got %q", s.historyNodeScope)
+	}
+}
+
+func TestSameContainerSetIgnoresFirstEventAndDetectsRename(t *testing.T) {
+	if !sameContainerSet(nil, map[string]string{"a": "a"}) {
+		t.Fatal("the first containers-changed event has nothing to purge and must count as unchanged")
+	}
+	if sameContainerSet(map[string]string{"a": "old-name"}, map[string]string{"a": "new-name"}) {
+		t.Fatal("a container renamed behind the same id must be treated as a change")
+	}
+	if !sameContainerSet(map[string]string{"a": "a", "b": "b"}, map[string]string{"b": "b", "a": "a"}) {
+		t.Fatal("map iteration order must not affect the comparison")
+	}
+}
+
+func TestNodeHistoryIsStaleBlocksRefillAfterPurge(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	resetConfigDirCache(t)
+
+	s := newServer()
+	s.mu.Lock()
+	s.nodes = []Node{{ID: "node-db-1", Name: "溯帆", URL: "http://127.0.0.1:1", hostID: "host-1", Status: "connected"}}
+	s.containerNames["node-db-1"] = map[string]string{"70902cc1c45b": "dify-ssrf_proxy-1"}
+	s.containerLogs["node-db-1::70902cc1c45b"] = []LogEntry{{ID: 1, Message: "stale"}}
+	s.mu.Unlock()
+
+	requests := 0
+	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Errorf("a fetch for a purged node must not reach Dozzle: %s", r.URL.String())
+	}))
+	defer dozzle.Close()
+
+	// A purge marks the node stale until the fresh container list is committed.
+	s.purgeNodeHistory(context.Background(), "node-db-1", map[string]string{"bb9708a43769": "docker-nginx-1"})
+	if !s.nodeHistoryIsStale("node-db-1") {
+		t.Fatal("purge must mark the node's history stale")
+	}
+
+	s.fetchDozzleHistory(context.Background(), Node{ID: "node-db-1", Name: "溯帆", URL: dozzle.URL, baseURL: dozzle.URL}, "host-1", "70902cc1c45b", time.Now().Add(-time.Hour), time.Now(), s.historyGeneration)
+	if requests != 0 {
+		t.Fatalf("expected no request for a stale node, got %d", requests)
+	}
+	if _, exists := s.containerLogs["node-db-1::70902cc1c45b"]; exists {
+		t.Fatalf("a stale fetch must not re-populate purged history: %#v", s.containerLogs)
+	}
+}
+
 func TestClearLogCacheReportsCountAndResetsStats(t *testing.T) {
 	s := newServer()
 	s.mu.Lock()

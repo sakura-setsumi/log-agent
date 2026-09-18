@@ -225,10 +225,14 @@ type server struct {
 	historyCoverage       map[string]time.Time
 	historyLoads          map[string]struct{}
 	historyLoadGeneration map[string]uint64
-	streams               map[string]struct{}
-	nodeContexts          map[string]context.Context
-	nodeCancels           map[string]context.CancelFunc
-	settings              appSettings
+	// staleHistoryNodes holds nodes whose remote container set changed while
+	// their history fetches were in flight. Those fetches must not re-populate
+	// the cache; the node leaves this set once the new list is committed.
+	staleHistoryNodes map[string]struct{}
+	streams           map[string]struct{}
+	nodeContexts      map[string]context.Context
+	nodeCancels       map[string]context.CancelFunc
+	settings          appSettings
 }
 
 type dozzleConfig struct {
@@ -738,6 +742,7 @@ func newServer() *server {
 		historyCoverage:       make(map[string]time.Time),
 		historyLoads:          make(map[string]struct{}),
 		historyLoadGeneration: make(map[string]uint64),
+		staleHistoryNodes:     make(map[string]struct{}),
 		streams:               make(map[string]struct{}),
 		nodeContexts:          make(map[string]context.Context),
 		nodeCancels:           make(map[string]context.CancelFunc),
@@ -1412,6 +1417,56 @@ func (s *server) addHistoryTargetLocked(targets *[]historyTarget, node Node, con
 	*targets = append(*targets, historyTarget{
 		node: node, containerID: containerID, ctx: s.nodeContexts[node.ID], from: from, to: to, allowWhenSharedCacheFull: allowWhenSharedCacheFull,
 	})
+}
+
+// purgeNodeHistory drops every cached log and history boundary for containers
+// that no longer exist on the node, then fetches the browse window again for
+// the containers the node now has.
+//
+// The node context is cancelled so streams aimed at the old containers stop
+// retrying with a 404 loop. It is not replaced: the caller does that once the
+// fresh container list is committed, because a stream started in between would
+// otherwise inherit the cancelled context and exit immediately.
+func (s *server) purgeNodeHistory(ctx context.Context, nodeID string, current map[string]string) {
+	prefix := nodeID + "::"
+	s.mu.Lock()
+	cancel := s.nodeCancels[nodeID]
+	s.staleHistoryNodes[nodeID] = struct{}{}
+	stale := 0
+	for key := range s.containerNames[nodeID] {
+		if _, alive := current[key]; !alive {
+			delete(s.containerLogs, prefix+key)
+			delete(s.historyCoverage, prefix+key)
+			stale++
+		}
+	}
+	for key := range s.historyCoverage {
+		if strings.HasPrefix(key, prefix) {
+			if _, alive := current[strings.TrimPrefix(key, prefix)]; !alive {
+				delete(s.historyCoverage, key)
+			}
+		}
+	}
+	for key := range s.containerLogs {
+		if strings.HasPrefix(key, prefix) {
+			if _, alive := current[strings.TrimPrefix(key, prefix)]; !alive {
+				delete(s.containerLogs, key)
+			}
+		}
+	}
+	if stale > 0 {
+		// Force the next browse request to re-derive its targets. A node whose
+		// container set changed must not reuse the cached scope: the window was
+		// already marked as loaded, so no new fetch would be scheduled.
+		s.historyNodeScope = ""
+	}
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if stale > 0 {
+		log.Printf("node %s: container set changed, dropped history for %d removed container(s)", nodeID, stale)
+	}
 }
 
 func (s *server) markHistoryCoverage(nodeID, containerID string, from time.Time, generation uint64) {
@@ -2522,9 +2577,38 @@ func (s *server) setNodeHost(id, hostID, version string, latency int64) {
 	}
 }
 
+func sameContainerSet(previous, current map[string]string) bool {
+	if previous == nil {
+		// First event for this node: nothing cached yet, so nothing to drop.
+		return true
+	}
+	if len(previous) != len(current) {
+		return false
+	}
+	for id, name := range current {
+		if previousName, ok := previous[id]; !ok || previousName != name {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *server) updateNodeContainers(ctx context.Context, id string, containers []dozzleContainer) {
 	node, ok := s.nodeSnapshot(id)
 	if !ok {
+		return
+	}
+
+	// Every container Dozzle emits carries the host it was collected from. When
+	// the answer to one node's request is delivered to another node, the host
+	// tags disagree with the node they arrived on. That happened in practice
+	// behind an HTTP proxy that mixed up concurrent responses to two nodes on
+	// the same subnet: the containers of 晞飞科技 were committed under
+	// 珈黛AI工坊 and vice versa, so every history fetch 404'd and the node
+	// silently showed nothing. Rejecting the payload keeps the node's existing
+	// list intact instead of overwriting it with another host's containers.
+	if node.hostID != "" && len(containers) > 0 && containers[0].Host != "" && containers[0].Host != node.hostID {
+		s.setNodeStatus(id, "error", fmt.Sprintf("Dozzle returned containers for host %s while talking to %s", containers[0].Host, node.hostID))
 		return
 	}
 
@@ -2553,6 +2637,19 @@ func (s *server) updateNodeContainers(ctx context.Context, id string, containers
 		nodeError = "container not found in Dozzle"
 	}
 
+	// Detect whether the remote container set changed since the last event for
+	// this node. Without this, a recreated container keeps the old history in
+	// the browse cache forever: pagination would notice the gap eventually,
+	// but the per-container cache stores newest-first and would stay pinned to
+	// logs from the container that no longer exists.
+	s.mu.Lock()
+	previousNames := s.containerNames[id]
+	changed := !sameContainerSet(previousNames, names)
+	s.mu.Unlock()
+	if changed {
+		s.purgeNodeHistory(ctx, id, names)
+	}
+
 	s.mu.Lock()
 	s.containerNames[id] = names
 	for i := range s.nodes {
@@ -2565,10 +2662,27 @@ func (s *server) updateNodeContainers(ctx context.Context, id string, containers
 			break
 		}
 	}
+	if changed {
+		delete(s.staleHistoryNodes, id)
+	}
 	s.mu.Unlock()
 
 	if status == "error" {
 		return
+	}
+	if changed {
+		// The previous context was cancelled by the purge. The fresh list is
+		// committed now, so streams started from here on inherit a live one.
+		nodeCtx, cancel := context.WithCancel(context.Background())
+		s.mu.Lock()
+		s.nodeContexts[id] = nodeCtx
+		s.nodeCancels[id] = cancel
+		s.mu.Unlock()
+		if ctx.Err() != nil {
+			cancel()
+			return
+		}
+		ctx = nodeCtx
 	}
 	for _, container := range containers {
 		if container.State != "running" {
@@ -2576,6 +2690,99 @@ func (s *server) updateNodeContainers(ctx context.Context, id string, containers
 		}
 		s.startContainerStreams(ctx, id, node.hostID, container.ID)
 	}
+	if !changed {
+		return
+	}
+	// Re-fetch the browse window that is currently on screen. The history that
+	// was just dropped belonged to containers that no longer exist, and nothing
+	// else schedules a reload: the requested range is already marked loaded.
+	s.mu.RLock()
+	scopeIDs := s.historyScopeIDsLocked(id)
+	containerIDs := make([]string, 0, len(names))
+	for containerID := range names {
+		containerIDs = append(containerIDs, containerID)
+	}
+	rangeKey := s.historyRange
+	s.mu.RUnlock()
+	sort.Strings(containerIDs)
+	go s.reloadNodeHistory(ctx, id, scopeIDs, containerIDs, rangeKey)
+}
+
+// historyScopeIDsLocked reports the node and container scope the browser last
+// asked for, or nil when the current view covers every node.
+func (s *server) historyScopeIDsLocked(nodeID string) []string {
+	if !strings.Contains(s.historyNodeScope, "nodes=") {
+		return nil
+	}
+	scope := s.historyNodeScope
+	scope = strings.TrimPrefix(scope, "nodes=")
+	scope, _, _ = strings.Cut(scope, "|")
+	parts := strings.Split(scope, ",")
+	ids := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			ids = append(ids, part)
+		}
+	}
+	if _, scoped := indexOfString(ids, nodeID); !scoped {
+		return nil
+	}
+	return ids
+}
+
+func indexOfString(values []string, target string) (int, bool) {
+	for i, value := range values {
+		if value == target {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func (s *server) reloadNodeHistory(ctx context.Context, nodeID string, scopeNodeIDs, containerIDs []string, rangeKey string) {
+	duration, ok := logRangeDuration(rangeKey)
+	if !ok {
+		return
+	}
+	now := time.Now().UTC()
+	from := now.Add(-duration)
+
+	s.mu.Lock()
+	if ctx.Err() != nil {
+		s.mu.Unlock()
+		return
+	}
+	node, found := s.nodeByIDLocked(nodeID)
+	if !found || node.hostID == "" {
+		s.mu.Unlock()
+		return
+	}
+	// Re-fetching after a purge has to invalidate the in-flight loads of the
+	// generation that is being dropped, otherwise launchHistoryFetchWindow
+	// refuses to start a second fetch for the same container.
+	loadNodeIDs := scopeNodeIDs
+	if loadNodeIDs == nil {
+		loadNodeIDs = []string{nodeID}
+	}
+	if _, scoped := indexOfString(loadNodeIDs, nodeID); !scoped {
+		s.mu.Unlock()
+		return
+	}
+	previousScope := s.historyNodeScope
+	s.historyGeneration++
+	generation := s.historyGeneration
+	s.historyNodeScope = ""
+	s.mu.Unlock()
+
+	for _, containerID := range containerIDs {
+		if containerID == "" {
+			continue
+		}
+		s.launchHistoryFetchWindow(ctx, node, node.hostID, containerID, from, now, generation, false)
+	}
+	s.mu.Lock()
+	s.historyNodeScope = previousScope
+	s.mu.Unlock()
 }
 
 func (s *server) connectNode(ctx context.Context, id string) {
@@ -2751,6 +2958,25 @@ func readDozzleSSE(scanner *bufio.Scanner, handle func(eventName, data string)) 
 	return scanner.Err()
 }
 
+// retargetNodeStreams starts a log stream for every running container of the
+// node that does not have one yet. Streams are keyed by node and container, so
+// containers that survived a remote change are not re-subscribed.
+func (s *server) retargetNodeStreams(ctx context.Context, id, hostID string) {
+	if ctx.Err() != nil {
+		return
+	}
+	node, ok := s.nodeSnapshot(id)
+	if !ok {
+		return
+	}
+	for _, container := range node.Containers {
+		if container.ID == "" || container.State != "running" {
+			continue
+		}
+		s.startContainerStreams(ctx, id, hostID, container.ID)
+	}
+}
+
 func (s *server) startContainerStreams(ctx context.Context, nodeID, hostID, containerID string) {
 	if hostID == "" || containerID == "" {
 		return
@@ -2812,6 +3038,12 @@ func (s *server) fetchDozzleHistoryWithCachePolicy(parent context.Context, node 
 			return
 		}
 		if allowWhenSharedCacheFull && s.containerHistoryAtCapacity(node.ID, containerID) {
+			return
+		}
+		if s.nodeHistoryIsStale(node.ID) {
+			// The remote container set changed while this fetch was in flight.
+			// Re-populating here would undo the purge and leave a removed
+			// container in the cache as a phantom until the next restart.
 			return
 		}
 		oldest, count, err := s.fetchDozzleHistoryPage(ctx, node, hostID, containerID, from, pageTo, generation)
@@ -3024,6 +3256,13 @@ func searchableLogEntry(node Node, requestedContainerID string, event dozzleLogE
 	}
 	eventTime := time.UnixMilli(timestamp).Local()
 	return LogEntry{ID: id, Date: eventTime.Format("2006/01/02"), Time: eventTime.Format("15:04:05"), Timestamp: timestamp, Level: normalizeLogLevel(event.Level), Node: node.Name, Container: containerName, Message: message, nodeID: node.ID, remoteID: event.ID}
+}
+
+func (s *server) nodeHistoryIsStale(nodeID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, stale := s.staleHistoryNodes[nodeID]
+	return stale
 }
 
 func (s *server) isHistoryGenerationCurrent(generation uint64) bool {
