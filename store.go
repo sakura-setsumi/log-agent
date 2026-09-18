@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -88,6 +89,14 @@ func configDirCache() *configDirState { return &configDirMemo }
 // differently depending on where the process was launched from, so
 // double-clicking the executable and starting it from a shell would silently
 // read two different files.
+//
+// "go run" is refused outright rather than accommodated. It compiles the
+// program into the system temp directory and runs it from there, so rule 2
+// resolves to a throwaway path that the Go toolchain deletes on exit: a user
+// who configures nodes through `go run .` loses them the moment they stop the
+// process, and the next `go run .` lands in a different hashed directory and
+// appears empty. Silently writing somewhere disposable is worse than not
+// starting, so validateConfigDir reports it and main() exits.
 func configDir() string {
 	configDirMemo.once.Do(func() {
 		if custom := strings.TrimSpace(os.Getenv("LOG_AGENT_CONFIG_DIR")); custom != "" {
@@ -101,6 +110,88 @@ func configDir() string {
 		configDirMemo.dir = fallbackConfigDir()
 	})
 	return configDirMemo.dir
+}
+
+// withinDir reports whether path is dir itself or lives underneath it. Both
+// are compared after resolution so a symlinked temp directory still matches.
+func withinDir(path, dir string) bool {
+	resolvedPath, err := filepath.Abs(path)
+	if err != nil {
+		resolvedPath = filepath.Clean(path)
+	}
+	resolvedDir, err := filepath.Abs(dir)
+	if err != nil {
+		resolvedDir = filepath.Clean(dir)
+	}
+	if samePath(resolvedPath, resolvedDir) {
+		return true
+	}
+	return strings.HasPrefix(
+		strings.ToLower(resolvedPath)+string(filepath.Separator),
+		strings.ToLower(resolvedDir)+string(filepath.Separator),
+	)
+}
+
+// samePath compares two absolute paths for equality, tolerating Windows' case
+// insensitivity and a trailing separator.
+func samePath(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(a, `\/`), strings.TrimRight(b, `\/`))
+}
+
+// validateConfigDir rejects a configuration directory that would not survive
+// the process that created it.
+//
+// The case handled here is `go run`, which is both the most likely to happen to
+// a developer and the one whose failure mode is silent data loss.
+//
+// The check is deliberately narrow: it looks for Go's build directory naming
+// (go-build<digits>), not merely "somewhere under the temp directory". Anything
+// that runs from temp would otherwise be refused, including the test binary
+// that `go test` builds, which would make this guard unreachable by its own
+// tests.
+func validateConfigDir() error {
+	if strings.TrimSpace(os.Getenv("LOG_AGENT_CONFIG_DIR")) != "" {
+		// An explicit choice is always honoured, even inside a temp directory:
+		// that is the documented escape hatch for running under `go run`.
+		return nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	if !withinDir(executable, os.TempDir()) || !isGoRunExecutable(executable) {
+		return nil
+	}
+	return fmt.Errorf(`检测到程序运行在 Go 的临时构建目录中，配置会在进程退出时被系统清理：
+  可执行文件：%s
+
+这通常是因为使用了 "go run ."。请改用以下任一方式启动：
+  1. go build -o dozzle-ops.exe .  然后运行生成的 exe（配置存在 exe 旁边的 data/）
+  2. 指定一个固定目录：LOG_AGENT_CONFIG_DIR=<目录> go run .`, executable)
+}
+
+// goBuildDirPattern matches the directory Go compiles into for `go run`: a
+// "go-build" prefix followed by digits, e.g. go-build1234567890.
+var goBuildDirPattern = regexp.MustCompile(`^go-build[0-9]+$`)
+
+// isGoRunExecutable reports whether this process was started by `go run`.
+//
+// Path alone is not enough to tell them apart: `go test` builds into the same
+// go-build<digits> tree, and refusing to run there would make the guard
+// untestable and would block the test suite itself. The two are distinguishable
+// by the artifact name, since the test toolchain appends ".test" to the binary
+// it builds (`go test` yields dozzle-ops.test.exe, `go run` yields
+// dozzle-ops.exe).
+func isGoRunExecutable(path string) bool {
+	if strings.HasSuffix(strings.ToLower(filepath.Base(path)), ".test.exe") {
+		return false
+	}
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		if goBuildDirPattern.MatchString(part) {
+			return true
+		}
+	}
+	return false
 }
 
 // portableConfigDir returns the "data" folder next to the executable, which is

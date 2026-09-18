@@ -300,6 +300,11 @@ type storageStats struct {
 }
 
 func main() {
+	// Refuse to start anywhere the configuration would be discarded on exit
+	// (notably `go run`, which executes from the system temp directory).
+	if err := validateConfigDir(); err != nil {
+		log.Fatalf("无法启动：%v", err)
+	}
 	s := newServer()
 	address := listenAddress()
 	log.Printf("Log Agent is running at http://localhost:%s", strings.TrimPrefix(address, ":"))

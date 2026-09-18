@@ -102,8 +102,16 @@ Windows PowerShell 请使用 `$env:` 设置环境变量，且必须在同一个�
 
 ```powershell
 $env:LOG_AGENT_CONFIG_DIR = "D:\log-agent-config"
-go run .
+.\dozzle-ops.exe
 ```
+
+> **不要用 `go run .` 启动。** `go run` 会把程序编译到系统临时目录再运行，配置也就跟着写进那个临时目录，而 Go 在进程退出时会把它清理掉——你辛苦配好的节点和 AI 供应商会一起消失，下一次 `go run .` 还会落到另一个全新的目录，看起来就像从没配过。
+>
+> 程序检测到这种情况会**直接拒绝启动**并给出提示。请改用 `go build` 生成 exe 后运行；如果确实需要 `go run` 调试，显式指定 `LOG_AGENT_CONFIG_DIR` 即可：
+>
+> ```bash
+> LOG_AGENT_CONFIG_DIR=./data go run .
+> ```
 
 如需通过环境变量预置管理员 key 和环境，可设置 `LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`；之后也可以在页面设置中修改。
 

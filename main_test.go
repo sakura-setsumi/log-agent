@@ -332,6 +332,90 @@ func TestIsWritableDirRejectsUncreatablePath(t *testing.T) {
 	}
 }
 
+// validateConfigDir exists to stop `go run`, whose executable lives in Go's
+// temp build directory and is deleted on exit along with any configuration
+// written beside it. Losing a user's nodes that way is silent, so starting is
+// refused instead.
+//
+// Telling `go run` apart from `go test` matters: both build into the same
+// go-build<digits> tree, so the check cannot be "is it in temp". The test
+// toolchain names its artifact with a .test suffix, which is what keeps this
+// guard from refusing to run the test suite that covers it.
+func TestIsGoRunExecutable(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{
+			name: "go run builds dozzle-ops.exe",
+			path: filepath.Join(os.TempDir(), "go-build1910004526", "b001", "exe", "dozzle-ops.exe"),
+			want: true,
+		},
+		{
+			name: "go test builds dozzle-ops.test.exe",
+			path: filepath.Join(os.TempDir(), "go-build999", "b001", "dozzle-ops.test.exe"),
+			want: false,
+		},
+		{
+			name: "a normal install is never blocked",
+			path: filepath.Join(string(filepath.Separator)+"opt", "dozzle-ops.exe"),
+			want: false,
+		},
+		{
+			name: "a non-numeric go-build suffix is not Go's directory",
+			path: filepath.Join(string(filepath.Separator)+"srv", "go-buildX", "dozzle-ops.exe"),
+			want: false,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := isGoRunExecutable(testCase.path); got != testCase.want {
+				t.Errorf("isGoRunExecutable(%q) = %t, want %t", testCase.path, got, testCase.want)
+			}
+		})
+	}
+}
+
+// An explicit LOG_AGENT_CONFIG_DIR is the documented escape hatch, so the guard
+// must stand down even when the executable is in Go's build directory.
+func TestValidateConfigDirHonoursExplicitOverride(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	if err := validateConfigDir(); err != nil {
+		t.Fatalf("validateConfigDir ignored the explicit override: %v", err)
+	}
+}
+
+// A normal install must never be blocked: this binary lives outside the temp
+// directory, so validateConfigDir has nothing to complain about.
+func TestValidateConfigDirAcceptsNormalInstall(t *testing.T) {
+	t.Setenv("LOG_AGENT_CONFIG_DIR", "")
+	if err := validateConfigDir(); err != nil {
+		t.Fatalf("validateConfigDir rejected a non-temp executable: %v", err)
+	}
+}
+
+// withinDir decides whether a path sits under a directory, which is what makes
+// the temp-directory check work without a false positive on a normal install
+// (e.g. C:\tmp-like prefixes must not match C:\tmpxyz).
+func TestWithinDir(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator)+"base", "tmp")
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{path: filepath.Join(root, "a", "b"), want: true},
+		{path: root, want: true},
+		{path: filepath.Join(root+"x", "a"), want: false},
+		{path: filepath.Join(string(filepath.Separator)+"other", "a"), want: false},
+	}
+	for _, testCase := range cases {
+		if got := withinDir(testCase.path, root); got != testCase.want {
+			t.Errorf("withinDir(%q, %q) = %t, want %t", testCase.path, root, got, testCase.want)
+		}
+	}
+}
+
 func TestConfigDirResultIsStableAcrossCalls(t *testing.T) {
 	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
 	resetConfigDirCache(t)
