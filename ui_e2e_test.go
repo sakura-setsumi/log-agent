@@ -978,3 +978,122 @@ func TestE2EBrowserModeKeepsItsOwnProviders(t *testing.T) {
 		t.Fatalf("remote page must show its own cached providers, got %+v", view.ProfileNames)
 	}
 }
+
+// sidebarLayoutView is the measured geometry of the sidebar's stacked children.
+type sidebarLayoutView struct {
+	ListTop       float64 `json:"listTop"`
+	ListBottom    float64 `json:"listBottom"`
+	ButtonTop     float64 `json:"buttonTop"`
+	ButtonBottom  float64 `json:"buttonBottom"`
+	FooterTop     float64 `json:"footerTop"`
+	FooterBottom  float64 `json:"footerBottom"`
+	SidebarBottom float64 `json:"sidebarBottom"`
+	ViewportH     float64 `json:"viewportH"`
+}
+
+// TestE2ESidebarNodeListFillsAvailableHeight pins the sidebar layout.
+//
+// The node list used to be capped at min(62vh, 560px) while the footer claimed
+// the remaining slack with margin-top: auto. With only a couple of nodes the
+// list stopped growing early, so the add-node button sat just below it and a
+// tall dead gap opened between the button and the status footer. The list now
+// stretches to fill that space, which places the button at the bottom.
+//
+// Geometry is asserted rather than class names because the bug was purely a
+// matter of where things ended up; a rule-level assertion would have passed
+// both before and after.
+func TestE2ESidebarNodeListFillsAvailableHeight(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+
+	// Two nodes: few enough that the old cap left the sidebar visibly unfilled.
+	now := time.Now()
+	s := &server{
+		nodes: []Node{
+			{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"},
+			{ID: "node-b", Name: "掌门人", URL: "https://115.190.152.177:8999", Status: "connected", Initial: "掌"},
+		},
+		logs:                  []LogEntry{{ID: 1, Date: now.Format("2006/01/02"), Time: now.Format("15:04:05"), Timestamp: now.UnixMilli(), Level: "info", Node: "溯帆", Container: "api", Message: "hello", nodeID: "node-a"}},
+		processed:             1,
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		// A desktop-sized viewport; the sidebar collapses below 680px, where
+		// the button and footer are hidden by design.
+		chromedp.WindowSize(1440, 1000),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("load dashboard: %v", err)
+	}
+
+	var raw string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const box = (selector) => document.querySelector(selector).getBoundingClientRect();
+		const list = box('#node-list');
+		const button = box('#open-add-node');
+		const footer = box('.sidebar-footer');
+		return JSON.stringify({
+			listTop: list.top, listBottom: list.bottom,
+			buttonTop: button.top, buttonBottom: button.bottom,
+			footerTop: footer.top, footerBottom: footer.bottom,
+			sidebarBottom: box('.sidebar').bottom,
+			viewportH: window.innerHeight,
+		});
+	})()`, &raw)); err != nil {
+		t.Fatalf("measure sidebar: %v", err)
+	}
+	var layout sidebarLayoutView
+	if err := json.Unmarshal([]byte(raw), &layout); err != nil {
+		t.Fatalf("decode sidebar layout %q: %v", raw, err)
+	}
+
+	// The list must reach the button. The residual gap is the button's own
+	// 15px top margin, so the tolerance covers that plus rounding.
+	if gap := layout.ButtonTop - layout.ListBottom; gap > 20 {
+		t.Fatalf("node list stops %.0fpx short of the add-node button; want it to stretch (layout %+v)", gap, layout)
+	}
+	// And the button must sit directly above the footer, so the empty space
+	// lives inside the scrollable list instead of beneath the button.
+	if gap := layout.FooterTop - layout.ButtonBottom; gap > 40 {
+		t.Fatalf("add-node button floats %.0fpx above the footer; want it pushed to the bottom (layout %+v)", gap, layout)
+	}
+	// The sidebar should still span the viewport with no trailing gap.
+	if slack := layout.ViewportH - layout.SidebarBottom; slack > 4 {
+		t.Fatalf("sidebar is %.0fpx shorter than the viewport (layout %+v)", slack, layout)
+	}
+}
