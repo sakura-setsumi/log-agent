@@ -7,7 +7,7 @@
     <title>日志中枢 · Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="preload" href="loading.gif" as="image" type="image/gif" />
-    <link rel="stylesheet" href="styles.css?v=sidebar-fill-112" />
+    <link rel="stylesheet" href="styles.css?v=node-multiselect-113" />
   </head>
   <body>
     <div class="app-shell">
@@ -40,7 +40,13 @@
 
         <div class="workspace-heading">
           <div class="sidebar-label">Dozzle 节点</div>
-          <span class="node-total" id="node-total">00</span>
+          <div class="workspace-heading-actions">
+            <span class="node-total" id="node-total">00</span>
+            <div class="node-select-mode">
+              <span class="node-select-mode-label" id="node-multi-select-label">多选</span>
+              <button class="toggle node-multi-toggle" id="node-multi-select-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="node-multi-select-label" title="打开后可同时选择多个节点，关闭时只能单选"><span class="sr-only">多选节点</span></button>
+            </div>
+          </div>
         </div>
         <div class="node-list" id="node-list"></div>
 
@@ -362,7 +368,7 @@
     </div>
 
     <div class="toast hidden" id="toast"><span class="toast-icon">✓</span><span id="toast-message">已更新</span></div>
-    <script src="app.js?v=admin-token-deadlock-64"></script>
+    <script src="app.js?v=node-multiselect-65"></script>
     <script src="assistant-ui.js?v=modal-dismiss-3"></script>
     <script src="bootstrap.js?v=admin-token-deadlock-4"></script>
   </body>

@@ -19,6 +19,9 @@ const maxAssistantSessions = 12;
 const state = {
   selectedNodes: [],
   selectedContainers: [],
+  // Off by default: clicking a node replaces the selection until the user
+  // explicitly turns the sidebar switch on.
+  multiSelect: false,
   expandedNodes: [],
   level: 'all',
   query: '',
@@ -190,6 +193,12 @@ function restoreSelection() {
     if (!saved || typeof saved !== 'object') return;
     if (Array.isArray(saved.nodes)) state.selectedNodes = saved.nodes.filter((id) => typeof id === 'string' && id);
     if (Array.isArray(saved.containers)) state.selectedContainers = saved.containers.filter((key) => typeof key === 'string' && key);
+    // Saved selections can hold several nodes. Without the multi-select switch
+    // being remembered too, a reload would silently render an impossible state
+    // (several highlighted nodes in single-select mode), so the mode is
+    // restored alongside the selection. Anything but an explicit `true` stays
+    // single-select, which also migrates pre-existing payloads.
+    state.multiSelect = saved.multiSelect === true;
   } catch (error) {
     // Ignore unavailable or invalid browser storage and use the default selection.
   }
@@ -199,7 +208,8 @@ function persistSelection() {
   try {
     localStorage.setItem(selectionStorageKey, JSON.stringify({
       nodes: state.selectedNodes,
-      containers: state.selectedContainers
+      containers: state.selectedContainers,
+      multiSelect: state.multiSelect
     }));
   } catch (error) {
     // The selection still works for the current page when storage is unavailable.
@@ -1437,6 +1447,13 @@ function nodeIdByName(name) { return nodes.find((node) => node.name === name)?.i
 
 function containerKey(nodeId, containerId) { return `${nodeId}::${containerId}`; }
 
+// containerKeyNodeId is the inverse of containerKey's first half. Selection
+// pruning uses it to drop container scopes whose node was just deselected.
+function containerKeyNodeId(value) {
+  const separator = String(value).indexOf('::');
+  return separator >= 0 ? String(value).slice(0, separator) : '';
+}
+
 function selectedContainerTargets() {
   return state.selectedContainers.map((value) => {
     const separator = value.indexOf('::');
@@ -1872,6 +1889,54 @@ function closePipelineMenu() {
   button.setAttribute('aria-expanded', 'false');
 }
 
+// syncMultiSelectToggle mirrors state.multiSelect onto the sidebar switch. It
+// lives here rather than next to renderNodes()'s listeners so the bootstrap
+// (which renders before bindEvents()) can call it too.
+function syncMultiSelectToggle() {
+  const toggle = $('#node-multi-select-toggle');
+  if (!toggle) return;
+  toggle.classList.toggle('active', state.multiSelect);
+  toggle.setAttribute('aria-checked', state.multiSelect ? 'true' : 'false');
+  toggle.title = state.multiSelect
+    ? '多选已打开：点击节点可加选或取消，再点一次关闭'
+    : '多选已关闭：点击节点只选择该节点';
+}
+
+function setMultiSelect(enabled) {
+  const next = Boolean(enabled);
+  const narrowed = !next && state.selectedNodes.length > 1;
+  state.multiSelect = next;
+  // Turning the switch off has to actually narrow the selection, otherwise the
+  // UI would keep showing several highlighted nodes in single-select mode.
+  if (narrowed) {
+    state.selectedNodes = state.selectedNodes.slice(0, 1);
+    state.selectedContainers = state.selectedContainers.filter((key) => state.selectedNodes.includes(containerKeyNodeId(key)));
+  }
+  persistSelection();
+  syncMultiSelectToggle();
+  if (narrowed) {
+    clearFullRangeSearch();
+    state.containerLogCache = {};
+    loadedContainerSelectionKey = '';
+    state.selectedLog = 0;
+    resetLogPagination();
+    renderNodes();
+    updateDetailPanel();
+    renderLogs();
+    loadSelectedContainerLogs();
+  }
+  showToast(next ? '多选已打开，可同时选择多个节点' : '多选已关闭，点击节点只选择该节点');
+}
+
+// bindMultiSelectToggle is called after renderNodes() so the switch it syncs is
+// already in the DOM, and before bindEvents() so the control reacts on load.
+function bindMultiSelectToggle() {
+  syncMultiSelectToggle();
+  const toggle = $('#node-multi-select-toggle');
+  if (!toggle) return;
+  toggle.addEventListener('click', () => setMultiSelect(!state.multiSelect));
+}
+
 function renderNodes() {
   const previousNodes = state.selectedNodes.join('\u0000');
   if (nodes.length) state.selectedNodes = state.selectedNodes.filter((id) => getNode(id));
@@ -1893,6 +1958,9 @@ function renderNodes() {
     : state.processed
       ? '服务启动后累计接收，不等于缓存条数'
       : '等待日志流';
+  // The switch markup lives outside #node-list, so it survives the innerHTML
+  // write below and only needs its state re-mirrored when the node list is redrawn.
+  syncMultiSelectToggle();
   $('#node-list').innerHTML = nodes.length ? nodes.map((node) => {
     const containers = node.containers || [];
     const expanded = state.expandedNodes.includes(node.id);
@@ -1927,19 +1995,42 @@ function renderNodes() {
   }));
   $$('#node-list .node-item').forEach((item) => item.addEventListener('click', () => {
     const nodeId = item.dataset.nodeId;
-    state.selectedNodes = [nodeId];
-    state.selectedContainers = [];
+    // Multi-select off (the default) keeps the historical behaviour: the click
+    // replaces the whole selection and drops any container scope with it.
+    // Multi-select on toggles this node instead, and clears the container scope
+    // only when the last selected node is deselected — leaving a container
+    // filter pointing at a node that is no longer selected would silently
+    // filter the stream down to nothing.
+    const alreadySelected = state.selectedNodes.includes(nodeId);
+    const multi = state.multiSelect;
+    if (multi && alreadySelected) {
+      state.selectedNodes = state.selectedNodes.filter((id) => id !== nodeId);
+      if (!state.selectedNodes.length) state.selectedContainers = [];
+      else state.selectedContainers = state.selectedContainers.filter((key) => state.selectedNodes.includes(containerKeyNodeId(key)));
+    } else {
+      state.selectedNodes = multi ? [...state.selectedNodes, nodeId] : [nodeId];
+      if (!multi) state.selectedContainers = [];
+    }
     clearFullRangeSearch();
     loadedContainerSelectionKey = '';
     if (!state.expandedNodes.includes(nodeId)) state.expandedNodes.push(nodeId);
     state.containerLogCache = {};
     loadedContainerSelectionKey = '';
+    state.selectedLog = 0;
     resetLogPagination();
     renderNodes();
     updateDetailPanel();
     renderLogs();
     persistSelection();
-    showToast(`已切换至 ${getNode(nodeId).name}`);
+    const nodeName = getNode(nodeId)?.name || '节点';
+    if (multi) {
+      showToast(alreadySelected
+        ? `已取消选择 ${nodeName}`
+        : `已选择 ${nodeName} · 共 ${state.selectedNodes.length} 个节点`);
+    } else {
+      showToast(`已切换至 ${nodeName}`);
+    }
+    loadSelectedContainerLogs();
   }));
   $$('#node-list .container-item').forEach((item) => item.addEventListener('click', () => {
     const nodeId = item.dataset.nodeId;
@@ -1948,11 +2039,16 @@ function renderNodes() {
     const container = node?.containers?.find((entry) => (entry.id || entry.name) === containerId);
     const key = containerKey(nodeId, containerId);
     const alreadySelected = state.selectedContainers.includes(key);
+    // Containers are always additive: they are a narrower scope inside the node
+    // selection, so the multi-select switch does not gate them. With a single
+    // node selected the two behave identically anyway.
     state.selectedContainers = alreadySelected
       ? state.selectedContainers.filter((value) => value !== key)
       : [...state.selectedContainers, key];
     clearFullRangeSearch();
     const selectedNodeIds = nodeIdsForContainerKeys(state.selectedContainers);
+    // Deselecting the last container restores the full node scope instead of
+    // leaving the node list empty, which would blank the stream.
     state.selectedNodes = selectedNodeIds.length ? selectedNodeIds : [nodeId];
     if (!state.expandedNodes.includes(nodeId)) state.expandedNodes.push(nodeId);
     state.containerLogCache = {};

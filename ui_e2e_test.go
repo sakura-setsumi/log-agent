@@ -1097,3 +1097,155 @@ func TestE2ESidebarNodeListFillsAvailableHeight(t *testing.T) {
 		t.Fatalf("sidebar is %.0fpx shorter than the viewport (layout %+v)", slack, layout)
 	}
 }
+
+// nodeMultiSelectView is read back from the page as a JSON string. It records
+// the highlighted node ids plus the switch's visual state, because the bug this
+// guards against (a switch that flips but does not actually gate the click) is
+// invisible if only the state variable is asserted.
+type nodeMultiSelectView struct {
+	Active      []string `json:"active"`
+	ToggleOn    bool     `json:"toggleOn"`
+	AriaChecked string   `json:"ariaChecked"`
+}
+
+func readNodeMultiSelectView(t *testing.T, ctx context.Context) nodeMultiSelectView {
+	t.Helper()
+	var raw string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const toggle = document.querySelector('#node-multi-select-toggle');
+		return JSON.stringify({
+			active: Array.from(document.querySelectorAll('#node-list .node-item.active')).map((item) => item.dataset.nodeId),
+			toggleOn: toggle.classList.contains('active'),
+			ariaChecked: toggle.getAttribute('aria-checked'),
+		});
+	})()`, &raw)); err != nil {
+		t.Fatalf("read multi-select state: %v", err)
+	}
+	var view nodeMultiSelectView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode multi-select state %q: %v", raw, err)
+	}
+	return view
+}
+
+func clickNode(t *testing.T, ctx context.Context, nodeID string) {
+	t.Helper()
+	if err := chromedp.Run(ctx, chromedp.Click(`#node-list .node-item[data-node-id="`+nodeID+`"]`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("click node %s: %v", nodeID, err)
+	}
+}
+
+func clickMultiSelectToggle(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if err := chromedp.Run(ctx, chromedp.Click(`#node-multi-select-toggle`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("click multi-select toggle: %v", err)
+	}
+}
+
+// TestE2ENodeMultiSelectToggle covers the sidebar switch that gates node
+// multi-selection. The default must stay single-select, otherwise the switch
+// would be a no-op; turning it off again must actually collapse a multi-node
+// selection instead of leaving several nodes highlighted.
+func TestE2ENodeMultiSelectToggle(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	now := time.Now()
+	s := &server{
+		nodes: []Node{
+			{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"},
+			{ID: "node-b", Name: "掌门人", URL: "https://115.190.152.177:8999", Status: "connected", Initial: "掌"},
+			{ID: "node-c", Name: "美圃", URL: "http://124.174.71.40:8099", Status: "connected", Initial: "美"},
+		},
+		logs:                  []LogEntry{{ID: 1, Date: now.Format("2006/01/02"), Time: now.Format("15:04:05"), Timestamp: now.UnixMilli(), Level: "info", Node: "溯帆", Container: "api", Message: "hello", nodeID: "node-a"}},
+		processed:             1,
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		chromedp.WindowSize(1440, 1000),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#node-list .node-item[data-node-id="node-a"]`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("load dashboard: %v", err)
+	}
+
+	// Default: switch off, and clicks replace the selection.
+	initial := readNodeMultiSelectView(t, ctx)
+	if initial.ToggleOn || initial.AriaChecked != "false" {
+		t.Fatalf("multi-select switch should default to off, got %+v", initial)
+	}
+
+	clickNode(t, ctx, "node-a")
+	clickNode(t, ctx, "node-b")
+	single := readNodeMultiSelectView(t, ctx)
+	if len(single.Active) != 1 || single.Active[0] != "node-b" {
+		t.Fatalf("with multi-select off the second click should replace the selection, got %+v", single)
+	}
+
+	// Turn the switch on: clicks become additive and a click on a selected node
+	// removes it again.
+	clickMultiSelectToggle(t, ctx)
+	afterToggle := readNodeMultiSelectView(t, ctx)
+	if !afterToggle.ToggleOn || afterToggle.AriaChecked != "true" {
+		t.Fatalf("multi-select switch should be on after clicking it, got %+v", afterToggle)
+	}
+
+	clickNode(t, ctx, "node-a")
+	clickNode(t, ctx, "node-c")
+	multi := readNodeMultiSelectView(t, ctx)
+	if len(multi.Active) != 3 {
+		t.Fatalf("multi-select on should accumulate nodes, got %+v", multi)
+	}
+
+	clickNode(t, ctx, "node-c")
+	deselected := readNodeMultiSelectView(t, ctx)
+	if len(deselected.Active) != 2 {
+		t.Fatalf("clicking a selected node should deselect it, got %+v", deselected)
+	}
+
+	// Turning the switch back off has to collapse the selection to one node.
+	clickMultiSelectToggle(t, ctx)
+	collapsed := readNodeMultiSelectView(t, ctx)
+	if collapsed.ToggleOn || collapsed.AriaChecked != "false" {
+		t.Fatalf("multi-select switch should be off after the second click, got %+v", collapsed)
+	}
+	if len(collapsed.Active) != 1 {
+		t.Fatalf("turning multi-select off should narrow the selection to one node, got %+v", collapsed)
+	}
+}

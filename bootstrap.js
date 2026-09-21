@@ -12,6 +12,9 @@ loadConfigInfo();
 loadAssistantSessions();
 initializeCustomSelects();
 renderNodes();
+// renderNodes() only paints the static switch markup; its listener and the
+// initial checked state are bound here, after the node list exists.
+bindMultiSelectToggle();
 renderLogs();
 updateDetailPanel();
 updatePreview();
