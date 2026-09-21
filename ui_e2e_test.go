@@ -1249,3 +1249,76 @@ func TestE2ENodeMultiSelectToggle(t *testing.T) {
 		t.Fatalf("turning multi-select off should narrow the selection to one node, got %+v", collapsed)
 	}
 }
+
+// TestE2EMultiSelectRestoreIsConsistent guards a state that the switch itself
+// cannot currently produce but that saved selections can: several nodes
+// highlighted while the switch reads "off". Any payload written before the
+// switch existed carries `nodes: [a, b]` and no `multiSelect`, and a reload
+// renders exactly that contradiction.
+func TestE2EMultiSelectRestoreIsConsistent(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	now := time.Now()
+	s := &server{
+		nodes: []Node{
+			{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"},
+			{ID: "node-b", Name: "掌门人", URL: "https://115.190.152.177:8999", Status: "connected", Initial: "掌"},
+		},
+		logs:                  []LogEntry{{ID: 1, Date: now.Format("2006/01/02"), Time: now.Format("15:04:05"), Timestamp: now.UnixMilli(), Level: "info", Node: "溯帆", Container: "api", Message: "hello", nodeID: "node-a"}},
+		processed:             1,
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		chromedp.WindowSize(1440, 1000),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	// Seed a legacy payload, then reload so restoreSelection() consumes it.
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(`localStorage.setItem('log-agent-selection', JSON.stringify({nodes:['node-a','node-b'],containers:[]}))`, nil),
+		chromedp.Reload(),
+		chromedp.WaitVisible(`#node-list .node-item`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("seed legacy selection: %v", err)
+	}
+
+	view := readNodeMultiSelectView(t, ctx)
+	if len(view.Active) > 1 && !view.ToggleOn {
+		t.Fatalf("switch reads off but %d nodes stay highlighted: the control contradicts the selection (%+v)", len(view.Active), view)
+	}
+}

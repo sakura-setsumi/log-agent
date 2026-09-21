@@ -193,12 +193,16 @@ function restoreSelection() {
     if (!saved || typeof saved !== 'object') return;
     if (Array.isArray(saved.nodes)) state.selectedNodes = saved.nodes.filter((id) => typeof id === 'string' && id);
     if (Array.isArray(saved.containers)) state.selectedContainers = saved.containers.filter((key) => typeof key === 'string' && key);
-    // Saved selections can hold several nodes. Without the multi-select switch
-    // being remembered too, a reload would silently render an impossible state
-    // (several highlighted nodes in single-select mode), so the mode is
-    // restored alongside the selection. Anything but an explicit `true` stays
-    // single-select, which also migrates pre-existing payloads.
+    // The switch is the authority on whether several nodes may be selected, so
+    // a payload that predates it (or one saved while it was off) must not be
+    // allowed to restore a multi-node selection. Narrowing here keeps the
+    // rendered selection and the switch from contradicting each other on load.
+    // Anything but an explicit `true` stays single-select.
     state.multiSelect = saved.multiSelect === true;
+    if (!state.multiSelect && state.selectedNodes.length > 1) {
+      state.selectedNodes = state.selectedNodes.slice(0, 1);
+      state.selectedContainers = state.selectedContainers.filter((key) => state.selectedNodes.includes(containerKeyNodeId(key)));
+    }
   } catch (error) {
     // Ignore unavailable or invalid browser storage and use the default selection.
   }
