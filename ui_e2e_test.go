@@ -2298,3 +2298,178 @@ func TestE2EStaleContainerScopeIsPrunedOnSync(t *testing.T) {
 		t.Fatalf("pruning removed the live node's scope too: %v", scopes)
 	}
 }
+
+// selectionInvariantView is the pair of selections the invariant relates.
+type selectionInvariantView struct {
+	Nodes      []string `json:"nodes"`
+	Containers []string `json:"containers"`
+	ToggleOn   bool     `json:"toggleOn"`
+}
+
+func readSelectionInvariant(t *testing.T, ctx context.Context) selectionInvariantView {
+	t.Helper()
+	var raw string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify({
+		nodes: state.selectedNodes,
+		containers: state.selectedContainers,
+		toggleOn: state.multiSelect,
+	})`, &raw)); err != nil {
+		t.Fatalf("read selection invariant: %v", err)
+	}
+	var v selectionInvariantView
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		t.Fatalf("decode selection invariant %q: %v", raw, err)
+	}
+	return v
+}
+
+// assertSelectionInvariant checks the two rules the sidebar selection must obey
+// after ANY interaction:
+//
+//  1. the switch is the authority -- with it off, at most one node is selected;
+//  2. a container scope belongs to a selected node, because
+//     logsForActiveContainer() filters the stream by those keys and a scope
+//     whose node is not selected would blank the log stream silently.
+//
+// Four separate bugs have landed in this feature, each one a different code path
+// forgetting one of these. Asserting after every step of a long mixed sequence
+// catches a path that the targeted tests do not enumerate.
+func assertSelectionInvariant(t *testing.T, ctx context.Context, step string) {
+	t.Helper()
+	v := readSelectionInvariant(t, ctx)
+	if !v.ToggleOn && len(v.Nodes) > 1 {
+		t.Fatalf("after %s: switch is off but %d nodes are selected: %v", step, len(v.Nodes), v.Nodes)
+	}
+	selected := make(map[string]bool, len(v.Nodes))
+	for _, id := range v.Nodes {
+		selected[id] = true
+	}
+	for _, key := range v.Containers {
+		node := key
+		if i := strings.Index(key, "::"); i >= 0 {
+			node = key[:i]
+		}
+		if !selected[node] {
+			t.Fatalf("after %s: container scope %q belongs to a node that is not selected (%v)", step, key, v.Nodes)
+		}
+	}
+}
+
+// TestE2ESelectionInvariantHoldsAcrossInteractions drives a long sequence of
+// node clicks, container clicks and switch toggles, asserting both invariants
+// after every single step.
+func TestE2ESelectionInvariantHoldsAcrossInteractions(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes: []Node{
+			{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯",
+				Containers: []containerInfo{{ID: "api", Name: "api", State: "running"}, {ID: "web", Name: "web", State: "running"}}},
+			{ID: "node-b", Name: "掌门人", URL: "https://115.190.152.177:8999", Status: "connected", Initial: "掌",
+				Containers: []containerInfo{{ID: "gateway", Name: "gateway", State: "running"}, {ID: "db", Name: "db", State: "running"}}},
+			{ID: "node-c", Name: "匹配AI", URL: "http://115.190.120.65:8099", Status: "connected", Initial: "匹",
+				Containers: []containerInfo{{ID: "worker", Name: "worker", State: "running"}}},
+		},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		chromedp.WindowSize(1440, 1000),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list .node-item[data-node-id="node-a"]`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open page: %v", err)
+	}
+
+	expandAll := func(ids ...string) {
+		for _, id := range ids {
+			ensureNodeExpanded(t, ctx, id)
+		}
+	}
+	expandAll("node-a", "node-b", "node-c")
+
+	// --- Switch OFF: at most one node may ever be selected.
+	steps := []struct {
+		label string
+		run   func()
+	}{
+		{"click node-a", func() { clickNode(t, ctx, "node-a") }},
+		{"click container node-a/api", func() { clickContainer(t, ctx, "node-a", "api") }},
+		{"click container node-a/web", func() { clickContainer(t, ctx, "node-a", "web") }},
+		{"click node-b", func() { clickNode(t, ctx, "node-b") }},
+		{"click container node-b/gateway", func() { clickContainer(t, ctx, "node-b", "gateway") }},
+		{"click container node-c/worker", func() { clickContainer(t, ctx, "node-c", "worker") }},
+		{"click node-c", func() { clickNode(t, ctx, "node-c") }},
+		{"click container node-a/api", func() { clickContainer(t, ctx, "node-a", "api") }},
+		{"click node-a", func() { clickNode(t, ctx, "node-a") }},
+		{"click container node-b/db", func() { clickContainer(t, ctx, "node-b", "db") }},
+		{"click container node-b/db again", func() { clickContainer(t, ctx, "node-b", "db") }},
+	}
+	for _, step := range steps {
+		step.run()
+		assertSelectionInvariant(t, ctx, step.label)
+	}
+
+	// --- Switch ON: several nodes are allowed, but a container scope must still
+	// belong to a selected node.
+	clickMultiSelectToggle(t, ctx)
+	assertSelectionInvariant(t, ctx, "turn the switch on")
+
+	multiSteps := []struct {
+		label string
+		run   func()
+	}{
+		{"click node-a", func() { clickNode(t, ctx, "node-a") }},
+		{"click node-b", func() { clickNode(t, ctx, "node-b") }},
+		{"click container node-c/worker", func() { clickContainer(t, ctx, "node-c", "worker") }},
+		{"click container node-a/api", func() { clickContainer(t, ctx, "node-a", "api") }},
+		{"click node-a (deselect)", func() { clickNode(t, ctx, "node-a") }},
+		{"click container node-a/web", func() { clickContainer(t, ctx, "node-a", "web") }},
+		{"click node-b (deselect)", func() { clickNode(t, ctx, "node-b") }},
+	}
+	for _, step := range multiSteps {
+		step.run()
+		assertSelectionInvariant(t, ctx, step.label)
+	}
+
+	// --- Turning the switch off must collapse a multi-node selection.
+	clickMultiSelectToggle(t, ctx)
+	assertSelectionInvariant(t, ctx, "turn the switch back off")
+}
