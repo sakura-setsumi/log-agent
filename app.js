@@ -2391,6 +2391,12 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
     nodes.splice(0, nodes.length, ...(isBrowserStorageMode() ? loadBrowserNodes() : (payload.nodes || [])));
     state.selectedNodes = state.selectedNodes.filter((id) => getNode(id));
     state.expandedNodes = state.expandedNodes.filter((id) => getNode(id));
+    // A container scope must not outlive its node: logsForActiveContainer()
+    // filters the stream by these keys, so a scope pointing at a node that is
+    // gone (unbound elsewhere, or dropped from a hand-edited config) would
+    // silently blank the log stream. Pruning against the surviving selection
+    // keeps the two in step no matter how the node list changed.
+    state.selectedContainers = state.selectedContainers.filter((key) => state.selectedNodes.includes(containerKeyNodeId(key)));
     const serverCapacity = Number(payload.storage?.capacity);
     if (Number.isInteger(serverCapacity) && serverCapacity > 0) maxBufferedLogs = serverCapacity;
     let logsChanged = false;

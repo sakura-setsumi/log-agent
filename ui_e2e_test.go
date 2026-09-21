@@ -2160,3 +2160,117 @@ func TestE2EContainerClicksDoNotWidenNodeSelection(t *testing.T) {
 		t.Fatalf("with the switch on, container clicks should span both nodes, got %v (%+v)", multi.Active, multi)
 	}
 }
+
+// TestE2EStaleContainerScopeIsPrunedOnSync guards a container scope outliving
+// its node.
+//
+// syncGoBackend() prunes selectedNodes and expandedNodes whenever the node list
+// changes, but left selectedContainers untouched. Since
+// logsForActiveContainer() filters the stream by those keys, a scope pointing at
+// a node that is gone (unbound elsewhere, or dropped from a hand-edited config)
+// silently blanks the log stream with no visible cause.
+//
+// restoreSelection() does not cover this: it only prunes container scopes when
+// it narrows a multi-node selection, so a single-node selection passes restore
+// untouched and the sync is the only thing that can catch the stale scope.
+func TestE2EStaleContainerScopeIsPrunedOnSync(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes: []Node{
+			{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯",
+				Containers: []containerInfo{{ID: "api", Name: "api", State: "running"}}},
+		},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		chromedp.WindowSize(1440, 1000),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	// "ghost" is a node that is no longer in the list, but its container scope is
+	// still sitting in storage. multiSelect:true keeps restoreSelection() from
+	// pruning it, so only the sync can.
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(`localStorage.setItem('log-agent-selection', JSON.stringify({
+			nodes: ['node-a'],
+			containers: ['node-a::api', 'ghost::api'],
+			multiSelect: true
+		}))`, nil),
+		chromedp.Reload(),
+		chromedp.WaitVisible(`#node-list .node-item[data-node-id="node-a"]`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("seed stale selection: %v", err)
+	}
+
+	// syncGoBackend() is async and also re-runs every 3s, so poll until the
+	// stale scope is gone (or give up and let the assertion report it).
+	var scopes []string
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`state.selectedContainers`, &scopes)); err != nil {
+			t.Fatalf("read container scopes: %v", err)
+		}
+		stale := false
+		for _, key := range scopes {
+			if strings.HasPrefix(key, "ghost::") {
+				stale = true
+			}
+		}
+		if !stale || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	for _, key := range scopes {
+		if strings.HasPrefix(key, "ghost::") {
+			t.Fatalf("container scope outlived its node: %v -- it would filter the stream to nothing", scopes)
+		}
+	}
+	// The live node's own scope must survive the pruning.
+	found := false
+	for _, key := range scopes {
+		if key == "node-a::api" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pruning removed the live node's scope too: %v", scopes)
+	}
+}
