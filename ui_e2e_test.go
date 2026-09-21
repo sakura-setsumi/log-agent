@@ -1306,11 +1306,13 @@ func TestE2EMultiSelectRestoreIsConsistent(t *testing.T) {
 	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
 	t.Cleanup(cancel)
 
-	// Seed a legacy payload, then reload so restoreSelection() consumes it.
+	// Seed the stale payload the buggy build leaves behind: two nodes AND a
+	// container scope from each, with no multiSelect flag at all. Then reload so
+	// restoreSelection() consumes it.
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
 		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
-		chromedp.Evaluate(`localStorage.setItem('log-agent-selection', JSON.stringify({nodes:['node-a','node-b'],containers:[]}))`, nil),
+		chromedp.Evaluate(`localStorage.setItem('log-agent-selection', JSON.stringify({nodes:['node-a','node-b'],containers:['node-a::api','node-b::web']}))`, nil),
 		chromedp.Reload(),
 		chromedp.WaitVisible(`#node-list .node-item`, chromedp.ByQuery),
 	); err != nil {
@@ -1320,6 +1322,20 @@ func TestE2EMultiSelectRestoreIsConsistent(t *testing.T) {
 	view := readNodeMultiSelectView(t, ctx)
 	if len(view.Active) > 1 && !view.ToggleOn {
 		t.Fatalf("switch reads off but %d nodes stay highlighted: the control contradicts the selection (%+v)", len(view.Active), view)
+	}
+
+	// Narrowing the nodes is not enough on its own: a container scope belonging
+	// to a node that is no longer selected would keep the stream silently
+	// filtered down to nothing. Only the surviving node's scopes may remain.
+	var stray []string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const active = new Set(Array.from(document.querySelectorAll('#node-list .node-item.active')).map((item) => item.dataset.nodeId));
+		return state.selectedContainers.filter((key) => !active.has(key.split('::')[0]));
+	})()`, &stray)); err != nil {
+		t.Fatalf("read restored container scopes: %v", err)
+	}
+	if len(stray) != 0 {
+		t.Fatalf("container scopes survived for nodes that are not selected: %v (active=%v)", stray, view.Active)
 	}
 }
 
