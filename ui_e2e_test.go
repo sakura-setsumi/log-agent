@@ -1971,3 +1971,176 @@ func TestE2ENarrowLayoutKeepsPanelsWhole(t *testing.T) {
 		t.Fatalf("新增指令集 button grew to %.1fpx -- its label wrapped (%+v)", v.AddFlowLabelRows, v)
 	}
 }
+
+// containerScopeView captures what the user actually sees after container
+// clicks: which nodes are highlighted, the switch position, the detail panel's
+// node caption, and the active container scopes. The reported bug is a
+// contradiction between the highlight/caption and the switch, so all of them
+// are read from the DOM rather than from state.
+type containerScopeView struct {
+	Active     []string `json:"active"`
+	ToggleOn   bool     `json:"toggleOn"`
+	Caption    string   `json:"caption"`
+	Containers []string `json:"containers"`
+}
+
+func readContainerScopeView(t *testing.T, ctx context.Context) containerScopeView {
+	t.Helper()
+	var raw string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const toggle = document.querySelector('#node-multi-select-toggle');
+		const caption = document.querySelector('#stream-caption');
+		return JSON.stringify({
+			active: Array.from(document.querySelectorAll('#node-list .node-item.active')).map((item) => item.dataset.nodeId),
+			toggleOn: toggle.classList.contains('active'),
+			caption: caption ? caption.textContent : '',
+			containers: Array.from(document.querySelectorAll('#node-list .container-item.active')).map((item) => item.dataset.nodeId + '::' + item.dataset.containerId),
+		});
+	})()`, &raw)); err != nil {
+		t.Fatalf("read container scope: %v", err)
+	}
+	var view containerScopeView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode container scope %q: %v", raw, err)
+	}
+	return view
+}
+
+// ensureNodeExpanded expands a node's container list if it is not already open.
+// It must be idempotent: the expand button toggles, so clicking it twice
+// collapses the list and any later container click would wait forever for an
+// element that no longer exists.
+func ensureNodeExpanded(t *testing.T, ctx context.Context, nodeID string) {
+	t.Helper()
+	var present bool
+	query := `document.querySelector('#node-list .node-children[data-container-list-for="` + nodeID + `"]') !== null`
+	if err := chromedp.Run(ctx, chromedp.Evaluate(query, &present)); err != nil {
+		t.Fatalf("read expansion of node %s: %v", nodeID, err)
+	}
+	if present {
+		return
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#node-list .node-expand-button[data-expand-node-id="`+nodeID+`"]`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("expand node %s: %v", nodeID, err)
+	}
+}
+
+func clickContainer(t *testing.T, ctx context.Context, nodeID, containerID string) {
+	t.Helper()
+	selector := `#node-list .container-item[data-node-id="` + nodeID + `"][data-container-id="` + containerID + `"]`
+	if err := chromedp.Run(ctx, chromedp.Click(selector, chromedp.ByQuery)); err != nil {
+		t.Fatalf("click container %s/%s: %v", nodeID, containerID, err)
+	}
+}
+
+// TestE2EContainerClicksDoNotWidenNodeSelection guards the reported
+// "现在是单选，但是还是有两个容器被选中，右侧也显示已选 2 个 Dozzle 节点".
+//
+// Container scopes are additive inside a node, but the click handler derived
+// the NODE selection from every node owning a selected container -- without
+// consulting the switch. Picking a container under one node and then another
+// under a second node therefore highlighted two nodes while the switch still
+// said single-select.
+//
+// With the switch on, spanning nodes is legitimate, so the second half of the
+// test locks that in too.
+func TestE2EContainerClicksDoNotWidenNodeSelection(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes: []Node{
+			{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯",
+				Containers: []containerInfo{{ID: "api", Name: "api", State: "running"}}},
+			{ID: "node-b", Name: "掌门人", URL: "https://115.190.152.177:8999", Status: "connected", Initial: "掌",
+				Containers: []containerInfo{{ID: "web", Name: "web", State: "running"}}},
+		},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		chromedp.WindowSize(1440, 1000),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list .node-item[data-node-id="node-a"]`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open page: %v", err)
+	}
+
+	// --- Switch off (the default): a container click must not widen the node
+	// selection past one node.
+	ensureNodeExpanded(t, ctx, "node-a")
+	clickContainer(t, ctx, "node-a", "api")
+	ensureNodeExpanded(t, ctx, "node-b")
+	clickContainer(t, ctx, "node-b", "web")
+
+	single := readContainerScopeView(t, ctx)
+	if single.ToggleOn {
+		t.Fatalf("switch should still be off at this point (%+v)", single)
+	}
+	if len(single.Active) != 1 {
+		t.Fatalf("switch is off but %d nodes are highlighted: %v (%+v)", len(single.Active), single.Active, single)
+	}
+	if single.Active[0] != "node-b" {
+		t.Fatalf("expected the container click to move the selection to node-b, got %v (%+v)", single.Active, single)
+	}
+	// The caption is the second half of the report: it must not claim two nodes.
+	if strings.Contains(single.Caption, "已选 2 个") {
+		t.Fatalf("detail caption still reports a multi-node selection: %q (%+v)", single.Caption, single)
+	}
+	// And the earlier node's container scope must have been dropped, not left
+	// silently scoping the stream to a node that is no longer selected.
+	for _, key := range single.Containers {
+		if strings.HasPrefix(key, "node-a::") {
+			t.Fatalf("container scope from the deselected node survived: %v (%+v)", single.Containers, single)
+		}
+	}
+
+	// --- Switch on: spanning nodes from container clicks is legitimate.
+	clickMultiSelectToggle(t, ctx)
+	ensureNodeExpanded(t, ctx, "node-a")
+	clickContainer(t, ctx, "node-a", "api")
+
+	multi := readContainerScopeView(t, ctx)
+	if !multi.ToggleOn {
+		t.Fatalf("switch should be on here (%+v)", multi)
+	}
+	if len(multi.Active) != 2 {
+		t.Fatalf("with the switch on, container clicks should span both nodes, got %v (%+v)", multi.Active, multi)
+	}
+}

@@ -1471,13 +1471,6 @@ function selectedContainerTargets() {
   }).filter(Boolean);
 }
 
-function nodeIdsForContainerKeys(values) {
-  return [...new Set(values.map((value) => {
-    const separator = value.indexOf('::');
-    return separator >= 0 ? value.slice(0, separator) : '';
-  }).filter((id) => id && getNode(id)))];
-}
-
 function logsForActiveContainer() {
   if (!state.selectedContainers.length) return state.logs;
   const selectedSources = new Set();
@@ -2043,17 +2036,27 @@ function renderNodes() {
     const container = node?.containers?.find((entry) => (entry.id || entry.name) === containerId);
     const key = containerKey(nodeId, containerId);
     const alreadySelected = state.selectedContainers.includes(key);
-    // Containers are always additive: they are a narrower scope inside the node
-    // selection, so the multi-select switch does not gate them. With a single
-    // node selected the two behave identically anyway.
-    state.selectedContainers = alreadySelected
+    // Containers are additive within their own node: a container is a narrower
+    // scope inside the node selection, so the switch does not gate them.
+    // A container must never widen the NODE selection behind the switch's back
+    // though. With the switch off only one node may be selected, so a scope
+    // belonging to another node is dropped and the selection moves to the
+    // clicked container's node -- otherwise picking one container under each of
+    // two nodes would highlight both while the switch still said single-select.
+    let containers = alreadySelected
       ? state.selectedContainers.filter((value) => value !== key)
       : [...state.selectedContainers, key];
+    if (!state.multiSelect) {
+      containers = containers.filter((value) => containerKeyNodeId(value) === nodeId);
+    }
+    state.selectedContainers = containers;
     clearFullRangeSearch();
-    const selectedNodeIds = nodeIdsForContainerKeys(state.selectedContainers);
-    // Deselecting the last container restores the full node scope instead of
-    // leaving the node list empty, which would blank the stream.
-    state.selectedNodes = selectedNodeIds.length ? selectedNodeIds : [nodeId];
+    // A container scope implies its node stays selected. With the switch on the
+    // explicitly selected nodes are preserved too, so a container click narrows
+    // the stream without silently dropping the nodes the user picked.
+    state.selectedNodes = state.multiSelect
+      ? Array.from(new Set([...state.selectedNodes, nodeId]))
+      : [nodeId];
     if (!state.expandedNodes.includes(nodeId)) state.expandedNodes.push(nodeId);
     state.containerLogCache = {};
     loadedContainerSelectionKey = '';
