@@ -620,16 +620,38 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 
 /* Server command workspace */
 /* Three equal-height columns: servers + file shelf stacked at ~25%, the flow
-   list at ~35%, and the editor at ~40%. `align-items:stretch` is what makes the
-   columns equal height; `min-height:0` on the columns is required for the inner
-   scroll areas below to stay bounded instead of growing the column.
+   list at ~35%, and the editor at ~40%.
+   The row is capped to the viewport so growing content scrolls INSIDE a column
+   instead of stretching the column and adding a page-level scrollbar. Each
+   panel is a flex column whose scrollable list gets `flex:1 1 auto;
+   min-height:0; overflow-y:auto`, which is what confines the scroll: without
+   `min-height:0` a flex child refuses to shrink below its content and the
+   column grows again. `align-items:stretch` keeps the columns level.
    The page's own left margin is untouched — this grid only splits the width the
    page-content padding already gives it. */
-.commands-columns { display:grid; grid-template-columns:minmax(0,25fr) minmax(0,35fr) minmax(0,40fr); gap:16px; align-items:stretch; }
-.commands-column { min-width:0; min-height:0; }
-.commands-column-left { display:flex; flex-direction:column; gap:16px; }
-.commands-board, .commands-editor { min-width:0; min-height:0; }
-.commands-flow-list { display:grid; gap:8px; padding:0 18px 12px; }
+.commands-columns {
+  display:grid;
+  grid-template-columns:minmax(0,25fr) minmax(0,35fr) minmax(0,40fr);
+  gap:16px;
+  align-items:stretch;
+  /* The viewport minus the sidebar-less chrome above the row (topbar, page
+     intro) and the page's bottom padding, so the row bottom lands on the
+     viewport edge and never pushes the document taller. */
+  height:calc(100vh - 285px);
+  min-height:340px;
+}
+.commands-column { min-width:0; min-height:0; display:flex; flex-direction:column; gap:16px; }
+.commands-board, .commands-editor { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+.commands-column-left > .panel { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+/* Server library and the file shelf share the left column. Servers take the
+   flexible share; the shelf keeps its natural height but can shrink. */
+.commands-column-left > .server-library { flex:1 1 auto; }
+.commands-column-left > .command-file-shelf { flex:0 1 auto; }
+.server-card-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
+.command-file-shelf .command-file-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
+.commands-board > .commands-flow-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
+.command-editor-body { flex:1 1 auto; min-height:0; overflow-y:auto; }
+.commands-flow-list { display:grid; gap:8px; padding:0 18px 12px; align-content:start; }
 .command-flow-card { display:flex; align-items:center; gap:10px; padding:12px; border:1px solid var(--line); border-radius:7px; background:var(--surface); cursor:pointer; }
 .command-flow-card:hover, .command-flow-card.active { border-color:var(--orange); background:var(--surface-soft); }
 .command-flow-card.dragging { opacity:.45; }.command-flow-card.drag-over { box-shadow:inset 0 -2px 0 var(--orange); }

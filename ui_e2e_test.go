@@ -1504,3 +1504,159 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 		t.Fatalf("page overflows horizontally: scrollWidth=%.1f viewport=%.1f (%+v)", v.BodyScrollW, v.ViewportW, v)
 	}
 }
+
+// commandsScrollView measures whether the command workspace confines overflow to
+// its own columns. The failure it guards against is the page growing a scrollbar
+// once servers, files and command lines accumulate, so the assertions compare the
+// document against the viewport and confirm each list really does overflow
+// (otherwise the fixture would prove nothing).
+type commandsScrollView struct {
+	DocScrollH         float64 `json:"docScrollH"`
+	DocClientH         float64 `json:"docClientH"`
+	ColumnsTop         float64 `json:"columnsTop"`
+	ColumnsH           float64 `json:"columnsH"`
+	ServerListH        float64 `json:"serverListH"`
+	ServerListScrollH  float64 `json:"serverListScrollH"`
+	ServerListOverflow string  `json:"serverListOverflow"`
+	FlowListH          float64 `json:"flowListH"`
+	FlowListScrollH    float64 `json:"flowListScrollH"`
+	FlowListOverflow   string  `json:"flowListOverflow"`
+	EditorBodyH        float64 `json:"editorBodyH"`
+	EditorBodyOverflow string  `json:"editorBodyOverflow"`
+	ViewportH          float64 `json:"viewportH"`
+}
+
+// TestE2ECommandsPanelsScrollInsteadOfStretching seeds enough servers and flows
+// through localStorage to overflow a short viewport, then asserts the overflow
+// is confined to the column lists instead of stretching the page.
+//
+// Command servers and flows live only in the browser (there is no server-side
+// model for them), so the fixture has to go through localStorage rather than the
+// Go server struct.
+func TestE2ECommandsPanelsScrollInsteadOfStretching(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes:                 []Node{{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"}},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		// A short viewport makes the overflow pressure obvious.
+		chromedp.WindowSize(1600, 820),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	// 12 servers and 10 flows: comfortably more than one short screenful.
+	seed := `(() => {
+		const servers = [];
+		for (let i = 0; i < 12; i++) {
+			servers.push({ id: 'srv-' + i, name: '服务器 ' + (i + 1), host: '192.168.1.' + (i + 20), port: '22', user: 'deploy', auth: 'key', secret: '' });
+		}
+		const flows = [];
+		for (let i = 0; i < 10; i++) {
+			flows.push({ id: 'flow-' + i, name: '测试 ' + (i + 1), lines: [{ id: 'l-' + i, text: 'ls -la' }], bindings: [] });
+		}
+		localStorage.setItem('log-agent-command-servers', JSON.stringify(servers));
+		localStorage.setItem('log-agent-command-flows', JSON.stringify(flows));
+		return servers.length + '/' + flows.length;
+	})()`
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(seed, nil),
+		chromedp.Reload(),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(`setView('commands')`, nil),
+		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("seed and open commands view: %v", err)
+	}
+
+	var raw string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const el = (sel) => document.querySelector(sel);
+		const of = (sel) => { const n = el(sel); if (!n) return 'missing'; return getComputedStyle(n).overflowY; };
+		const cols = el('.commands-columns').getBoundingClientRect();
+		const serverList = el('#server-card-list');
+		const flowList = el('#commands-flow-list');
+		const editorBody = el('.command-editor-body');
+		return JSON.stringify({
+			docScrollH: document.documentElement.scrollHeight,
+			docClientH: document.documentElement.clientHeight,
+			columnsTop: cols.top, columnsH: cols.height,
+			serverListH: serverList ? serverList.getBoundingClientRect().height : -1,
+			serverListScrollH: serverList ? serverList.scrollHeight : -1,
+			serverListOverflow: of('#server-card-list'),
+			flowListH: flowList ? flowList.getBoundingClientRect().height : -1,
+			flowListScrollH: flowList ? flowList.scrollHeight : -1,
+			flowListOverflow: of('#commands-flow-list'),
+			editorBodyH: editorBody ? editorBody.getBoundingClientRect().height : -1,
+			editorBodyOverflow: of('.command-editor-body'),
+			viewportH: window.innerHeight,
+		});
+	})()`, &raw)); err != nil {
+		t.Fatalf("measure commands scroll: %v", err)
+	}
+	var v commandsScrollView
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		t.Fatalf("decode commands scroll %q: %v", raw, err)
+	}
+
+	// The whole point: no page-level scrollbar from the panel content.
+	if v.DocScrollH > v.DocClientH+2 {
+		t.Fatalf("page grew a scrollbar from panel content: scrollHeight=%.1f clientHeight=%.1f (%+v)", v.DocScrollH, v.DocClientH, v)
+	}
+	if v.ColumnsTop+v.ColumnsH > v.ViewportH+2 {
+		t.Fatalf("columns row overflows the viewport: bottom=%.1f viewport=%.1f (%+v)", v.ColumnsTop+v.ColumnsH, v.ViewportH, v)
+	}
+	// The scrolling must be real, otherwise the fixture proves nothing.
+	if v.ServerListOverflow != "auto" {
+		t.Fatalf("server list overflow-y should be auto to confine scrolling, got %q (%+v)", v.ServerListOverflow, v)
+	}
+	if v.ServerListScrollH <= v.ServerListH+1 {
+		t.Fatalf("server list did not overflow: scrollHeight=%.1f height=%.1f — increase the fixture (%+v)", v.ServerListScrollH, v.ServerListH, v)
+	}
+	if v.FlowListOverflow != "auto" {
+		t.Fatalf("flow list overflow-y should be auto, got %q (%+v)", v.FlowListOverflow, v)
+	}
+	if v.FlowListScrollH <= v.FlowListH+1 {
+		t.Fatalf("flow list did not overflow: scrollHeight=%.1f height=%.1f (%+v)", v.FlowListScrollH, v.FlowListH, v)
+	}
+	if v.EditorBodyOverflow != "auto" {
+		t.Fatalf("editor body overflow-y should be auto, got %q (%+v)", v.EditorBodyOverflow, v)
+	}
+}
