@@ -1819,3 +1819,155 @@ func TestE2EFileShelfIsNotClippedByTheLeftColumn(t *testing.T) {
 		t.Fatalf("page grew a scrollbar: scrollHeight=%.1f clientHeight=%.1f (%+v)", v.DocScrollH, v.DocClientH, v)
 	}
 }
+
+// narrowColumnView measures whether each commands panel keeps its own content
+// inside its box when the responsive 2-column layout kicks in.
+type narrowColumnView struct {
+	ViewportW float64 `json:"viewportW"`
+	// The shelf's own box and the elements that must sit inside it.
+	ShelfTop       float64 `json:"shelfTop"`
+	ShelfBottom    float64 `json:"shelfBottom"`
+	ShelfH         float64 `json:"shelfH"`
+	DropZoneTop    float64 `json:"dropZoneTop"`
+	DropZoneBottom float64 `json:"dropZoneBottom"`
+	DropZoneH      float64 `json:"dropZoneH"`
+	FileListBottom float64 `json:"fileListBottom"`
+	// The board heading must not wrap its title to a second line.
+	FlowTitleH       float64 `json:"flowTitleH"`
+	FlowActionsWidth float64 `json:"flowActionsWidth"`
+	AddFlowLabelRows float64 `json:"addFlowLabelRows"`
+}
+
+// TestE2ENarrowLayoutKeepsPanelsWhole covers the reported "上传文件 还是没显示全"
+// at a narrow window, where `.commands-columns` collapses to 2 columns.
+//
+// Two things went wrong there. The left column became a 2-column grid with
+// `align-items:start`, so the server library grew to its natural height and
+// pushed the file shelf out of the column; and the shelf was left with no
+// content floor, so the column could squeeze it below its own heading and
+// `overflow:hidden` clipped the drop zone away. Separately the board heading
+// squeezed its action buttons until the labels wrapped.
+func TestE2ENarrowLayoutKeepsPanelsWhole(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes:                 []Node{{ID: "node-a", Name: "溯帆", Status: "connected"}},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		// Below the 1180px breakpoint, so the left column is a 2-column grid.
+		chromedp.WindowSize(1092, 600),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	seed := `(() => {
+		const servers = [
+			{ id: 'srv-0', name: 'apac', host: '192.168.1.10', port: '22', user: 'x', auth: 'key', secret: '', connectionStatus: 'untested' },
+			{ id: 'srv-1', name: '溯帆服务器', host: '124.174.71.198', port: '22', user: 'root', auth: 'password', secret: 'x', connectionStatus: 'success' },
+			{ id: 'srv-2', name: '服务器 3', host: '192.168.1.20', port: '22', user: 'deploy', auth: 'key', secret: '', connectionStatus: 'untested' },
+		];
+		const flows = [{ id: 'flow-0', name: '测试', lines: [{ id: 'l-0', text: '' }], bindings: [{ serverId: 'srv-1' }] }];
+		localStorage.setItem('log-agent-command-servers', JSON.stringify(servers));
+		localStorage.setItem('log-agent-command-flows', JSON.stringify(flows));
+		return 'ok';
+	})()`
+
+	var raw string
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(seed, nil),
+		chromedp.Reload(),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(`setView('commands')`, nil),
+		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
+		chromedp.Sleep(400*time.Millisecond),
+		chromedp.Evaluate(`(() => {
+			const el = (sel) => document.querySelector(sel);
+			const box = (sel) => el(sel).getBoundingClientRect();
+			const shelfBox = box('#command-file-shelf');
+			const zoneBox = box('#command-file-drop-zone');
+			const listBox = box('#command-file-list');
+			const titleEl = el('#commands-view .commands-board h2');
+			// How many text lines the add-flow button label occupies: compare its
+			// rendered height against a single line. A wrapped label is the bug.
+			const addFlow = el('#commands-add-flow');
+			const addFlowBox = addFlow.getBoundingClientRect();
+			return JSON.stringify({
+				viewportW: window.innerWidth,
+				shelfTop: shelfBox.top, shelfBottom: shelfBox.bottom, shelfH: shelfBox.height,
+				dropZoneTop: zoneBox.top, dropZoneBottom: zoneBox.bottom, dropZoneH: zoneBox.height,
+				fileListBottom: listBox.bottom,
+				flowTitleH: titleEl ? titleEl.getBoundingClientRect().height : -1,
+				flowActionsWidth: box('.command-board-actions').width,
+				// A single-line 30px button stays 30px; wrapped text makes it taller.
+				addFlowLabelRows: addFlowBox.height,
+			});
+		})()`, &raw)); err != nil {
+		t.Fatalf("measure narrow layout: %v", err)
+	}
+	var v narrowColumnView
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		t.Fatalf("decode narrow layout %q: %v", raw, err)
+	}
+
+	// The whole drop zone must sit inside the shelf, not hang below it.
+	if v.DropZoneTop < v.ShelfTop-0.5 || v.DropZoneBottom > v.ShelfBottom+0.5 {
+		t.Fatalf("drop zone is clipped at the narrow layout: zone=%.1f..%.1f shelf=%.1f..%.1f (%+v)",
+			v.DropZoneTop, v.DropZoneBottom, v.ShelfTop, v.ShelfBottom, v)
+	}
+	// The shelf must be tall enough for its own chrome, and the drop zone must
+	// keep its designed height rather than being squeezed by the column.
+	if v.ShelfH < 190 {
+		t.Fatalf("file shelf is only %.1fpx tall -- too short for its heading plus drop zone (%+v)", v.ShelfH, v)
+	}
+	if v.DropZoneH < 80 {
+		t.Fatalf("drop zone squeezed to %.1fpx, want ~84px (%+v)", v.DropZoneH, v)
+	}
+	if v.FileListBottom > v.ShelfBottom+0.5 {
+		t.Fatalf("file list bottom %.1f spills past the shelf bottom %.1f (%+v)", v.FileListBottom, v.ShelfBottom, v)
+	}
+
+	// The board title must stay on one line (a wrapped title was a visible
+	// regression once the actions stopped shrinking).
+	if v.FlowTitleH > 34 {
+		t.Fatalf("指令集组 title wrapped to %.1fpx tall -- the heading should stack instead (%+v)", v.FlowTitleH, v)
+	}
+	// Buttons keep a single line; a squeezed label would make the button taller.
+	if v.AddFlowLabelRows > 36 {
+		t.Fatalf("新增指令集 button grew to %.1fpx -- its label wrapped (%+v)", v.AddFlowLabelRows, v)
+	}
+}

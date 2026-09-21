@@ -634,9 +634,15 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
   grid-template-columns:minmax(0,25fr) minmax(0,35fr) minmax(0,40fr);
   gap:16px;
   align-items:stretch;
-  /* The viewport minus the sidebar-less chrome above the row (topbar, page
-     intro) and the page's bottom padding, so the row bottom lands on the
-     viewport edge and never pushes the document taller. */
+  /* The viewport minus the chrome above the row (topbar, page intro) and the
+     page's bottom padding, so the row bottom lands on the viewport edge and
+     never pushes the document taller on a normal window.
+     On a very short window this cannot be honoured: the row needs roughly
+     200px for a panel's own chrome (a heading plus a drop zone), and below
+     that the panels would be clipped rather than merely small. So the row
+     keeps a real floor and the PAGE scrolls instead -- a scrollbar is the
+     honest outcome, the alternative is content cut off with no way to reach
+     it. `min-height` is therefore a plain floor, not capped to the viewport. */
   height:calc(100vh - 285px);
   min-height:340px;
 }
@@ -644,11 +650,12 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 .commands-board, .commands-editor { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
 .commands-column-left > .panel { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
 /* Server library and the file shelf share the left column. The shelf must never
-   be squeezed below its own chrome -- heading + drop zone + one file row --
-   otherwise `overflow:hidden` clips the drop zone clean off the panel and the
-   user sees a header with nothing under it. So the shelf is sized from its
-   content (`flex:none` + an explicit min-height that covers its fixed parts)
-   and the server library is the one that takes/gives the remaining space. */
+   be squeezed below its own chrome -- heading + drop zone -- otherwise
+   `overflow:hidden` clips the drop zone clean off the panel and the user sees a
+   header with nothing under it.
+   So the shelf is sized from its content (`flex:none` plus an explicit
+   min-height covering its fixed parts) and the server library -- whose list
+   scrolls -- is the one that takes or gives the remaining space. */
 .commands-column-left > .server-library { flex:1 1 auto; }
 .commands-column-left > .command-file-shelf { flex:0 0 auto; min-height:214px; }
 .server-card-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
@@ -661,8 +668,24 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 .command-flow-card.dragging { opacity:.45; }.command-flow-card.drag-over { box-shadow:inset 0 -2px 0 var(--orange); }
 .command-flow-handle { color:var(--muted-2); cursor:grab; font-size:18px; }.command-flow-main { min-width:0; flex:1; }.command-flow-main strong,.command-flow-main span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.command-flow-main strong { color:var(--text); font-size:13px; }.command-flow-main span { margin-top:4px; color:var(--muted-2); font-size:11px; }.command-flow-status { width:7px; height:7px; border-radius:50%; background:var(--muted-2); }.command-flow-status.ok { background:var(--teal); box-shadow:0 0 0 3px rgba(55,208,191,.1); }.commands-board-footer { display:flex; justify-content:space-between; padding:11px 20px 14px; color:var(--muted-2); font-size:11px; border-top:1px solid var(--line-soft); }
 .command-editor-actions { display:flex; gap:8px; align-items:center; }.command-editor-utility { height:30px; border-color:var(--line); color:var(--text); background:#fff; white-space:nowrap; }.command-editor-utility:hover { border-color:var(--orange); color:#8b4d00; background:#fffaf2; }.server-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:0 21px 17px; }.server-form-grid label { display:grid; gap:6px; color:var(--muted); font-size:11px; }.server-form-grid input,.server-form-grid select { width:100%; height:34px; padding:0 9px; border:1px solid var(--line); border-radius:6px; outline:0; color:var(--text); background:var(--surface-soft); font-size:12px; }.server-form-grid input:focus,.server-form-grid select:focus { border-color:var(--orange); }.server-form-wide { grid-column:1/-1; }.command-editor-divider { display:flex; justify-content:space-between; align-items:center; padding:12px 21px 9px; border-top:1px solid var(--line); color:var(--muted); font-size:12px; }.command-lines { display:grid; gap:7px; padding:0 21px 10px; }.command-line { display:grid; grid-template-columns:26px minmax(0,1fr) auto; gap:7px; align-items:center; }.command-line-index { width:26px; height:28px; display:grid; place-items:center; border-radius:5px; color:var(--muted-2); background:var(--surface-soft); font:11px monospace; }.command-line textarea { width:100%; min-height:36px; resize:vertical; padding:8px 9px; border:1px solid var(--line); border-radius:6px; color:var(--text); background:var(--surface-soft); font:12px/1.4 monospace; }.command-line textarea:focus { border-color:var(--orange); outline:0; }.command-line[data-status="success"] textarea { border-color:rgba(55,208,191,.65); background:rgba(55,208,191,.08); }.command-line[data-status="error"] textarea { border-color:rgba(255,121,117,.8); background:rgba(255,121,117,.1); }.command-line-remove { width:26px; height:26px; padding:0; border:0; border-radius:5px; color:var(--muted-2); background:transparent; font-size:18px; }.command-line-remove:hover { color:var(--danger); background:rgba(255,121,117,.1); }.command-error { display:grid; gap:4px; margin:2px 21px 12px; padding:10px; border:1px solid rgba(255,121,117,.45); border-radius:6px; color:#ffb0ae; background:rgba(255,121,117,.08); font-size:11px; }.command-error strong { color:var(--danger); font-size:12px; }.command-editor-footer { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:12px 21px 16px; border-top:1px solid var(--line-soft); color:var(--muted-2); font-size:11px; }
-@media (max-width:1180px) { .commands-columns { grid-template-columns:minmax(0,1fr) minmax(0,1.35fr); }.commands-column-left { grid-column:1/-1; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; align-items:start; } }
-@media (max-width:930px) { .commands-columns { grid-template-columns:1fr; }.commands-column-left { grid-template-columns:1fr; } }
+@media (max-width:1180px) {
+  .commands-columns { grid-template-columns:minmax(0,1fr) minmax(0,1.35fr); }
+  /* The left column becomes a 2-column grid: the server library and the file
+     shelf sit side by side rather than stacked, sharing one row so neither can
+     push the other out of the column (`align-items:start` let the library grow
+     to its natural height and shove the shelf below the column edge). */
+  .commands-column-left { grid-column:1/-1; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); grid-auto-rows:minmax(0,1fr); gap:16px; }
+  /* Side by side, one panel's chrome (heading + drop zone) needs ~200px. Give
+     the shelf that floor so `overflow:hidden` cannot clip its drop zone away,
+     and let the server library -- whose list scrolls -- take what is left. */
+  .commands-column-left > .command-file-shelf { min-height:200px; }
+}
+@media (max-width:930px) {
+  .commands-columns { grid-template-columns:1fr; }
+  /* Back to a single stacked column: restore the shelf's content floor. */
+  .commands-column-left { grid-template-columns:1fr; grid-template-rows:none; }
+  .commands-column-left > .command-file-shelf { min-height:214px; }
+}
 @media (max-width:680px) { .server-form-grid { grid-template-columns:1fr; }.server-form-wide { grid-column:auto; }.command-intro-actions { align-items:stretch; flex-wrap:wrap; } }
 
 .command-upload-label input[type="file"] { height:auto; padding:7px 8px; color:var(--muted); font-size:11px; } .command-upload-label small { color:var(--muted-2); font-size:10px; }
@@ -690,7 +713,7 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 
 .command-file-shelf { min-width:0; }
 .file-shelf-actions { display:flex; align-items:center; gap:10px; color:var(--muted-2); font-size:11px; }
-.file-drop-zone { display:grid; place-items:center; gap:4px; min-height:84px; margin:0 18px 10px; border:1px dashed var(--line); border-radius:7px; color:var(--muted); background:var(--surface-soft); font-size:12px; transition:border-color .15s,background .15s; }
+.file-drop-zone { display:grid; place-items:center; gap:4px; min-height:84px; flex:1 1 auto; margin:0 18px 10px; border:1px dashed var(--line); border-radius:7px; color:var(--muted); background:var(--surface-soft); font-size:12px; transition:border-color .15s,background .15s; }
 .file-drop-zone small { color:var(--muted-2); font-size:10px; }.file-drop-zone.drag-active { border-color:var(--orange); background:var(--orange-soft); }.file-drop-icon { color:var(--orange); font-size:22px; line-height:1; }
 .command-file-list { display:flex; flex-wrap:wrap; gap:9px; padding:0 18px 16px; }.command-file-card { position:relative; display:flex; align-items:center; gap:8px; min-width:175px; overflow:hidden; padding:8px 27px 8px 8px; border:1px solid var(--line); border-radius:7px; background:var(--surface); cursor:grab; }.command-file-card:hover { border-color:var(--orange); }.command-file-card.dragging { opacity:.5; }.command-file-thumb { width:34px; height:38px; display:grid; place-items:center; border-radius:5px; color:var(--orange); background:var(--orange-soft); font:700 9px monospace; }.command-file-copy { min-width:0; display:grid; gap:3px; }.command-file-copy strong { max-width:150px; overflow:hidden; color:var(--text); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.command-file-copy small { display:flex; align-items:center; gap:7px; color:var(--muted-2); font-size:10px; }.command-file-progress-label { color:var(--orange); }.upload-success .command-file-progress-label { color:#16835d; }.upload-error .command-file-progress-label { color:var(--danger); }.command-file-progress { position:absolute; right:0; bottom:0; left:0; height:3px; background:var(--line-soft); }.command-file-progress i { height:100%; display:block; width:0; background:var(--orange); transition:width .12s linear; }.upload-success .command-file-progress i { background:#25a97a; }.upload-error .command-file-progress i { background:var(--danger); }.command-file-remove { position:absolute; top:4px; right:4px; width:22px; height:22px; padding:0; border:0; border-radius:4px; color:var(--muted-2); background:transparent; font-size:16px; }.command-file-remove:hover { color:var(--danger); background:rgba(255,121,117,.1); }
 .command-file-thumb.image { overflow:hidden; background:var(--surface-soft); }.command-file-thumb.image img { width:100%; height:100%; display:block; object-fit:cover; }
@@ -701,7 +724,12 @@ html[data-theme="dark"] .command-file-token { color:#ffd69c; background:rgba(216
 @media (max-width:680px) { .file-shelf-actions { gap:5px; }.file-drop-zone { margin-left:12px; margin-right:12px; }.command-file-list { padding-left:12px; padding-right:12px; }.command-file-card { min-width:0; flex:1 1 180px; } }
 @media (max-width:680px) { .command-upload-fields { grid-template-columns:1fr; }.command-upload-file-box,.command-upload-destination { height:38px; } }
 
-.command-board-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
+.command-board-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex:0 0 auto; }
+/* The heading is a two-part flex row (title + actions). On a narrow column the
+   actions would otherwise be squeezed until the button labels wrap one
+   character per line, so they keep their intrinsic width and the title is the
+   part that truncates. */
+.command-board-actions .compact-button, .command-editor-actions .compact-button { white-space:nowrap; flex:0 0 auto; }
 .command-board-actions .command-board-utility { height:30px; border-color:var(--line); color:var(--text); background:#fff; white-space:nowrap; }
 .command-board-actions .command-board-utility:hover { border-color:var(--orange); color:#8b4d00; background:#fffaf2; }
 .command-board-actions #commands-add-flow { height:30px; border-color:var(--orange); color:#8b4d00; background:#fff; }
@@ -719,5 +747,13 @@ html[data-theme="dark"] .command-file-token { color:#ffd69c; background:rgba(216
 .command-favorite-item > div:first-child { min-width:0; display:grid; gap:4px; }.command-favorite-item strong,.command-favorite-item small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .command-favorite-item strong { color:var(--text); font-size:12px; font-weight:650; }.command-favorite-item small { color:var(--muted-2); font-size:10px; }
 .command-favorite-item-actions { flex:0 0 auto; display:flex; gap:6px; }.command-favorites-empty { padding:24px 10px; border:1px dashed var(--line); border-radius:7px; color:var(--muted-2); text-align:center; font-size:11px; }
+/* On a narrow window the 2-column responsive layout leaves each panel too
+   tight for a title and a row of actions side by side: the title wraps to two
+   lines (or worse, the button labels wrap one character per line). Stack them
+   instead -- the actions move under the title and keep their full labels. */
+@media (max-width:1180px) {
+  .commands-board .panel-heading, .commands-editor .panel-heading { flex-wrap:wrap; align-items:flex-start; }
+  .command-board-actions, .command-editor-actions { flex-wrap:wrap; justify-content:flex-start; }
+}
 @media (max-width:680px) { .commands-board .panel-heading { gap:10px; }.command-board-actions { flex-wrap:wrap; } }
 @media (max-width:560px) { .command-favorite-name-row { grid-template-columns:1fr; }.command-favorite-item { align-items:flex-start; flex-direction:column; }.command-favorite-item-actions { align-self:flex-end; } }
