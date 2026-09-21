@@ -7,7 +7,7 @@
     <title>日志中枢 · Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="preload" href="loading.gif" as="image" type="image/gif" />
-    <link rel="stylesheet" href="styles.css?v=node-multiselect-113" />
+    <link rel="stylesheet" href="styles.css?v=commands-cols-114" />
   </head>
   <body>
     <div class="app-shell">
@@ -255,15 +255,22 @@
 
         <div class="page-content page-view hidden" id="commands-view">
           <section class="page-intro"><div><div class="eyebrow"><span class="eyebrow-line"></span> SERVER COMMANDS</div><h1>服务器指令</h1><p>编排服务器操作步骤，按顺序逐行执行并保留每一步结果。</p></div><div class="intro-actions command-intro-actions"><span class="sync-time"><span class="status-dot"></span> <span id="commands-run-status">就绪</span></span><input id="commands-file-input" type="file" accept=".txt,.sh,.bash,.command,.log" hidden /></div></section>
-          <section class="server-library panel">
-            <div class="panel-heading compact-heading"><div><div class="section-kicker">REUSABLE SERVERS</div><h2>服务器库</h2></div><button class="primary-button compact-button" id="commands-add-server" type="button"><span>＋</span> 新增服务器</button></div>
-            <div class="server-card-list" id="server-card-list"></div>
+          <section class="commands-columns">
+            <div class="commands-column commands-column-left">
+              <section class="server-library panel">
+                <div class="panel-heading compact-heading"><div><div class="section-kicker">REUSABLE SERVERS</div><h2>服务器库</h2></div><button class="primary-button compact-button" id="commands-add-server" type="button"><span>＋</span> 新增服务器</button></div>
+                <div class="server-card-list" id="server-card-list"></div>
+              </section>
+              <section class="command-file-shelf panel" id="command-file-shelf">
+                <div class="panel-heading compact-heading"><div><div class="section-kicker">FILE STAGING</div><h2>上传文件</h2></div><div class="file-shelf-actions"><span id="command-file-count">0 个文件</span><button class="secondary-button compact-button" id="command-file-select" type="button"><span>⇧</span> 选择文件</button><input id="command-file-input-shelf" type="file" multiple hidden /></div></div>
+                <div class="file-drop-zone" id="command-file-drop-zone" tabindex="0"><span class="file-drop-icon">＋</span><span>将文件拖入这里，或直接 Ctrl+V 粘贴</span><small>文件会显示为缩略图，可拖动到任意指令行中</small></div>
+                <div class="command-file-list" id="command-file-list"></div>
+              </section>
+            </div>
+            <div class="commands-board panel commands-column-center"><div class="panel-heading compact-heading"><div><div class="section-kicker">COMMAND FLOWS</div><h2>指令集组</h2></div><div class="command-board-actions"><button class="secondary-button compact-button command-board-utility" id="commands-run-all" type="button"><span>▶</span> 运行全部</button><button class="command-favorite-button" id="commands-favorite" type="button" aria-label="收藏指令集组" title="收藏指令集组"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" /></svg></button><button class="primary-button compact-button" id="commands-add-flow" type="button"><span>＋</span> 新增指令集</button></div></div><div class="commands-flow-list" id="commands-flow-list"></div><div class="commands-board-footer"><span>拖动左侧手柄调整顺序，将上方服务器拖到绑定槽</span><span id="commands-flow-count">0 组</span></div></div>
+            <aside class="commands-editor panel commands-column-right" id="commands-editor"><div class="panel-heading compact-heading"><div><div class="section-kicker">FLOW EDITOR</div><h2 id="commands-editor-title">运行指令</h2></div><div class="command-editor-actions"><button class="secondary-button compact-button command-editor-utility" id="commands-import-button" type="button"><span>⇧</span> 导入指令</button><button class="text-button" id="commands-duplicate" type="button">复制</button><button class="danger-button" id="commands-delete" type="button">删除</button></div></div><div class="command-flow-meta"><label>指令集名称<input id="command-flow-name" type="text" placeholder="例如：发布前检查" /></label></div><div class="command-editor-divider"><span>运行指令</span><button class="secondary-button compact-button" id="commands-add-line" type="button"><span>＋</span> 添加一行</button></div><div class="command-lines" id="command-lines"></div><div class="command-error hidden" id="command-error"><strong>执行失败</strong><span id="command-error-text"></span></div><div class="command-editor-footer"><span id="command-progress">尚未运行</span><button class="primary-button" id="commands-run-current" type="button"><span>▶</span> 从当前行运行</button></div></aside>
           </section>
-          <section class="command-file-shelf panel" id="command-file-shelf">
-            <div class="panel-heading compact-heading"><div><div class="section-kicker">FILE STAGING</div><h2>上传文件</h2></div><div class="file-shelf-actions"><span id="command-file-count">0 个文件</span><button class="secondary-button compact-button" id="command-file-select" type="button"><span>⇧</span> 选择文件</button><input id="command-file-input-shelf" type="file" multiple hidden /></div></div>
-            <div class="file-drop-zone" id="command-file-drop-zone" tabindex="0"><span class="file-drop-icon">＋</span><span>将文件拖入这里，或直接 Ctrl+V 粘贴</span><small>文件会显示为缩略图，可拖动到任意指令行中</small></div>
-            <div class="command-file-list" id="command-file-list"></div>
-          </section>          <section class="commands-layout"><div class="commands-board panel"><div class="panel-heading compact-heading"><div><div class="section-kicker">COMMAND FLOWS</div><h2>指令集组</h2></div><div class="command-board-actions"><button class="secondary-button compact-button command-board-utility" id="commands-run-all" type="button"><span>▶</span> 运行全部</button><button class="command-favorite-button" id="commands-favorite" type="button" aria-label="收藏指令集组" title="收藏指令集组"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" /></svg></button><button class="primary-button compact-button" id="commands-add-flow" type="button"><span>＋</span> 新增指令集</button></div></div><div class="commands-flow-list" id="commands-flow-list"></div><div class="commands-board-footer"><span>拖动左侧手柄调整顺序，将上方服务器拖到绑定槽</span><span id="commands-flow-count">0 组</span></div></div><aside class="commands-editor panel" id="commands-editor"><div class="panel-heading compact-heading"><div><div class="section-kicker">FLOW EDITOR</div><h2 id="commands-editor-title">运行指令</h2></div><div class="command-editor-actions"><button class="secondary-button compact-button command-editor-utility" id="commands-import-button" type="button"><span>⇧</span> 导入指令</button><button class="text-button" id="commands-duplicate" type="button">复制</button><button class="danger-button" id="commands-delete" type="button">删除</button></div></div><div class="command-flow-meta"><label>指令集名称<input id="command-flow-name" type="text" placeholder="例如：发布前检查" /></label></div><div class="command-editor-divider"><span>运行指令</span><button class="secondary-button compact-button" id="commands-add-line" type="button"><span>＋</span> 添加一行</button></div><div class="command-lines" id="command-lines"></div><div class="command-error hidden" id="command-error"><strong>执行失败</strong><span id="command-error-text"></span></div><div class="command-editor-footer"><span id="command-progress">尚未运行</span><button class="primary-button" id="commands-run-current" type="button"><span>▶</span> 从当前行运行</button></div></aside></section>        </div>
+        </div>
 
         <div class="page-content page-view hidden" id="connections-view">
           <section class="page-intro">

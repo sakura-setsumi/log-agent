@@ -619,19 +619,29 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 }
 
 /* Server command workspace */
-.commands-layout { display:grid; grid-template-columns:minmax(280px,.82fr) minmax(420px,1.35fr); gap:16px; align-items:start; }
-.commands-board, .commands-editor { min-width:0; }
+/* Three equal-height columns: servers + file shelf stacked at ~25%, the flow
+   list at ~35%, and the editor at ~40%. `align-items:stretch` is what makes the
+   columns equal height; `min-height:0` on the columns is required for the inner
+   scroll areas below to stay bounded instead of growing the column.
+   The page's own left margin is untouched — this grid only splits the width the
+   page-content padding already gives it. */
+.commands-columns { display:grid; grid-template-columns:minmax(0,25fr) minmax(0,35fr) minmax(0,40fr); gap:16px; align-items:stretch; }
+.commands-column { min-width:0; min-height:0; }
+.commands-column-left { display:flex; flex-direction:column; gap:16px; }
+.commands-board, .commands-editor { min-width:0; min-height:0; }
 .commands-flow-list { display:grid; gap:8px; padding:0 18px 12px; }
 .command-flow-card { display:flex; align-items:center; gap:10px; padding:12px; border:1px solid var(--line); border-radius:7px; background:var(--surface); cursor:pointer; }
 .command-flow-card:hover, .command-flow-card.active { border-color:var(--orange); background:var(--surface-soft); }
 .command-flow-card.dragging { opacity:.45; }.command-flow-card.drag-over { box-shadow:inset 0 -2px 0 var(--orange); }
 .command-flow-handle { color:var(--muted-2); cursor:grab; font-size:18px; }.command-flow-main { min-width:0; flex:1; }.command-flow-main strong,.command-flow-main span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.command-flow-main strong { color:var(--text); font-size:13px; }.command-flow-main span { margin-top:4px; color:var(--muted-2); font-size:11px; }.command-flow-status { width:7px; height:7px; border-radius:50%; background:var(--muted-2); }.command-flow-status.ok { background:var(--teal); box-shadow:0 0 0 3px rgba(55,208,191,.1); }.commands-board-footer { display:flex; justify-content:space-between; padding:11px 20px 14px; color:var(--muted-2); font-size:11px; border-top:1px solid var(--line-soft); }
 .command-editor-actions { display:flex; gap:8px; align-items:center; }.command-editor-utility { height:30px; border-color:var(--line); color:var(--text); background:#fff; white-space:nowrap; }.command-editor-utility:hover { border-color:var(--orange); color:#8b4d00; background:#fffaf2; }.server-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:0 21px 17px; }.server-form-grid label { display:grid; gap:6px; color:var(--muted); font-size:11px; }.server-form-grid input,.server-form-grid select { width:100%; height:34px; padding:0 9px; border:1px solid var(--line); border-radius:6px; outline:0; color:var(--text); background:var(--surface-soft); font-size:12px; }.server-form-grid input:focus,.server-form-grid select:focus { border-color:var(--orange); }.server-form-wide { grid-column:1/-1; }.command-editor-divider { display:flex; justify-content:space-between; align-items:center; padding:12px 21px 9px; border-top:1px solid var(--line); color:var(--muted); font-size:12px; }.command-lines { display:grid; gap:7px; padding:0 21px 10px; }.command-line { display:grid; grid-template-columns:26px minmax(0,1fr) auto; gap:7px; align-items:center; }.command-line-index { width:26px; height:28px; display:grid; place-items:center; border-radius:5px; color:var(--muted-2); background:var(--surface-soft); font:11px monospace; }.command-line textarea { width:100%; min-height:36px; resize:vertical; padding:8px 9px; border:1px solid var(--line); border-radius:6px; color:var(--text); background:var(--surface-soft); font:12px/1.4 monospace; }.command-line textarea:focus { border-color:var(--orange); outline:0; }.command-line[data-status="success"] textarea { border-color:rgba(55,208,191,.65); background:rgba(55,208,191,.08); }.command-line[data-status="error"] textarea { border-color:rgba(255,121,117,.8); background:rgba(255,121,117,.1); }.command-line-remove { width:26px; height:26px; padding:0; border:0; border-radius:5px; color:var(--muted-2); background:transparent; font-size:18px; }.command-line-remove:hover { color:var(--danger); background:rgba(255,121,117,.1); }.command-error { display:grid; gap:4px; margin:2px 21px 12px; padding:10px; border:1px solid rgba(255,121,117,.45); border-radius:6px; color:#ffb0ae; background:rgba(255,121,117,.08); font-size:11px; }.command-error strong { color:var(--danger); font-size:12px; }.command-editor-footer { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:12px 21px 16px; border-top:1px solid var(--line-soft); color:var(--muted-2); font-size:11px; }
-@media (max-width:930px) { .commands-layout { grid-template-columns:1fr; } } @media (max-width:680px) { .server-form-grid { grid-template-columns:1fr; }.server-form-wide { grid-column:auto; }.command-intro-actions { align-items:stretch; flex-wrap:wrap; } }
+@media (max-width:1180px) { .commands-columns { grid-template-columns:minmax(0,1fr) minmax(0,1.35fr); }.commands-column-left { grid-column:1/-1; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; align-items:start; } }
+@media (max-width:930px) { .commands-columns { grid-template-columns:1fr; }.commands-column-left { grid-template-columns:1fr; } }
+@media (max-width:680px) { .server-form-grid { grid-template-columns:1fr; }.server-form-wide { grid-column:auto; }.command-intro-actions { align-items:stretch; flex-wrap:wrap; } }
 
 .command-upload-label input[type="file"] { height:auto; padding:7px 8px; color:var(--muted); font-size:11px; } .command-upload-label small { color:var(--muted-2); font-size:10px; }
 
-.server-library { margin-bottom:16px; min-width:0; }
+.server-library { min-width:0; }
 .server-card-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; padding:0 18px 16px; }
 .server-library-empty { grid-column:1/-1; min-height:90px; display:grid; place-items:center; border:1px dashed var(--line); border-radius:7px; color:var(--muted-2); font-size:12px; }
 .reusable-server-card { min-width:0; padding:11px; border:1px solid var(--line); border-radius:7px; background:var(--surface); cursor:default; }
@@ -652,7 +662,7 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 @media (max-width:1180px) { .flow-bind-slot { width:108px; }.command-flow-meta { grid-template-columns:1fr; } }
 @media (max-width:680px) { .server-card-list { grid-template-columns:1fr; }.command-flow-card { grid-template-columns:15px minmax(0,1fr) auto; }.flow-direction-arrow { display:none; }.flow-bind-slot { grid-column:2/-1; width:100%; }.command-flow-status { grid-column:3; grid-row:1; } }
 
-.command-file-shelf { margin:0 0 16px; }
+.command-file-shelf { min-width:0; }
 .file-shelf-actions { display:flex; align-items:center; gap:10px; color:var(--muted-2); font-size:11px; }
 .file-drop-zone { display:grid; place-items:center; gap:4px; min-height:84px; margin:0 18px 10px; border:1px dashed var(--line); border-radius:7px; color:var(--muted); background:var(--surface-soft); font-size:12px; transition:border-color .15s,background .15s; }
 .file-drop-zone small { color:var(--muted-2); font-size:10px; }.file-drop-zone.drag-active { border-color:var(--orange); background:var(--orange-soft); }.file-drop-icon { color:var(--orange); font-size:22px; line-height:1; }

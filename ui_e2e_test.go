@@ -1322,3 +1322,185 @@ func TestE2EMultiSelectRestoreIsConsistent(t *testing.T) {
 		t.Fatalf("switch reads off but %d nodes stay highlighted: the control contradicts the selection (%+v)", len(view.Active), view)
 	}
 }
+
+// commandsColumnView captures the measured geometry of the three command
+// columns. Layout bugs here are about where boxes land, so the assertions use
+// pixel positions rather than class names, which pass either way.
+type commandsColumnView struct {
+	LeftLeft     float64 `json:"leftLeft"`
+	LeftRight    float64 `json:"leftRight"`
+	LeftTop      float64 `json:"leftTop"`
+	LeftBottom   float64 `json:"leftBottom"`
+	MidLeft      float64 `json:"midLeft"`
+	MidRight     float64 `json:"midRight"`
+	MidTop       float64 `json:"midTop"`
+	MidBottom    float64 `json:"midBottom"`
+	RightLeft    float64 `json:"rightLeft"`
+	RightRight   float64 `json:"rightRight"`
+	RightTop     float64 `json:"rightTop"`
+	RightBottom  float64 `json:"rightBottom"`
+	ServerTop    float64 `json:"serverTop"`
+	ShelfTop     float64 `json:"shelfTop"`
+	ServerBottom float64 `json:"serverBottom"`
+	ShelfBottom  float64 `json:"shelfBottom"`
+	IntroBottom  float64 `json:"introBottom"`
+	IntroLeft    float64 `json:"introLeft"`
+	IntroRight   float64 `json:"introRight"`
+	PageLeft     float64 `json:"pageLeft"`
+	PageRight    float64 `json:"pageRight"`
+	BodyScrollW  float64 `json:"bodyScrollW"`
+	ViewportW    float64 `json:"viewportW"`
+}
+
+// TestE2ECommandsColumnsLayout asserts the server-commands page lays out as three
+// equal-height columns: servers over the file shelf at ~25%, the flow list at
+// ~35%, and the editor at ~40%, all starting at the page's existing left margin.
+func TestE2ECommandsColumnsLayout(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes:                 []Node{{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"}},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		// Wide enough that the 1180px breakpoint does not kick in.
+		chromedp.WindowSize(1600, 1000),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(`setView('commands')`, nil),
+		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open commands view: %v", err)
+	}
+
+	var raw string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const box = (sel) => { const el = document.querySelector(sel); return el ? el.getBoundingClientRect() : null; };
+		const left = box('.commands-column-left');
+		const mid = box('.commands-column-center');
+		const right = box('.commands-column-right');
+		const server = box('.server-library');
+		const shelf = box('#command-file-shelf');
+		const intro = box('#commands-view .page-intro');
+		const page = box('#commands-view');
+		return JSON.stringify({
+			leftLeft: left.left, leftRight: left.right, leftTop: left.top, leftBottom: left.bottom,
+			midLeft: mid.left, midRight: mid.right, midTop: mid.top, midBottom: mid.bottom,
+			rightLeft: right.left, rightRight: right.right, rightTop: right.top, rightBottom: right.bottom,
+			serverTop: server.top, serverBottom: server.bottom, shelfTop: shelf.top, shelfBottom: shelf.bottom,
+			introBottom: intro.bottom, introLeft: intro.left, introRight: intro.right,
+			pageLeft: page.left, pageRight: page.right,
+			bodyScrollW: document.documentElement.scrollWidth, viewportW: window.innerWidth,
+		});
+	})()`, &raw)); err != nil {
+		t.Fatalf("measure commands columns: %v", err)
+	}
+	var v commandsColumnView
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		t.Fatalf("decode commands layout %q: %v", raw, err)
+	}
+
+	// The three columns sit side by side, in order, without overlapping.
+	if !(v.LeftRight <= v.MidLeft+0.5) {
+		t.Fatalf("left column overlaps the middle one: left.right=%.1f mid.left=%.1f (%+v)", v.LeftRight, v.MidLeft, v)
+	}
+	if !(v.MidRight <= v.RightLeft+0.5) {
+		t.Fatalf("middle column overlaps the right one: mid.right=%.1f right.left=%.1f (%+v)", v.MidRight, v.RightLeft, v)
+	}
+
+	// Widths should track 25/35/40 of the grid width. Compare against the sum of
+	// the three columns' outer span so page padding is excluded.
+	leftW, midW, rightW := v.LeftRight-v.LeftLeft, v.MidRight-v.MidLeft, v.RightRight-v.RightLeft
+	span := v.RightRight - v.LeftLeft
+	if span <= 0 {
+		t.Fatalf("columns span is not positive: %+v", v)
+	}
+	for _, c := range []struct {
+		name string
+		got  float64
+		want float64
+	}{{"left", leftW, 25}, {"middle", midW, 35}, {"right", rightW, 40}} {
+		share := c.got / span * 100
+		if diff := share - c.want; diff > 2.5 || diff < -2.5 {
+			t.Fatalf("%s column is %.1f%% of the row, want ~%.0f%% (measured %+v)", c.name, share, c.want, v)
+		}
+	}
+
+	// Equal height: the three columns must share a top and a bottom edge.
+	if d := v.MidTop - v.LeftTop; d > 1 || d < -1 {
+		t.Fatalf("middle column top %.1f differs from left %.1f (%+v)", v.MidTop, v.LeftTop, v)
+	}
+	if d := v.RightTop - v.LeftTop; d > 1 || d < -1 {
+		t.Fatalf("right column top %.1f differs from left %.1f (%+v)", v.RightTop, v.LeftTop, v)
+	}
+	if d := v.MidBottom - v.LeftBottom; d > 1 || d < -1 {
+		t.Fatalf("middle column bottom %.1f differs from left %.1f (%+v)", v.MidBottom, v.LeftBottom, v)
+	}
+	if d := v.RightBottom - v.LeftBottom; d > 1 || d < -1 {
+		t.Fatalf("right column bottom %.1f differs from left %.1f (%+v)", v.RightBottom, v.LeftBottom, v)
+	}
+
+	// The first column stacks servers above the file shelf, with the grid gap.
+	if !(v.ServerBottom <= v.ShelfTop) {
+		t.Fatalf("server library (bottom %.1f) should sit above the file shelf (top %.1f) (%+v)", v.ServerBottom, v.ShelfTop, v)
+	}
+	if gap := v.ShelfTop - v.ServerBottom; gap < 8 || gap > 40 {
+		t.Fatalf("stacked panels are %.1fpx apart, want the grid gap (~16px) (%+v)", gap, v)
+	}
+
+	// The columns begin below the page intro and keep the page's existing left
+	// margin. The reference is the intro's own left edge, not #commands-view's:
+	// the view IS .page-content and carries the 39px horizontal padding, so its
+	// border box sits 39px left of where its content actually starts.
+	if !(v.LeftTop >= v.IntroBottom-1) {
+		t.Fatalf("columns (top %.1f) should start below the intro (bottom %.1f) (%+v)", v.LeftTop, v.IntroBottom, v)
+	}
+	if d := v.LeftLeft - v.IntroLeft; d > 1 || d < -1 {
+		t.Fatalf("columns left edge %.1f does not line up with the page intro left edge %.1f (%+v)", v.LeftLeft, v.IntroLeft, v)
+	}
+	if d := v.IntroRight - v.RightRight; d > 1 || d < -1 {
+		t.Fatalf("columns right edge %.1f does not line up with the page intro right edge %.1f (%+v)", v.RightRight, v.IntroRight, v)
+	}
+
+	// No horizontal overflow from the new grid.
+	if v.BodyScrollW > v.ViewportW+1 {
+		t.Fatalf("page overflows horizontally: scrollWidth=%.1f viewport=%.1f (%+v)", v.BodyScrollW, v.ViewportW, v)
+	}
+}
