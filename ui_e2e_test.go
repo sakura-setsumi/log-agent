@@ -2167,12 +2167,13 @@ func TestE2EContainerClicksDoNotWidenNodeSelection(t *testing.T) {
 // syncGoBackend() prunes selectedNodes and expandedNodes whenever the node list
 // changes, but left selectedContainers untouched. Since
 // logsForActiveContainer() filters the stream by those keys, a scope pointing at
-// a node that is gone (unbound elsewhere, or dropped from a hand-edited config)
-// silently blanks the log stream with no visible cause.
+// a node that is gone silently blanks the log stream with no visible cause.
 //
-// restoreSelection() does not cover this: it only prunes container scopes when
-// it narrows a multi-node selection, so a single-node selection passes restore
-// untouched and the sync is the only thing that can catch the stale scope.
+// The node is removed through the API rather than the UI on purpose: unbindNode()
+// already prunes client-side, so going through it would not exercise the sync.
+// This is the case only the sync can catch -- a node that disappears while the
+// page is open, because it was unbound from another tab or dropped from a
+// hand-edited config.
 func TestE2EStaleContainerScopeIsPrunedOnSync(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
@@ -2190,6 +2191,8 @@ func TestE2EStaleContainerScopeIsPrunedOnSync(t *testing.T) {
 		nodes: []Node{
 			{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯",
 				Containers: []containerInfo{{ID: "api", Name: "api", State: "running"}}},
+			{ID: "node-b", Name: "掌门人", URL: "https://115.190.152.177:8999", Status: "connected", Initial: "掌",
+				Containers: []containerInfo{{ID: "web", Name: "web", State: "running"}}},
 		},
 		nextLogID:             1,
 		historyRange:          "30m",
@@ -2221,49 +2224,70 @@ func TestE2EStaleContainerScopeIsPrunedOnSync(t *testing.T) {
 	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
 	t.Cleanup(cancel)
 
-	// "ghost" is a node that is no longer in the list, but its container scope is
-	// still sitting in storage. multiSelect:true keeps restoreSelection() from
-	// pruning it, so only the sync can.
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
 		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
-		chromedp.Evaluate(`localStorage.setItem('log-agent-selection', JSON.stringify({
-			nodes: ['node-a'],
-			containers: ['node-a::api', 'ghost::api'],
-			multiSelect: true
-		}))`, nil),
-		chromedp.Reload(),
 		chromedp.WaitVisible(`#node-list .node-item[data-node-id="node-a"]`, chromedp.ByQuery),
 	); err != nil {
-		t.Fatalf("seed stale selection: %v", err)
+		t.Fatalf("open page: %v", err)
 	}
 
-	// syncGoBackend() is async and also re-runs every 3s, so poll until the
-	// stale scope is gone (or give up and let the assertion report it).
+	// Scope one container under each node. The switch has to be on for the second
+	// scope to add to the first rather than replace it.
+	clickMultiSelectToggle(t, ctx)
+	ensureNodeExpanded(t, ctx, "node-a")
+	clickContainer(t, ctx, "node-a", "api")
+	ensureNodeExpanded(t, ctx, "node-b")
+	clickContainer(t, ctx, "node-b", "web")
+
+	var seeded []string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`state.selectedContainers`, &seeded)); err != nil {
+		t.Fatalf("read seeded scopes: %v", err)
+	}
+	if len(seeded) != 2 {
+		t.Fatalf("expected both container scopes to be selected, got %v", seeded)
+	}
+
+	// Remove node-b behind the page's back. unbindNode() is deliberately NOT
+	// used, so the only thing that can clean up the scope is the sync.
+	req, err := http.NewRequest(http.MethodDelete, web.URL+"/api/nodes/node-b", nil)
+	if err != nil {
+		t.Fatalf("build delete request: %v", err)
+	}
+	resp, err := web.Client().Do(req)
+	if err != nil {
+		t.Fatalf("delete node-b: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		t.Fatalf("delete node-b returned %d, want a 2xx", resp.StatusCode)
+	}
+
+	// The sync re-runs every 3s, so poll until the stale scope is gone.
 	var scopes []string
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if err := chromedp.Run(ctx, chromedp.Evaluate(`state.selectedContainers`, &scopes)); err != nil {
 			t.Fatalf("read container scopes: %v", err)
 		}
 		stale := false
 		for _, key := range scopes {
-			if strings.HasPrefix(key, "ghost::") {
+			if strings.HasPrefix(key, "node-b::") {
 				stale = true
 			}
 		}
 		if !stale || time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 
 	for _, key := range scopes {
-		if strings.HasPrefix(key, "ghost::") {
+		if strings.HasPrefix(key, "node-b::") {
 			t.Fatalf("container scope outlived its node: %v -- it would filter the stream to nothing", scopes)
 		}
 	}
-	// The live node's own scope must survive the pruning.
+	// The surviving node's own scope must not be swept up with it.
 	found := false
 	for _, key := range scopes {
 		if key == "node-a::api" {

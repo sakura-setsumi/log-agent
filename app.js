@@ -201,8 +201,12 @@ function restoreSelection() {
     state.multiSelect = saved.multiSelect === true;
     if (!state.multiSelect && state.selectedNodes.length > 1) {
       state.selectedNodes = state.selectedNodes.slice(0, 1);
-      state.selectedContainers = state.selectedContainers.filter((key) => state.selectedNodes.includes(containerKeyNodeId(key)));
     }
+    // A container scope must belong to a selected node. Pruning here rather than
+    // only when narrowing a multi-node selection means the very first
+    // renderLogs() cannot be scoped to a node that is not selected, which would
+    // otherwise blank the stream until the first backend sync corrected it.
+    state.selectedContainers = state.selectedContainers.filter((key) => state.selectedNodes.includes(containerKeyNodeId(key)));
   } catch (error) {
     // Ignore unavailable or invalid browser storage and use the default selection.
   }
