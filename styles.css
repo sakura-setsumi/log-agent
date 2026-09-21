@@ -643,10 +643,14 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 .commands-column { min-width:0; min-height:0; display:flex; flex-direction:column; gap:16px; }
 .commands-board, .commands-editor { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
 .commands-column-left > .panel { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
-/* Server library and the file shelf share the left column. Servers take the
-   flexible share; the shelf keeps its natural height but can shrink. */
+/* Server library and the file shelf share the left column. The shelf must never
+   be squeezed below its own chrome -- heading + drop zone + one file row --
+   otherwise `overflow:hidden` clips the drop zone clean off the panel and the
+   user sees a header with nothing under it. So the shelf is sized from its
+   content (`flex:none` + an explicit min-height that covers its fixed parts)
+   and the server library is the one that takes/gives the remaining space. */
 .commands-column-left > .server-library { flex:1 1 auto; }
-.commands-column-left > .command-file-shelf { flex:0 1 auto; }
+.commands-column-left > .command-file-shelf { flex:0 0 auto; min-height:214px; }
 .server-card-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
 .command-file-shelf .command-file-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
 .commands-board > .commands-flow-list { flex:1 1 auto; min-height:0; overflow-y:auto; }

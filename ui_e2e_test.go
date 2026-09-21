@@ -1660,3 +1660,162 @@ func TestE2ECommandsPanelsScrollInsteadOfStretching(t *testing.T) {
 		t.Fatalf("editor body overflow-y should be auto, got %q (%+v)", v.EditorBodyOverflow, v)
 	}
 }
+
+// fileShelfFitsView reports whether the file shelf's contents stay inside the
+// shelf's own box, and whether the server library still scrolls.
+type fileShelfFitsView struct {
+	ShelfTop           float64 `json:"shelfTop"`
+	ShelfBottom        float64 `json:"shelfBottom"`
+	ShelfH             float64 `json:"shelfH"`
+	ShelfScrollH       float64 `json:"shelfScrollH"`
+	ShelfOverflow      string  `json:"shelfOverflow"`
+	ShelfMinHeight     string  `json:"shelfMinHeight"`
+	DropZoneTop        float64 `json:"dropZoneTop"`
+	DropZoneBottom     float64 `json:"dropZoneBottom"`
+	DropZoneVisible    bool    `json:"dropZoneVisible"`
+	FileListBottom     float64 `json:"fileListBottom"`
+	ServerLibH         float64 `json:"serverLibH"`
+	ServerListH        float64 `json:"serverListH"`
+	ServerListSh       float64 `json:"serverListSh"`
+	ServerListOverflow string  `json:"serverListOverflow"`
+	DocScrollH         float64 `json:"docScrollH"`
+	DocClientH         float64 `json:"docClientH"`
+}
+
+// TestE2EFileShelfIsNotClippedByTheLeftColumn guards the bug where the file
+// shelf was shrunk below its own content. The left column splits its height
+// between the server library and the shelf; when the shelf was `flex:0 1 auto`
+// the library's demand squashed it, and `overflow:hidden` clipped the drop zone
+// completely off the panel -- the user saw a "上传文件" heading with an empty
+// body. The shelf must therefore keep a content floor, and the server library
+// (whose list genuinely scrolls) is what gives up the space.
+func TestE2EFileShelfIsNotClippedByTheLeftColumn(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes:                 []Node{{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"}},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		// The reporter's viewport was short; the squeeze only shows there.
+		chromedp.WindowSize(1440, 900),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	// Three servers is what the report showed; the squeeze came from the
+	// library's intrinsic demand, not from an extreme fixture.
+	seed := `(() => {
+		const servers = [];
+		for (let i = 0; i < 3; i++) {
+			servers.push({ id: 'srv-' + i, name: '服务器 ' + (i + 1), host: '192.168.1.' + (i + 20), port: '22', user: 'deploy', auth: 'key', secret: '' });
+		}
+		const flows = [{ id: 'flow-0', name: '测试', lines: [{ id: 'l-0', text: '' }], bindings: [] }];
+		localStorage.setItem('log-agent-command-servers', JSON.stringify(servers));
+		localStorage.setItem('log-agent-command-flows', JSON.stringify(flows));
+		return 'ok';
+	})()`
+
+	var raw string
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(seed, nil),
+		chromedp.Reload(),
+		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.Evaluate(`setView('commands')`, nil),
+		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
+		chromedp.Sleep(300*time.Millisecond),
+		chromedp.Evaluate(`(() => {
+			const el = (sel) => document.querySelector(sel);
+			const shelf = el('#command-file-shelf');
+			const shelfBox = shelf.getBoundingClientRect();
+			const zone = el('#command-file-drop-zone');
+			const zoneBox = zone.getBoundingClientRect();
+			const list = el('#command-file-list');
+			const listBox = list.getBoundingClientRect();
+			const serverList = el('#server-card-list');
+			return JSON.stringify({
+				shelfTop: shelfBox.top, shelfBottom: shelfBox.bottom, shelfH: shelfBox.height,
+				shelfScrollH: shelf.scrollHeight,
+				shelfOverflow: getComputedStyle(shelf).overflowY,
+				shelfMinHeight: getComputedStyle(shelf).minHeight,
+				dropZoneTop: zoneBox.top, dropZoneBottom: zoneBox.bottom,
+				// The zone counts as visible only if its whole box sits inside the
+				// shelf's clip rect; a partially clipped zone is the bug.
+				dropZoneVisible: zoneBox.top >= shelfBox.top - 0.5 && zoneBox.bottom <= shelfBox.bottom + 0.5,
+				fileListBottom: listBox.bottom,
+				serverLibH: el('.server-library').getBoundingClientRect().height,
+				serverListH: serverList.getBoundingClientRect().height,
+				serverListSh: serverList.scrollHeight,
+				serverListOverflow: getComputedStyle(serverList).overflowY,
+				docScrollH: document.documentElement.scrollHeight,
+				docClientH: document.documentElement.clientHeight,
+			});
+		})()`, &raw)); err != nil {
+		t.Fatalf("measure file shelf: %v", err)
+	}
+	var v fileShelfFitsView
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		t.Fatalf("decode file shelf %q: %v", raw, err)
+	}
+
+	// The reported symptom: the drop zone fell outside the shelf and was clipped.
+	if !v.DropZoneVisible {
+		t.Fatalf("drop zone is clipped by the shelf: zone=%.1f..%.1f shelf=%.1f..%.1f (%+v)",
+			v.DropZoneTop, v.DropZoneBottom, v.ShelfTop, v.ShelfBottom, v)
+	}
+	if v.FileListBottom > v.ShelfBottom+0.5 {
+		t.Fatalf("file list bottom %.1f spills past the shelf bottom %.1f (%+v)", v.FileListBottom, v.ShelfBottom, v)
+	}
+
+	// The shelf must not be squashed below its own content.
+	if v.ShelfScrollH > v.ShelfH+1 {
+		t.Fatalf("shelf content (%.1f) exceeds its height (%.1f) — it was squeezed below its chrome (%+v)", v.ShelfScrollH, v.ShelfH, v)
+	}
+
+	// The server library is the one that absorbs the pressure by scrolling.
+	if v.ServerListOverflow != "auto" {
+		t.Fatalf("server list overflow-y should be auto, got %q (%+v)", v.ServerListOverflow, v)
+	}
+	if v.ServerListSh <= v.ServerListH+1 {
+		t.Fatalf("server list did not overflow: scrollHeight=%.1f height=%.1f — increase the fixture (%+v)", v.ServerListSh, v.ServerListH, v)
+	}
+
+	// Fixing the shelf must not reintroduce a page-level scrollbar.
+	if v.DocScrollH > v.DocClientH+2 {
+		t.Fatalf("page grew a scrollbar: scrollHeight=%.1f clientHeight=%.1f (%+v)", v.DocScrollH, v.DocClientH, v)
+	}
+}
