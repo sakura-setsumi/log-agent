@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f4f6f8" />
-    <title>日志中枢 · Log Agent</title>
+    <title>Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="preload" href="loading.gif" as="image" type="image/gif" />
     <link rel="stylesheet" href="styles.css?v=narrow-panels-117" />
@@ -17,62 +17,63 @@
             <img src="favicon.png" alt="" />
           </div>
           <div>
-            <div class="brand-name">日志中枢</div>
+            <div class="brand-name" data-i18n="brand.name">日志中枢</div>
             <div class="brand-caption">LOG AGENT / 1.0.0</div>
           </div>
         </div>
 
-        <div class="sidebar-label">工作台</div>
-        <nav class="primary-nav" aria-label="主导航">
+        <div class="sidebar-label" data-i18n="sidebar.workspace">工作台</div>
+        <nav class="primary-nav" aria-label="主导航" data-i18n-aria-label="sidebar.navLabel">
           <button class="nav-item active" data-view="overview">
-            <span class="nav-icon">⌁</span><span>实时日志流</span><span class="nav-count" id="stream-nav-count">00</span>
+            <span class="nav-icon">⌁</span><span data-i18n="nav.overview">实时日志流</span><span class="nav-count" id="stream-nav-count">00</span>
           </button>
           <button class="nav-item" data-view="rules">
-            <span class="nav-icon">◌</span><span>加工规则</span>
+            <span class="nav-icon">◌</span><span data-i18n="nav.rules">加工规则</span>
           </button>
           <button class="nav-item" data-view="connections">
-            <span class="nav-icon">⌘</span><span>连接管理</span>
+            <span class="nav-icon">⌘</span><span data-i18n="nav.connections">连接管理</span>
           </button>
           <button class="nav-item" data-view="commands">
-            <span class="nav-icon">▤</span><span>服务器指令</span>
+            <span class="nav-icon">▤</span><span data-i18n="nav.commands">服务器指令</span>
           </button>
         </nav>
 
         <div class="workspace-heading">
-          <div class="sidebar-label">Dozzle 节点</div>
+          <div class="sidebar-label" data-i18n="sidebar.dozzleNodes">Dozzle 节点</div>
           <div class="workspace-heading-actions">
             <span class="node-total" id="node-total">00</span>
             <div class="node-select-mode">
-              <span class="node-select-mode-label" id="node-multi-select-label">多选</span>
-              <button class="toggle node-multi-toggle" id="node-multi-select-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="node-multi-select-label" title="打开后可同时选择多个节点，关闭时只能单选"><span class="sr-only">多选节点</span></button>
+              <span class="node-select-mode-label" id="node-multi-select-label" data-i18n="sidebar.multiSelect">多选</span>
+              <button class="toggle node-multi-toggle" id="node-multi-select-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="node-multi-select-label" data-i18n-title="sidebar.multiSelectHint" title="打开后可同时选择多个节点，关闭时只能单选"><span class="sr-only" data-i18n="sidebar.multiSelect">多选</span></button>
             </div>
           </div>
         </div>
         <div class="node-list" id="node-list"></div>
 
         <button class="add-node-button" id="open-add-node">
-          <span>＋</span> 添加 Dozzle 节点
+          <span>＋</span> <span data-i18n="sidebar.addNode">添加 Dozzle 节点</span>
         </button>
 
         <div class="sidebar-footer">
-          <div class="system-status" id="system-status" data-state="offline"><span class="pulse-dot"></span> <span id="system-status-label">等待服务连接</span></div>
-          <div class="footer-meta"><span>上次同步</span><strong id="last-sync">未同步</strong></div>
+          <div class="system-status" id="system-status" data-state="offline"><span class="pulse-dot"></span> <span id="system-status-label" data-i18n="sidebar.status.connecting">等待服务连接</span></div>
+          <div class="footer-meta"><span data-i18n="sidebar.lastSync">上次同步</span><strong id="last-sync" data-i18n="sidebar.notSynced">未同步</strong></div>
         </div>
       </aside>
 
       <main class="main-content">
         <header class="topbar">
-          <div class="breadcrumb"><span>工作台</span><b>/</b><strong id="view-breadcrumb">实时日志流</strong></div>
+          <div class="breadcrumb"><span data-i18n="sidebar.workspace">工作台</span><b>/</b><strong id="view-breadcrumb" data-i18n="nav.overview">实时日志流</strong></div>
           <div class="topbar-actions">
             <div class="global-search">
               <span class="search-glyph">⌕</span>
-              <input id="global-search" type="search" placeholder="搜索日志、容器或关键词" autocomplete="off" />
+              <input id="global-search" type="search" data-i18n-placeholder="topbar.search" placeholder="搜索日志、容器或关键词" autocomplete="off" />
               <kbd>/</kbd>
             </div>
-            <button class="icon-button" id="settings-button" aria-label="打开设置" title="设置">⚙</button>
+            <button class="icon-button" id="settings-button" data-i18n-aria-label="topbar.settings" data-i18n-title="topbar.settings" aria-label="打开设置" title="设置">⚙</button>
             <button class="icon-button" id="theme-toggle" aria-label="切换到黑夜模式" title="切换到黑夜模式">☾</button>
-            <button class="icon-button" id="refresh-button" aria-label="刷新状态" title="刷新状态">↻</button>
-            <div class="avatar" title="当前用户">L</div>
+            <button class="icon-button" id="language-toggle" type="button" aria-label="切换语言" title="切换语言">中</button>
+            <button class="icon-button" id="refresh-button" data-i18n-aria-label="topbar.refresh" data-i18n-title="topbar.refresh" aria-label="刷新状态" title="刷新状态">↻</button>
+            <div class="avatar" title="当前用户" data-i18n-title="topbar.currentUser">L</div>
           </div>
         </header>
 
@@ -80,38 +81,38 @@
           <section class="page-intro">
             <div>
               <div class="eyebrow"><span class="eyebrow-line"></span> OPERATIONS CONSOLE</div>
-              <h1 id="page-title">实时日志流</h1>
-              <p id="page-subtitle">统一接入多个 Dozzle 实例，让每一行日志都可检索、可加工、可追溯。</p>
+              <h1 id="page-title" data-i18n="overview.title">实时日志流</h1>
+              <p id="page-subtitle" data-i18n="overview.subtitle">统一接入多个 Dozzle 实例，让每一行日志都可检索、可加工、可追溯。</p>
             </div>
             <div class="intro-actions">
-              <span class="sync-time"><span class="status-dot"></span> <span id="sync-status">等待后端连接</span></span>
-              <button class="secondary-button" id="export-button"><span>⇩</span> 导出视图</button>
+              <span class="sync-time"><span class="status-dot"></span> <span id="sync-status" data-i18n="overview.waitingBackend">等待后端连接</span></span>
+              <button class="secondary-button" id="export-button"><span>⇩</span> <span data-i18n="overview.export">导出视图</span></button>
             </div>
           </section>
 
-          <section class="metrics-grid" aria-label="运行指标">
+          <section class="metrics-grid" aria-label="运行指标" data-i18n-aria-label="metrics.label">
             <article class="metric-card accent-orange">
-              <div class="metric-top"><span>接入节点</span><span class="metric-icon">◈</span></div>
+              <div class="metric-top"><span data-i18n="metrics.nodes">接入节点</span><span class="metric-icon">◈</span></div>
               <div class="metric-value" id="metric-nodes">00</div>
-              <div class="metric-foot" id="metric-nodes-foot">等待节点状态</div>
+              <div class="metric-foot" id="metric-nodes-foot" data-i18n="metrics.nodesIdle">等待节点状态</div>
             </article>
             <article class="metric-card accent-teal">
-              <div class="metric-top"><span>活跃容器</span><span class="metric-icon">▣</span></div>
+              <div class="metric-top"><span data-i18n="metrics.containers">活跃容器</span><span class="metric-icon">▣</span></div>
               <div class="metric-value" id="metric-containers">—</div>
-              <div class="metric-foot" id="metric-containers-foot">等待容器状态</div>
+              <div class="metric-foot" id="metric-containers-foot" data-i18n="metrics.containersIdle">等待容器状态</div>
             </article>
-            <article class="metric-card accent-purple" title="服务启动后接收的日志总数；该计数不代表当前缓存条数。">
-              <div class="metric-top"><span>累计接收日志</span><span class="metric-icon">✦</span></div>
+            <article class="metric-card accent-purple" data-i18n-title="metrics.processedHint" title="服务启动后接收的日志总数；该计数不代表当前缓存条数。">
+              <div class="metric-top"><span data-i18n="metrics.processed">累计接收日志</span><span class="metric-icon">✦</span></div>
               <div class="metric-value" id="metric-processed">0</div>
-              <div class="metric-foot" id="metric-processed-foot">等待日志流</div>
+              <div class="metric-foot" id="metric-processed-foot" data-i18n="metrics.processedIdle">等待日志流</div>
             </article>
-            <article class="metric-card accent-blue" title="日志仅保存在内存中。这里显示当前条数、容量、累计淘汰数和最近淘汰时间。达到上限后，每新增一条日志会淘汰时间最早的一条。">
-              <div class="metric-top"><span>日志缓存使用率</span><span class="metric-icon">◒</span></div>
+            <article class="metric-card accent-blue" data-i18n-title="metrics.storageHint" title="日志仅保存在内存中。这里显示当前条数、容量、累计淘汰数和最近淘汰时间。达到上限后，每新增一条日志会淘汰时间最早的一条。">
+              <div class="metric-top"><span data-i18n="metrics.storage">日志缓存使用率</span><span class="metric-icon">◒</span></div>
               <div class="metric-value" id="metric-storage">—</div>
-              <div class="metric-foot" id="metric-storage-foot">等待数据</div>
+              <div class="metric-foot" id="metric-storage-foot" data-i18n="metrics.storageIdle">等待数据</div>
               <div class="metric-policy-row">
-                <div class="metric-policy" id="metric-storage-policy">满额后自动淘汰最早日志</div>
-                <button class="cache-clear-button" id="storage-clear-cache" type="button" title="清空内存中已缓存的全部日志（不可恢复）">清除缓存</button>
+                <div class="metric-policy" id="metric-storage-policy" data-i18n="metrics.storagePolicy">满额后自动淘汰最早日志</div>
+                <button class="cache-clear-button" id="storage-clear-cache" type="button" data-i18n-title="metrics.clearCacheHint" data-i18n="metrics.clearCache" title="清空内存中已缓存的全部日志（不可恢复）">清除缓存</button>
               </div>
             </article>
           </section>
@@ -121,71 +122,71 @@
               <div class="panel-heading log-panel-heading">
                 <div>
                   <div class="section-kicker">LIVE STREAM</div>
-                  <h2>日志流 <span class="live-pill"><i></i> LIVE</span></h2>
+                  <h2><span data-i18n="stream.panelTitle">日志流</span> <span class="live-pill"><i></i> LIVE</span></h2>
                 </div>
                 <div class="panel-heading-actions">
-                  <button class="text-button" id="clear-button">清空视图</button>
-                  <button class="pause-button" id="pause-button"><span>Ⅱ</span> 暂停接收</button>
+                  <button class="text-button" id="clear-button" data-i18n="stream.clear">清空视图</button>
+                  <button class="pause-button" id="pause-button"><span>Ⅱ</span> <span id="pause-button-label" data-i18n="stream.pause">暂停接收</span></button>
                 </div>
               </div>
 
               <div class="log-filters">
                 <div class="filter-select-wrap">
-                  <span>时间</span>
-                  <select id="time-range-filter" aria-label="按时间范围筛选">
-                    <option value="30m">最近 30 分钟</option>
-                    <option value="5h">最近 5 小时</option>
-                    <option value="1d">最近 1 天</option>
-                    <option value="1w">最近一周</option>
+                  <span data-i18n="stream.time">时间</span>
+                  <select id="time-range-filter" data-i18n-aria-label="stream.rangeLabel" aria-label="按时间范围筛选">
+                    <option value="30m" data-i18n="stream.range.30m">最近 30 分钟</option>
+                    <option value="5h" data-i18n="stream.range.5h">最近 5 小时</option>
+                    <option value="1d" data-i18n="stream.range.1d">最近 1 天</option>
+                    <option value="1w" data-i18n="stream.range.1w">最近一周</option>
                   </select>
                 </div>
-                <div class="level-filters" role="group" aria-label="按日志级别筛选">
-                  <button class="level-chip active" data-level="all">全部 <b id="all-count">0</b></button>
+                <div class="level-filters" role="group" data-i18n-aria-label="stream.levelLabel" aria-label="按日志级别筛选">
+                  <button class="level-chip active" data-level="all"><span data-i18n="stream.level.all">全部</span> <b id="all-count">0</b></button>
                   <button class="level-chip" data-level="info"><i class="level-dot info"></i> INFO <b id="info-count">0</b></button>
                   <button class="level-chip" data-level="warn"><i class="level-dot warn"></i> WARN <b id="warn-count">0</b></button>
                   <button class="level-chip" data-level="error"><i class="level-dot error"></i> ERROR <b id="error-count">0</b></button>
                 </div>
                 <div class="log-search-wrap">
-                  <span>⌕</span><input id="log-search" type="search" placeholder="过滤当前日志" />
+                  <span>⌕</span><input id="log-search" type="search" data-i18n-placeholder="stream.searchPlaceholder" placeholder="过滤当前日志" />
                 </div>
               </div>
 
               <div class="stream-status-bar">
-                <span><i class="stream-indicator"></i><strong id="stream-status">等待连接</strong></span>
-                <span class="stream-caption" id="stream-caption">来自 0 个 Dozzle 节点 · 最近 30 分钟</span>
-                <span class="row-count" id="row-count">显示 0 条</span>
+                <span><i class="stream-indicator"></i><strong id="stream-status" data-i18n="stream.status.waiting">等待连接</strong></span>
+                <span class="stream-caption" id="stream-caption"></span>
+                <span class="row-count" id="row-count"></span>
               </div>
 
-              <div class="log-table-head"><span>日期</span><span>时间</span><span>级别</span><span>来源 / 容器</span><span>消息</span><span></span></div>
-              <div class="older-log-loader hidden" id="older-log-loader" role="status"><img class="loading-animation" src="loading.gif" alt="正在加载更早日志" /><span>正在加载更早日志</span></div>
+              <div class="log-table-head"><span data-i18n="stream.col.date">日期</span><span data-i18n="stream.col.time">时间</span><span data-i18n="stream.col.level">级别</span><span data-i18n="stream.col.source">来源 / 容器</span><span data-i18n="stream.col.message">消息</span><span></span></div>
+              <div class="older-log-loader hidden" id="older-log-loader" role="status"><img class="loading-animation" src="loading.gif" alt="正在加载更早日志" /><span data-i18n="stream.loadingOlder">正在加载更早日志</span></div>
               <div class="log-stream" id="log-stream" role="log" aria-live="polite">
                 <div class="empty-state hidden" id="empty-state">
-                  <div class="empty-icon">⌁</div><strong>暂无日志数据</strong><span>连接 Dozzle 节点后，日志会显示在这里。</span>
+                  <div class="empty-icon">⌁</div><strong data-i18n="stream.emptyTitle">暂无日志数据</strong><span data-i18n="stream.emptyBody">连接 Dozzle 节点后，日志会显示在这里。</span>
                 </div>
               </div>
-              <div class="stream-footer"><span>最新日志在底部</span><span><span class="keyboard-hint">Space</span> 暂停 / 继续</span></div>
+              <div class="stream-footer"><span data-i18n="stream.footerLatest">最新日志在底部</span><span><span class="keyboard-hint">Space</span> <span data-i18n="stream.footerShortcut">暂停 / 继续</span></span></div>
             </div>
 
             <aside class="right-rail">
               <section class="processing-panel panel">
                 <div class="panel-heading compact-heading">
-                  <div><div class="section-kicker">PROCESSING PIPELINE</div><h2>日志加工</h2></div>
-                  <div class="pipeline-actions" id="pipeline-actions"><button class="more-button" id="pipeline-more-button" type="button" aria-label="更多加工操作">•••</button><div class="pipeline-menu hidden" id="pipeline-menu"><button type="button" data-pipeline-action="enable-all">启用全部规则</button><button type="button" data-pipeline-action="disable-all">停用全部规则</button><button type="button" data-pipeline-action="reset">恢复默认设置</button></div></div>
+                  <div><div class="section-kicker">PROCESSING PIPELINE</div><h2 data-i18n="rules.panelTitle">日志加工</h2></div>
+                  <div class="pipeline-actions" id="pipeline-actions"><button class="more-button" id="pipeline-more-button" type="button" data-i18n-aria-label="pipeline.more" aria-label="更多加工操作">•••</button><div class="pipeline-menu hidden" id="pipeline-menu"><button type="button" data-pipeline-action="enable-all" data-i18n="pipeline.enableAll">启用全部规则</button><button type="button" data-pipeline-action="disable-all" data-i18n="pipeline.disableAll">停用全部规则</button><button type="button" data-pipeline-action="reset" data-i18n="pipeline.reset">恢复默认设置</button></div></div>
                 </div>
-                <p class="panel-description">在日志进入存储前，按顺序执行清洗和结构化。</p>
+                <p class="panel-description" data-i18n="pipeline.description">在日志进入存储前，按顺序执行清洗和结构化。</p>
                 <div class="pipeline-list">
-                  <div class="pipeline-item" data-rule="mask"><span class="drag-handle">⁙</span><span class="rule-icon orange">✦</span><div class="rule-copy"><strong>敏感信息脱敏</strong><span>IP、Token、邮箱</span></div><button class="toggle" data-rule-toggle="mask" aria-label="切换敏感信息脱敏"></button></div>
-                  <div class="pipeline-item" data-rule="structure"><span class="drag-handle">⁙</span><span class="rule-icon teal">⌘</span><div class="rule-copy"><strong>提取结构化字段</strong><span>level / service / trace_id</span></div><button class="toggle" data-rule-toggle="structure" aria-label="切换提取结构化字段"></button></div>
-                  <div class="pipeline-item" data-rule="noise"><span class="drag-handle">⁙</span><span class="rule-icon muted">∿</span><div class="rule-copy"><strong>过滤健康检查</strong><span>忽略 /healthz 请求</span></div><button class="toggle" data-rule-toggle="noise" aria-label="切换过滤健康检查"></button></div>
+                  <div class="pipeline-item" data-rule="mask"><span class="drag-handle">⁙</span><span class="rule-icon orange">✦</span><div class="rule-copy"><strong data-i18n="rules.mask">敏感信息脱敏</strong><span data-i18n="pipeline.maskHint">IP、Token、邮箱</span></div><button class="toggle" data-rule-toggle="mask" data-i18n-aria-label="pipeline.toggleMask" aria-label="切换敏感信息脱敏"></button></div>
+                  <div class="pipeline-item" data-rule="structure"><span class="drag-handle">⁙</span><span class="rule-icon teal">⌘</span><div class="rule-copy"><strong data-i18n="rules.structure">提取结构化字段</strong><span data-i18n="pipeline.structureHint">level / service / trace_id</span></div><button class="toggle" data-rule-toggle="structure" data-i18n-aria-label="pipeline.toggleStructure" aria-label="切换提取结构化字段"></button></div>
+                  <div class="pipeline-item" data-rule="noise"><span class="drag-handle">⁙</span><span class="rule-icon muted">∿</span><div class="rule-copy"><strong data-i18n="rules.noise">过滤健康检查</strong><span data-i18n="pipeline.noiseHint">忽略 /healthz 请求</span></div><button class="toggle" data-rule-toggle="noise" data-i18n-aria-label="pipeline.toggleNoise" aria-label="切换过滤健康检查"></button></div>
                 </div>
-                <button class="add-rule-button" id="add-rule-button" type="button"><span>＋</span> 添加加工规则</button>
-                <div class="pipeline-result"><div class="result-label"><span>加工预览</span><span class="result-badge">已生效</span></div><code id="preview-code">暂无日志数据</code></div>
+                <button class="add-rule-button" id="add-rule-button" type="button"><span>＋</span> <span data-i18n="rules.addRule">添加加工规则</span></button>
+                <div class="pipeline-result"><div class="result-label"><span data-i18n="pipeline.preview">加工预览</span><span class="result-badge" data-i18n="pipeline.previewActive">已生效</span></div><code id="preview-code">暂无日志数据</code></div>
               </section>
               <section class="node-detail-panel panel" id="node-detail-panel">
-                <div class="panel-heading compact-heading"><div><div class="section-kicker">SELECTED NODE</div><h2>节点状态</h2></div><span class="healthy-badge" id="detail-node-status"><i></i></span></div>
-                <div class="selected-node-row"><span class="node-avatar logo-avatar" aria-hidden="true"><img src="favicon.png" alt="" /></span><div><strong id="detail-node-name">未选择节点</strong><span id="detail-node-url">暂无连接</span></div><div class="selected-node-actions"><button class="secondary-button compact-button" id="edit-node-button" type="button">编辑</button><button class="danger-button compact-button" id="unbind-node-button" type="button">解绑</button></div></div>
-                <div class="detail-stats"><div><span>延迟</span><strong id="detail-latency">—</strong></div><div><span>容器</span><strong id="detail-containers">—</strong></div><div><span>版本</span><strong id="detail-version">—</strong></div></div>
-                <div class="last-heartbeat"><span class="heartbeat-bars"><i></i><i></i><i></i><i></i><i></i></span><span id="detail-heartbeat">暂无心跳数据</span></div>
+                <div class="panel-heading compact-heading"><div><div class="section-kicker">SELECTED NODE</div><h2 data-i18n="rules.nodeStatus">节点状态</h2></div><span class="healthy-badge" id="detail-node-status"><i></i></span></div>
+                <div class="selected-node-row"><span class="node-avatar logo-avatar" aria-hidden="true"><img src="favicon.png" alt="" /></span><div><strong id="detail-node-name" data-i18n="nodeDetail.noSelection">未选择节点</strong><span id="detail-node-url" data-i18n="nodeDetail.noConnection">暂无连接</span></div><div class="selected-node-actions"><button class="secondary-button compact-button" id="edit-node-button" type="button" data-i18n="nodeDetail.edit">编辑</button><button class="danger-button compact-button" id="unbind-node-button" type="button" data-i18n="nodeDetail.unbind">解绑</button></div></div>
+                <div class="detail-stats"><div><span data-i18n="nodeDetail.latency">延迟</span><strong id="detail-latency">—</strong></div><div><span data-i18n="nodeDetail.containers">容器</span><strong id="detail-containers">—</strong></div><div><span data-i18n="nodeDetail.version">版本</span><strong id="detail-version">—</strong></div></div>
+                <div class="last-heartbeat"><span class="heartbeat-bars"><i></i><i></i><i></i><i></i><i></i></span><span id="detail-heartbeat" data-i18n="nodeDetail.noHeartbeat">暂无心跳数据</span></div>
               </section>
             </aside>
           </section>
@@ -194,42 +195,42 @@
     <div class="assistant-dock" id="assistant-dock">
               <section class="assistant-panel panel" id="assistant-panel">
                 <div class="panel-heading compact-heading assistant-heading">
-                  <div><div class="section-kicker">AI LOG ASSISTANT</div><h2>AI 日志助手</h2></div>
+                  <div><div class="section-kicker">AI LOG ASSISTANT</div><h2 data-i18n="assistant.panelTitle">AI 日志助手</h2></div>
                   <div class="assistant-heading-actions">
-                    <button class="assistant-session-toggle" id="assistant-session-toggle" type="button" aria-label="会话历史" aria-haspopup="menu" aria-expanded="false" data-tooltip="会话历史"><span aria-hidden="true">☷</span></button>
-                    <button class="assistant-new-chat" id="assistant-clear-context" type="button" aria-label="新聊天" data-tooltip="新聊天"><span aria-hidden="true">✎</span></button>
+                    <button class="assistant-session-toggle" id="assistant-session-toggle" type="button" data-i18n-aria-label="assistant.sessions" aria-label="会话历史" aria-haspopup="menu" aria-expanded="false" data-i18n-tooltip="assistant.sessions" data-tooltip="会话历史"><span aria-hidden="true">☷</span></button>
+                    <button class="assistant-new-chat" id="assistant-clear-context" type="button" data-i18n-aria-label="assistant.newChat" aria-label="新聊天" data-i18n-tooltip="assistant.newChat" data-tooltip="新聊天"><span aria-hidden="true">✎</span></button>
                   </div>
-                  <div class="assistant-session-menu hidden" id="assistant-session-menu" role="menu"><div class="assistant-session-menu-label">历史会话（最近 12 个）</div><div id="assistant-session-list"></div></div>
+                  <div class="assistant-session-menu hidden" id="assistant-session-menu" role="menu"><div class="assistant-session-menu-label" data-i18n="assistant.sessionMenuLabel">历史会话（最近 12 个）</div><div id="assistant-session-list"></div></div>
                 </div>
-                <p class="panel-description">点击左侧日志加入上下文，让 AI 帮你定位问题、解释异常。</p>
+                <p class="panel-description" data-i18n="assistant.description">点击左侧日志加入上下文，让 AI 帮你定位问题、解释异常。</p>
 
                 <div class="assistant-toolbar">
                   <div class="assistant-model-picker" id="assistant-model-picker">
-                    <button class="assistant-model-trigger" id="assistant-model-trigger" type="button" aria-haspopup="menu" aria-expanded="false"><span id="assistant-model-name">选择模型</span><span class="assistant-model-chevron" aria-hidden="true">›</span></button>
-                    <div class="assistant-model-menu hidden" id="assistant-model-menu" role="menu"><div class="assistant-model-menu-label">选择模型</div><div id="assistant-model-options"></div><div class="assistant-model-menu-footer"><button class="text-button" id="assistant-manage-models" type="button">管理模型</button></div></div>
+                    <button class="assistant-model-trigger" id="assistant-model-trigger" type="button" aria-haspopup="menu" aria-expanded="false"><span id="assistant-model-name" data-i18n="assistant.selectModel">选择模型</span><span class="assistant-model-chevron" aria-hidden="true">›</span></button>
+                    <div class="assistant-model-menu hidden" id="assistant-model-menu" role="menu"><div class="assistant-model-menu-label" data-i18n="assistant.selectModel">选择模型</div><div id="assistant-model-options"></div><div class="assistant-model-menu-footer"><button class="text-button" id="assistant-manage-models" type="button" data-i18n="assistant.manageModels">管理模型</button></div></div>
                   </div>
                 </div>
                 <div class="assistant-context">
-                  <div class="assistant-context-heading"><span>结合前后三条日志分析上下文 <b id="assistant-context-count">0</b></span><span class="assistant-context-hint">点击左侧日志加入</span></div>
+                  <div class="assistant-context-heading"><span><span data-i18n="assistant.contextHeading">结合前后三条日志分析上下文</span> <b id="assistant-context-count">0</b></span><span class="assistant-context-hint" data-i18n="assistant.contextHint">点击左侧日志加入</span></div>
                   <div class="assistant-context-list" id="assistant-context-list"></div>
                 </div>
                 <div class="assistant-messages" id="assistant-messages">
-                  <div class="assistant-empty" id="assistant-empty"><strong>把日志交给 AI 分析</strong><span>点击左侧日志行加入上下文，然后输入问题。</span></div>
+                  <div class="assistant-empty" id="assistant-empty"><strong data-i18n="assistant.emptyTitle">把日志交给 AI 分析</strong><span data-i18n="assistant.emptyBody">点击左侧日志行加入上下文，然后输入问题。</span></div>
                 </div>
                 <form class="assistant-composer" id="assistant-form">
                   <input class="assistant-file-input" id="assistant-file-input" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/xml,.log,.yaml,.yml" />
                   <div class="assistant-input-shell">
                     <div class="assistant-attachment-list hidden" id="assistant-attachment-list" aria-live="polite"></div>
-                    <textarea id="assistant-input" rows="3" placeholder="例如：这条错误可能是什么原因？"></textarea>
+                    <textarea id="assistant-input" rows="3" data-i18n-placeholder="assistant.inputPlaceholder" placeholder="例如：这条错误可能是什么原因？"></textarea>
                   </div>
-                  <div class="assistant-composer-footer"><span id="assistant-status">AI 未配置</span><span class="assistant-composer-actions"><button class="assistant-attach-button" id="assistant-attach-button" type="button" aria-label="添加图片或文件" title="添加图片或文件，也可将图片粘贴到输入框"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20.1 11.3-7.5 7.5a5 5 0 0 1-7.1-7.1l8.2-8.2a3.5 3.5 0 1 1 5 5l-8.2 8.2a2 2 0 0 1-2.8-2.8l7.5-7.5" /></svg></button><button class="primary-button compact-button" id="assistant-send" type="submit">发送</button></span></div>
+                  <div class="assistant-composer-footer"><span id="assistant-status" data-i18n="assistant.notConfigured">AI 未配置</span><span class="assistant-composer-actions"><button class="assistant-attach-button" id="assistant-attach-button" type="button" data-i18n-aria-label="assistant.attach" aria-label="添加图片或文件" data-i18n-title="assistant.attachHint" title="添加图片或文件，也可将图片粘贴到输入框"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20.1 11.3-7.5 7.5a5 5 0 0 1-7.1-7.1l8.2-8.2a3.5 3.5 0 1 1 5 5l-8.2 8.2a2 2 0 0 1-2.8-2.8l7.5-7.5" /></svg></button><button class="primary-button compact-button" id="assistant-send" type="submit" data-i18n="assistant.send">发送</button></span></div>
                 </form>
               </section>
-              <button class="assistant-launcher" id="assistant-launcher" type="button" aria-label="打开 AI 日志助手" title="打开 AI 日志助手"><img class="assistant-launcher-image" src="ai-icon.png" alt="" aria-hidden="true" /></button>
+              <button class="assistant-launcher" id="assistant-launcher" type="button" data-i18n-aria-label="assistant.launcher" aria-label="打开 AI 日志助手" data-i18n-title="assistant.launcher" title="打开 AI 日志助手"><img class="assistant-launcher-image" src="ai-icon.png" alt="" aria-hidden="true" /></button>
             </div>
 
-    <div class="assistant-attachment-preview-modal hidden" id="assistant-attachment-preview-modal" role="dialog" aria-modal="true" aria-label="图片预览">
-      <button class="assistant-attachment-preview-close" id="assistant-attachment-preview-close" type="button" aria-label="关闭图片预览">×</button>
+    <div class="assistant-attachment-preview-modal hidden" id="assistant-attachment-preview-modal" role="dialog" aria-modal="true" data-i18n-aria-label="assistant.previewImage" aria-label="图片预览">
+      <button class="assistant-attachment-preview-close" id="assistant-attachment-preview-close" type="button" data-i18n-aria-label="assistant.closePreview" aria-label="关闭图片预览">×</button>
       <figure><img id="assistant-attachment-preview-image" alt="" /><figcaption id="assistant-attachment-preview-name"></figcaption></figure>
     </div>
 
@@ -237,38 +238,38 @@
           <section class="page-intro">
             <div>
               <div class="eyebrow"><span class="eyebrow-line"></span> PROCESSING RULES</div>
-              <h1>加工规则</h1>
-              <p>配置日志进入缓存前的脱敏、结构化和噪声过滤规则。</p>
+              <h1 data-i18n="nav.rules">加工规则</h1>
+              <p data-i18n="rules.introSubtitle">配置日志进入缓存前的脱敏、结构化和噪声过滤规则。</p>
             </div>
-            <button class="primary-button" id="rules-add-rule" type="button"><span>＋</span> 添加加工规则</button>
+            <button class="primary-button" id="rules-add-rule" type="button"><span>＋</span> <span data-i18n="rules.addRule">添加加工规则</span></button>
           </section>
           <section class="rules-overview panel">
-            <div class="panel-heading compact-heading"><div><div class="section-kicker">RULE PIPELINE</div><h2>当前规则</h2></div><span class="healthy-badge"><i></i> 实时生效</span></div>
+            <div class="panel-heading compact-heading"><div><div class="section-kicker">RULE PIPELINE</div><h2 data-i18n="rules.currentRules">当前规则</h2></div><span class="healthy-badge"><i></i> <span data-i18n="rules.liveApplied">实时生效</span></span></div>
             <div class="rule-settings-list">
-              <article class="rule-setting" data-rule-card="mask"><div class="rule-icon orange">✦</div><div class="rule-setting-copy"><strong>敏感信息脱敏</strong><span>隐藏 IP、Token、邮箱、用户标识等敏感字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="mask" aria-label="切换敏感信息脱敏"></button></article>
-              <article class="rule-setting" data-rule-card="structure"><div class="rule-icon teal">⌘</div><div class="rule-setting-copy"><strong>提取结构化字段</strong><span>从日志中提取 level、service、trace_id 等字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="structure" aria-label="切换提取结构化字段"></button></article>
-              <article class="rule-setting" data-rule-card="noise"><div class="rule-icon muted">∿</div><div class="rule-setting-copy"><strong>过滤健康检查</strong><span>忽略 /healthz 等周期性探活请求，减少日志噪声。</span></div><button class="toggle rule-toggle" data-rule-toggle="noise" aria-label="切换过滤健康检查"></button></article>
+              <article class="rule-setting" data-rule-card="mask"><div class="rule-icon orange">✦</div><div class="rule-setting-copy"><strong data-i18n="rules.mask">敏感信息脱敏</strong><span data-i18n="rules.maskBody">隐藏 IP、Token、邮箱、用户标识等敏感字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="mask" data-i18n-aria-label="pipeline.toggleMask" aria-label="切换敏感信息脱敏"></button></article>
+              <article class="rule-setting" data-rule-card="structure"><div class="rule-icon teal">⌘</div><div class="rule-setting-copy"><strong data-i18n="rules.structure">提取结构化字段</strong><span data-i18n="rules.structureBody">从日志中提取 level、service、trace_id 等字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="structure" data-i18n-aria-label="pipeline.toggleStructure" aria-label="切换提取结构化字段"></button></article>
+              <article class="rule-setting" data-rule-card="noise"><div class="rule-icon muted">∿</div><div class="rule-setting-copy"><strong data-i18n="rules.noise">过滤健康检查</strong><span data-i18n="rules.noiseBody">忽略 /healthz 等周期性探活请求，减少日志噪声。</span></div><button class="toggle rule-toggle" data-rule-toggle="noise" data-i18n-aria-label="pipeline.toggleNoise" aria-label="切换过滤健康检查"></button></article>
             </div>
           </section>
-          <section class="rule-note panel"><strong>处理顺序</strong><span id="rule-order-summary">日志接收 → 敏感信息脱敏 → 结构化字段提取 → 健康检查过滤 → 日志缓存</span></section>
+          <section class="rule-note panel"><strong data-i18n="rules.noteTitle">处理顺序</strong><span id="rule-order-summary" data-i18n="rules.order">日志接收 → 敏感信息脱敏 → 结构化字段提取 → 健康检查过滤 → 日志缓存</span></section>
         </div>
 
         <div class="page-content page-view hidden" id="commands-view">
-          <section class="page-intro"><div><div class="eyebrow"><span class="eyebrow-line"></span> SERVER COMMANDS</div><h1>服务器指令</h1><p>编排服务器操作步骤，按顺序逐行执行并保留每一步结果。</p></div><div class="intro-actions command-intro-actions"><span class="sync-time"><span class="status-dot"></span> <span id="commands-run-status">就绪</span></span><input id="commands-file-input" type="file" accept=".txt,.sh,.bash,.command,.log" hidden /></div></section>
+          <section class="page-intro"><div><div class="eyebrow"><span class="eyebrow-line"></span> SERVER COMMANDS</div><h1 data-i18n="commands.title">服务器指令</h1><p data-i18n="commands.subtitle">编排服务器操作步骤，按顺序逐行执行并保留每一步结果。</p></div><div class="intro-actions command-intro-actions"><span class="sync-time"><span class="status-dot"></span> <span id="commands-run-status" data-i18n="commands.ready">就绪</span></span><input id="commands-file-input" type="file" accept=".txt,.sh,.bash,.command,.log" hidden /></div></section>
           <section class="commands-columns">
             <div class="commands-column commands-column-left">
               <section class="server-library panel">
-                <div class="panel-heading compact-heading"><div><div class="section-kicker">REUSABLE SERVERS</div><h2>服务器库</h2></div><button class="primary-button compact-button" id="commands-add-server" type="button"><span>＋</span> 新增服务器</button></div>
+                <div class="panel-heading compact-heading"><div><div class="section-kicker">REUSABLE SERVERS</div><h2 data-i18n="commands.library">服务器库</h2></div><button class="primary-button compact-button" id="commands-add-server" type="button"><span>＋</span> <span data-i18n="commands.addServer">新增服务器</span></button></div>
                 <div class="server-card-scroll"><div class="server-card-list" id="server-card-list"></div></div>
               </section>
               <section class="command-file-shelf panel" id="command-file-shelf">
-                <div class="panel-heading compact-heading"><div><div class="section-kicker">FILE STAGING</div><h2>上传文件</h2></div><div class="file-shelf-actions"><span id="command-file-count">0 个文件</span><button class="secondary-button compact-button" id="command-file-select" type="button"><span>⇧</span> 选择文件</button><input id="command-file-input-shelf" type="file" multiple hidden /></div></div>
-                <div class="file-drop-zone" id="command-file-drop-zone" tabindex="0"><span class="file-drop-icon">＋</span><span>将文件拖入这里，或直接 Ctrl+V 粘贴</span><small>文件会显示为缩略图，可拖动到任意指令行中</small></div>
+                <div class="panel-heading compact-heading"><div><div class="section-kicker">FILE STAGING</div><h2 data-i18n="commands.fileShelf">上传文件</h2></div><div class="file-shelf-actions"><span id="command-file-count" data-i18n="commands.fileCountZero">0 个文件</span><button class="secondary-button compact-button" id="command-file-select" type="button"><span>⇧</span> <span data-i18n="commands.selectFiles">选择文件</span></button><input id="command-file-input-shelf" type="file" multiple hidden /></div></div>
+                <div class="file-drop-zone" id="command-file-drop-zone" tabindex="0"><span class="file-drop-icon">＋</span><span data-i18n="commands.dropZone">将文件拖入这里，或直接 Ctrl+V 粘贴</span><small data-i18n="commands.dropZoneHint">文件会显示为缩略图，可拖动到任意指令行中</small></div>
                 <div class="command-file-list" id="command-file-list"></div>
               </section>
             </div>
-            <div class="commands-board panel commands-column-center"><div class="panel-heading compact-heading"><div><div class="section-kicker">COMMAND FLOWS</div><h2>指令集组</h2></div><div class="command-board-actions"><button class="secondary-button compact-button command-board-utility" id="commands-run-all" type="button"><span>▶</span> 运行全部</button><button class="command-favorite-button" id="commands-favorite" type="button" aria-label="收藏指令集组" title="收藏指令集组"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" /></svg></button><button class="primary-button compact-button" id="commands-add-flow" type="button"><span>＋</span> 新增指令集</button></div></div><div class="commands-flow-list" id="commands-flow-list"></div><div class="commands-board-footer"><span>拖动左侧手柄调整顺序，将上方服务器拖到绑定槽</span><span id="commands-flow-count">0 组</span></div></div>
-            <aside class="commands-editor panel commands-column-right" id="commands-editor"><div class="panel-heading compact-heading"><div><div class="section-kicker">FLOW EDITOR</div><h2 id="commands-editor-title">运行指令</h2></div><div class="command-editor-actions"><button class="secondary-button compact-button command-editor-utility" id="commands-import-button" type="button"><span>⇧</span> 导入指令</button><button class="text-button" id="commands-duplicate" type="button">复制</button><button class="danger-button" id="commands-delete" type="button">删除</button></div></div><div class="command-flow-meta"><label>指令集名称<input id="command-flow-name" type="text" placeholder="例如：发布前检查" /></label></div><div class="command-editor-body"><div class="command-editor-divider"><span>运行指令</span><button class="secondary-button compact-button" id="commands-add-line" type="button"><span>＋</span> 添加一行</button></div><div class="command-lines" id="command-lines"></div><div class="command-error hidden" id="command-error"><strong>执行失败</strong><span id="command-error-text"></span></div></div><div class="command-editor-footer"><span id="command-progress">尚未运行</span><button class="primary-button" id="commands-run-current" type="button"><span>▶</span> 从当前行运行</button></div></aside>
+            <div class="commands-board panel commands-column-center"><div class="panel-heading compact-heading"><div><div class="section-kicker">COMMAND FLOWS</div><h2 data-i18n="commands.flows">指令集组</h2></div><div class="command-board-actions"><button class="secondary-button compact-button command-board-utility" id="commands-run-all" type="button"><span>▶</span> <span data-i18n="commands.runAll">运行全部</span></button><button class="command-favorite-button" id="commands-favorite" type="button" data-i18n-aria-label="commands.favorite" aria-label="收藏指令集组" data-i18n-title="commands.favorite" title="收藏指令集组"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" /></svg></button><button class="primary-button compact-button" id="commands-add-flow" type="button"><span>＋</span> <span data-i18n="commands.addFlow">新增指令集</span></button></div></div><div class="commands-flow-list" id="commands-flow-list"></div><div class="commands-board-footer"><span data-i18n="commands.flowFooter">拖动左侧手柄调整顺序，将上方服务器拖到绑定槽</span><span id="commands-flow-count" data-i18n="commands.flowCountZero">0 组</span></div></div>
+            <aside class="commands-editor panel commands-column-right" id="commands-editor"><div class="panel-heading compact-heading"><div><div class="section-kicker">FLOW EDITOR</div><h2 id="commands-editor-title" data-i18n="commands.editor">运行指令</h2></div><div class="command-editor-actions"><button class="secondary-button compact-button command-editor-utility" id="commands-import-button" type="button"><span>⇧</span> <span data-i18n="commands.import">导入指令</span></button><button class="text-button" id="commands-duplicate" type="button" data-i18n="commands.duplicate">复制</button><button class="danger-button" id="commands-delete" type="button" data-i18n="commands.delete">删除</button></div></div><div class="command-flow-meta"><label><span data-i18n="commands.flowName">指令集名称</span><input id="command-flow-name" type="text" data-i18n-placeholder="commands.flowNamePlaceholder" placeholder="例如：发布前检查" /></label></div><div class="command-editor-body"><div class="command-editor-divider"><span data-i18n="commands.runLines">运行指令</span><button class="secondary-button compact-button" id="commands-add-line" type="button"><span>＋</span> <span data-i18n="commands.addLine">添加一行</span></button></div><div class="command-lines" id="command-lines"></div><div class="command-error hidden" id="command-error"><strong data-i18n="commands.runFailed">执行失败</strong><span id="command-error-text"></span></div></div><div class="command-editor-footer"><span id="command-progress" data-i18n="commands.notRunYet">尚未运行</span><button class="primary-button" id="commands-run-current" type="button"><span>▶</span> <span data-i18n="commands.runFromHere">从当前行运行</span></button></div></aside>
           </section>
         </div>
 
@@ -276,10 +277,10 @@
           <section class="page-intro">
             <div>
               <div class="eyebrow"><span class="eyebrow-line"></span> DOZZLE CONNECTIONS</div>
-              <h1>连接管理</h1>
-              <p>管理 Dozzle 实例连接，查看节点状态、容器数量和实时同步情况。</p>
+              <h1 data-i18n="connections.title">连接管理</h1>
+              <p data-i18n="connections.subtitle">管理 Dozzle 实例连接，查看节点状态、容器数量和实时同步情况。</p>
             </div>
-            <button class="primary-button" id="connections-add-node" type="button"><span>＋</span> 添加 Dozzle 节点</button>
+            <button class="primary-button" id="connections-add-node" type="button"><span>＋</span> <span data-i18n="connections.addNode">添加 Dozzle 节点</span></button>
           </section>
           <section class="connections-grid" id="connections-list"></section>
         </div>
@@ -288,36 +289,36 @@
 
     <div class="modal-backdrop hidden" id="add-node-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div class="modal-card">
-        <div class="modal-header"><div><div class="section-kicker" id="modal-kicker">NEW CONNECTION</div><h2 id="modal-title">添加 Dozzle 节点</h2></div><button class="close-button" data-close-modal>×</button></div>
-        <p class="modal-description">录入一个 Dozzle 实例后，日志流会自动纳入统一视图。</p>
+        <div class="modal-header"><div><div class="section-kicker" id="modal-kicker">NEW CONNECTION</div><h2 id="modal-title" data-i18n="modal.addNodeTitle">添加 Dozzle 节点</h2></div><button class="close-button" data-close-modal>×</button></div>
+        <p class="modal-description" data-i18n="modal.addNodeDescription">录入一个 Dozzle 实例后，日志流会自动纳入统一视图。</p>
         <form id="add-node-form">
-          <label>节点名称<input name="name" required placeholder="例如：预发集群" /></label>
-          <label>Dozzle 地址<input name="url" type="url" required placeholder="https://logs.staging.internal" /></label>
-          <div class="form-grid"><label>连接方式<select name="protocol"><option>HTTP / WebSocket</option><option>HTTPS / WebSocket</option><option>HTTP / SSE</option><option>HTTPS / SSE</option></select></label><label>刷新频率<select name="interval"><option>实时</option></select></label></div>
-          <div class="form-note"><span>⌁</span> 服务端会连接 Dozzle 并读取容器日志；节点配置会保存到数据库。</div>
-          <div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>取消</button><button class="primary-button" id="node-submit-button" type="submit">连接并添加</button></div>
+          <label><span data-i18n="modal.nodeName">节点名称</span><input name="name" required data-i18n-placeholder="modal.nodeNamePlaceholder" placeholder="例如：预发集群" /></label>
+          <label><span data-i18n="modal.nodeUrl">Dozzle 地址</span><input name="url" type="url" required placeholder="https://logs.staging.internal" /></label>
+          <div class="form-grid"><label><span data-i18n="modal.protocol">连接方式</span><select name="protocol"><option>HTTP / WebSocket</option><option>HTTPS / WebSocket</option><option>HTTP / SSE</option><option>HTTPS / SSE</option></select></label><label><span data-i18n="modal.interval">刷新频率</span><select name="interval"><option data-i18n="modal.intervalRealtime">实时</option></select></label></div>
+          <div class="form-note"><span>⌁</span> <span data-i18n="modal.nodeNote">服务端会连接 Dozzle 并读取容器日志；节点配置会保存到数据库。</span></div>
+          <div class="modal-actions"><button type="button" class="secondary-button" data-close-modal data-i18n="modal.cancel">取消</button><button class="primary-button" id="node-submit-button" type="submit" data-i18n="modal.connectAndAdd">连接并添加</button></div>
         </form>
       </div>
     </div>
 
     <div class="modal-backdrop hidden" id="ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
       <div class="modal-card ai-settings-card">
-        <div class="modal-header"><div><div class="section-kicker">AI PROVIDERS</div><h2 id="ai-settings-title">模型设置</h2></div><button class="close-button" data-close-ai-modal type="button">×</button></div>
-        <p class="modal-description">管理自定义模型供应商，配置后可在聊天框中快速切换。</p>
+        <div class="modal-header"><div><div class="section-kicker">AI PROVIDERS</div><h2 id="ai-settings-title" data-i18n="ai.title">模型设置</h2></div><button class="close-button" data-close-ai-modal type="button">×</button></div>
+        <p class="modal-description" data-i18n="ai.description">管理自定义模型供应商，配置后可在聊天框中快速切换。</p>
         <div class="ai-settings-layout">
           <aside class="ai-provider-list" id="ai-provider-list"></aside>
           <section class="ai-provider-editor">
             <form id="ai-profile-form">
               <input name="profileId" type="hidden" />
-              <div class="ai-provider-editor-heading"><div><strong id="ai-editor-provider-name">新供应商</strong><span id="ai-editor-provider-status">未启用</span></div><label class="ai-enabled-toggle"><input name="enabled" type="checkbox" checked /><span>已启用</span></label></div>
-              <label>供应商名称<input name="profileName" required placeholder="例如：DeepSeek" /></label>
-              <label>连接方式<select name="connectionType"><option value="openai">OpenAI 接口协议</option><option value="anthropic">Anthropic 接口协议</option></select></label>
+              <div class="ai-provider-editor-heading"><div><strong id="ai-editor-provider-name" data-i18n="ai.newProvider">新供应商</strong><span id="ai-editor-provider-status" data-i18n="ai.notEnabled">未启用</span></div><label class="ai-enabled-toggle"><input name="enabled" type="checkbox" checked /><span data-i18n="ai.enabled">已启用</span></label></div>
+              <label><span data-i18n="ai.providerName">供应商名称</span><input name="profileName" required data-i18n-placeholder="ai.providerNamePlaceholder" placeholder="例如：DeepSeek" /></label>
+              <label><span data-i18n="ai.connectionType">连接方式</span><select name="connectionType"><option value="openai" data-i18n="ai.openaiProtocol">OpenAI 接口协议</option><option value="anthropic" data-i18n="ai.anthropicProtocol">Anthropic 接口协议</option></select></label>
               <label>Base URL<input name="baseURL" type="url" required placeholder="https://api.openai.com/v1" /></label>
               <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="sk-..." /></label>
-              <div class="ai-models-heading"><span>模型列表</span><span>可添加多个模型</span></div>
+              <div class="ai-models-heading"><span data-i18n="ai.modelList">模型列表</span><span data-i18n="ai.modelListHint">可添加多个模型</span></div>
               <div class="ai-model-list" id="ai-model-list"></div>
-              <div class="ai-add-model-row"><input id="ai-new-model-name" name="modelName" type="text" placeholder="模型名称，例如：gpt-4o-mini" /><button class="secondary-button compact-button" id="ai-add-model-button" type="button">＋ 添加模型</button></div>
-              <div class="modal-actions"><button type="button" class="danger-button compact-button" id="delete-ai-profile">删除供应商</button><button type="button" class="secondary-button" data-close-ai-modal>取消</button><button class="primary-button" type="submit">保存并切换</button></div>
+              <div class="ai-add-model-row"><input id="ai-new-model-name" name="modelName" type="text" data-i18n-placeholder="ai.modelNamePlaceholder" placeholder="模型名称，例如：gpt-4o-mini" /><button class="secondary-button compact-button" id="ai-add-model-button" type="button"><span>＋</span> <span data-i18n="ai.addModel">添加模型</span></button></div>
+              <div class="modal-actions"><button type="button" class="danger-button compact-button" id="delete-ai-profile" data-i18n="ai.deleteProvider">删除供应商</button><button type="button" class="secondary-button" data-close-ai-modal data-i18n="modal.cancel">取消</button><button class="primary-button" type="submit" data-i18n="ai.saveAndSwitch">保存并切换</button></div>
             </form>
           </section>
         </div>
@@ -326,55 +327,56 @@
 
     <div class="modal-backdrop hidden" id="app-settings-modal" role="dialog" aria-modal="true" aria-labelledby="app-settings-title">
       <div class="modal-card app-settings-card">
-        <div class="modal-header"><div><div class="section-kicker">APPLICATION SETTINGS</div><h2 id="app-settings-title">系统设置</h2></div><div class="modal-header-actions"><a class="settings-reveal-link hidden" id="settings-config-reveal" href="#" role="button">打开文件目录</a><button class="close-button" data-close-app-settings type="button">×</button></div></div>
-        <p class="modal-description">配置运行环境、配置存储和管理员 key。</p>
+        <div class="modal-header"><div><div class="section-kicker">APPLICATION SETTINGS</div><h2 id="app-settings-title" data-i18n="settings.title">系统设置</h2></div><div class="modal-header-actions"><a class="settings-reveal-link hidden" id="settings-config-reveal" href="#" role="button" data-i18n="settings.revealConfig">打开文件目录</a><button class="close-button" data-close-app-settings type="button">×</button></div></div>
+        <p class="modal-description" data-i18n="settings.description">配置运行环境、配置存储和管理员 key。</p>
         <form id="app-settings-form">
-          <label>运行环境<select name="environment"><option value="development">开发环境</option><option value="test">测试环境</option><option value="staging">预发布环境</option><option value="production">生产环境</option></select></label>
+          <label><span data-i18n="settings.environment">运行环境</span><select name="environment"><option value="development" data-i18n="settings.env.development">开发环境</option><option value="test" data-i18n="settings.env.test">测试环境</option><option value="staging" data-i18n="settings.env.staging">预发布环境</option><option value="production" data-i18n="settings.env.production">生产环境</option></select></label>
           <div class="settings-section" id="settings-config-storage">
-            <div class="form-note"><span>⌁</span> <span id="settings-config-note">节点与模型保存在程序目录下的 <code>data</code> 文件夹，整个目录拷到别的机器即可带走配置。保存模型密钥的文件含明文凭据，请勿分享或同步到公开位置。</span></div>
+            <div class="form-note"><span>⌁</span> <span id="settings-config-note" data-i18n-html="settings.configNote">节点与模型保存在程序目录下的 <code>data</code> 文件夹，整个目录拷到别的机器即可带走配置。保存模型密钥的文件含明文凭据，请勿分享或同步到公开位置。</span></div>
             <div class="settings-actions" id="settings-config-actions">
-              <button type="button" class="secondary-button compact-button" id="settings-config-export">导出配置</button>
-              <label class="secondary-button compact-button settings-file-button" for="settings-config-import">导入配置</label>
+              <button type="button" class="secondary-button compact-button" id="settings-config-export" data-i18n="settings.exportConfig">导出配置</button>
+              <label class="secondary-button compact-button settings-file-button" for="settings-config-import" data-i18n="settings.importConfig">导入配置</label>
               <input type="file" id="settings-config-file" accept="application/json,.json" class="hidden" />
             </div>
           </div>
           <div class="settings-section">
-            <div class="settings-section-heading"><strong>管理员 key</strong><span id="settings-admin-status">未配置</span></div>
-            <label>当前管理员 key（修改已有设置时填写）<input name="currentAdminToken" type="password" autocomplete="current-password" placeholder="首次配置可留空" /></label>
-            <label>新的管理员 key<input name="adminToken" type="password" autocomplete="new-password" placeholder="留空保持不变" /></label>
-            <div class="settings-actions"><button type="button" class="primary-button compact-button" id="settings-admin-save">保存管理员 key</button></div>
+            <div class="settings-section-heading"><strong data-i18n="settings.adminKey">管理员 key</strong><span id="settings-admin-status" data-i18n="settings.notConfigured">未配置</span></div>
+            <label><span data-i18n="settings.currentAdminKey">当前管理员 key（修改已有设置时填写）</span><input name="currentAdminToken" type="password" autocomplete="current-password" data-i18n-placeholder="settings.currentAdminKeyPlaceholder" placeholder="首次配置可留空" /></label>
+            <label><span data-i18n="settings.newAdminKey">新的管理员 key</span><input name="adminToken" type="password" autocomplete="new-password" data-i18n-placeholder="settings.newAdminKeyPlaceholder" placeholder="留空保持不变" /></label>
+            <div class="settings-actions"><button type="button" class="primary-button compact-button" id="settings-admin-save" data-i18n="settings.saveAdminKey">保存管理员 key</button></div>
           </div>
-          <div class="form-note"><span>⌁</span> 密码和 key 不会回显。</div>
-          <div class="modal-actions"><button type="button" class="secondary-button" data-close-app-settings>取消</button><button class="primary-button" type="submit">保存运行环境</button></div>
+          <div class="form-note"><span>⌁</span> <span data-i18n="settings.noEcho">密码和 key 不会回显。</span></div>
+          <div class="modal-actions"><button type="button" class="secondary-button" data-close-app-settings data-i18n="modal.cancel">取消</button><button class="primary-button" type="submit" data-i18n="settings.saveEnvironment">保存运行环境</button></div>
         </form>
       </div>
     </div>
 
     <div class="modal-backdrop ai-admin-token-modal hidden" id="ai-admin-token-modal" role="dialog" aria-modal="true" aria-labelledby="ai-admin-token-title">
       <div class="modal-card ai-admin-token-card">
-        <div class="modal-header"><div><div class="section-kicker">ADMIN ACCESS</div><h2 id="ai-admin-token-title">输入管理令牌</h2></div><button class="close-button" data-close-ai-token type="button">×</button></div>
-        <p class="modal-description">保存或删除模型配置需要管理员令牌。</p>
+        <div class="modal-header"><div><div class="section-kicker">ADMIN ACCESS</div><h2 id="ai-admin-token-title" data-i18n="token.title">输入管理令牌</h2></div><button class="close-button" data-close-ai-token type="button">×</button></div>
+        <p class="modal-description" data-i18n="token.description">保存或删除模型配置需要管理员令牌。</p>
         <form id="ai-admin-token-form">
-          <label>管理令牌<input id="ai-admin-token-input" type="password" autocomplete="off" required placeholder="LOG_AGENT_ADMIN_TOKEN" /></label>
-          <div class="modal-actions"><button type="button" class="secondary-button" data-close-ai-token>取消</button><button class="primary-button" type="submit">确定</button></div>
+          <label><span data-i18n="token.label">管理令牌</span><input id="ai-admin-token-input" type="password" autocomplete="off" required placeholder="LOG_AGENT_ADMIN_TOKEN" /></label>
+          <div class="modal-actions"><button type="button" class="secondary-button" data-close-ai-token data-i18n="modal.cancel">取消</button><button class="primary-button" type="submit" data-i18n="token.confirm">确定</button></div>
         </form>
       </div>
     </div>
 
     <div class="modal-backdrop hidden" id="command-favorites-modal" role="dialog" aria-modal="true" aria-labelledby="command-favorites-title">
       <div class="modal-card command-favorites-card">
-        <div class="modal-header"><div><div class="section-kicker">COMMAND GROUP FAVORITES</div><h2 id="command-favorites-title">收藏指令集组</h2></div><button class="close-button" data-close-command-favorites type="button">×</button></div>
-        <p class="modal-description">收藏会保存当前整个指令集组的独立快照。还原后可继续修改，不会改变收藏原件。</p>
+        <div class="modal-header"><div><div class="section-kicker">COMMAND GROUP FAVORITES</div><h2 id="command-favorites-title" data-i18n="favorites.title">收藏指令集组</h2></div><button class="close-button" data-close-command-favorites type="button">×</button></div>
+        <p class="modal-description" data-i18n="favorites.description">收藏会保存当前整个指令集组的独立快照。还原后可继续修改，不会改变收藏原件。</p>
         <form id="command-favorite-form">
-          <label>收藏名称<div class="command-favorite-name-row"><input id="command-favorite-name" type="text" required maxlength="80" placeholder="例如：生产环境发布流程" /><button class="primary-button" type="submit">收藏当前组</button></div></label>
+          <label><span data-i18n="favorites.name">收藏名称</span><div class="command-favorite-name-row"><input id="command-favorite-name" type="text" required maxlength="80" data-i18n-placeholder="favorites.namePlaceholder" placeholder="例如：生产环境发布流程" /><button class="primary-button" type="submit" data-i18n="favorites.saveCurrent">收藏当前组</button></div></label>
         </form>
-        <div class="command-favorites-heading"><strong>已收藏</strong><span>最多保留 50 个</span></div>
+        <div class="command-favorites-heading"><strong data-i18n="favorites.saved">已收藏</strong><span data-i18n="favorites.savedHint">最多保留 50 个</span></div>
         <div class="command-favorites-list" id="command-favorites-list"></div>
-        <div class="modal-actions"><button type="button" class="secondary-button" data-close-command-favorites>关闭</button></div>
+        <div class="modal-actions"><button type="button" class="secondary-button" data-close-command-favorites data-i18n="favorites.close">关闭</button></div>
       </div>
     </div>
 
-    <div class="toast hidden" id="toast"><span class="toast-icon">✓</span><span id="toast-message">已更新</span></div>
+    <div class="toast hidden" id="toast"><span class="toast-icon">✓</span><span id="toast-message" data-i18n="toast.updated">已更新</span></div>
+    <script src="i18n.js?v=i18n-1"></script>
     <script src="app.js?v=scope-invariant-69"></script>
     <script src="assistant-ui.js?v=modal-dismiss-3"></script>
     <script src="bootstrap.js?v=admin-token-deadlock-4"></script>

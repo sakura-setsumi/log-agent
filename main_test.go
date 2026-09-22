@@ -500,7 +500,7 @@ func TestAIAttachmentsBuildMultimodalProviderMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize attachments: %v", err)
 	}
-	messages := openAIProviderMessages([]aiMessage{{Role: "user", Content: "请分析附件"}}, attachments)
+	messages := openAIProviderMessages([]aiMessage{{Role: "user", Content: "请分析附件"}}, attachments, "zh")
 	if len(messages) != 1 || messages[0].Role != "user" {
 		t.Fatalf("unexpected provider messages: %#v", messages)
 	}

@@ -31,7 +31,7 @@ import (
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
 //
-//go:embed index.html styles.css app.js assistant-ui.js bootstrap.js favicon.png ai-icon.png loading.gif
+//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js favicon.png ai-icon.png loading.gif
 var frontend embed.FS
 
 const (
@@ -94,7 +94,32 @@ type commandExecutionRequest struct {
 
 type commandHostKeyError struct{ Fingerprint string }
 
-func (e *commandHostKeyError) Error() string { return "需要确认服务器指纹" }
+func (e *commandHostKeyError) Error() string { return "host_key_confirmation" }
+
+// apiError carries a stable machine-readable code plus an optional technical
+// detail. Handlers write it as {"error": code, "detail": detail} and the
+// dashboard renders it in the UI language, so server copy never needs its own
+// translation table.
+type apiError struct {
+	code   string
+	detail string
+}
+
+func (e *apiError) Error() string {
+	if e.detail != "" {
+		return e.code + ": " + e.detail
+	}
+	return e.code
+}
+
+func writeAPIError(w http.ResponseWriter, status int, err error) {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		writeJSON(w, status, map[string]string{"error": apiErr.code, "detail": apiErr.detail})
+		return
+	}
+	writeJSON(w, status, map[string]string{"error": "internal_error", "detail": err.Error()})
+}
 
 var commandConnectionDial = dialCommandSSH
 var commandExecutionRun = runCommandSSH
@@ -144,6 +169,9 @@ type aiChatRequest struct {
 	Logs        []LogEntry     `json:"logs"`
 	Attachments []aiAttachment `json:"attachments,omitempty"`
 	Config      *aiProfile     `json:"config,omitempty"`
+	// Lang is the dashboard UI language ("en"/"zh"); the model is asked to
+	// answer in the same language.
+	Lang string `json:"lang,omitempty"`
 }
 
 type aiAttachment struct {
@@ -307,7 +335,7 @@ func main() {
 	// Refuse to start anywhere the configuration would be discarded on exit
 	// (notably `go run`, which executes from the system temp directory).
 	if err := validateConfigDir(); err != nil {
-		log.Fatalf("无法启动：%v", err)
+		log.Fatalf("failed to start: %v", err)
 	}
 	s := newServer()
 	address := listenAddress()
@@ -376,13 +404,13 @@ func (s *server) handleCommandConnectionTest(w http.ResponseWriter, r *http.Requ
 	}
 	var request commandConnectionRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 32<<10)).Decode(&request); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "连接参数无效"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	host := strings.TrimSpace(request.Host)
 	port := strings.TrimSpace(request.Port)
 	if host == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请填写服务器地址"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_host"})
 		return
 	}
 	if port == "" {
@@ -390,7 +418,7 @@ func (s *server) handleCommandConnectionTest(w http.ResponseWriter, r *http.Requ
 	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65535 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器端口无效"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_port"})
 		return
 	}
 	request.Host = host
@@ -399,11 +427,11 @@ func (s *server) handleCommandConnectionTest(w http.ResponseWriter, r *http.Requ
 	request.Auth = strings.TrimSpace(request.Auth)
 	request.Fingerprint = strings.TrimSpace(request.Fingerprint)
 	if request.User == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请填写用户名"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_user"})
 		return
 	}
 	if strings.TrimSpace(request.Secret) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请选择密钥文件或填写密码"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_secret"})
 		return
 	}
 	if err := commandConnectionDial(request); err != nil {
@@ -412,7 +440,7 @@ func (s *server) handleCommandConnectionTest(w http.ResponseWriter, r *http.Requ
 			writeJSON(w, http.StatusPreconditionRequired, map[string]string{"error": hostKeyError.Error(), "fingerprint": hostKeyError.Fingerprint})
 			return
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "连接失败：" + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "connect_failed", "detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -433,7 +461,7 @@ func newCommandSSHClient(request commandConnectionRequest) (*ssh.Client, error) 
 	} else {
 		signer, err := ssh.ParsePrivateKey([]byte(request.Secret))
 		if err != nil {
-			return nil, fmt.Errorf("密钥文件无效：%w", err)
+			return nil, fmt.Errorf("invalid key file: %w", err)
 		}
 		authMethod = ssh.PublicKeys(signer)
 	}
@@ -443,7 +471,7 @@ func newCommandSSHClient(request commandConnectionRequest) (*ssh.Client, error) 
 			return &commandHostKeyError{Fingerprint: fingerprint}
 		}
 		if subtle.ConstantTimeCompare([]byte(request.Fingerprint), []byte(fingerprint)) != 1 {
-			return fmt.Errorf("服务器指纹不匹配，当前为 %s", fingerprint)
+			return fmt.Errorf("server fingerprint mismatch (server presents %s)", fingerprint)
 		}
 		return nil
 	}
@@ -461,12 +489,12 @@ func (s *server) handleCommandFileUpload(w http.ResponseWriter, r *http.Request)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 128<<20)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "读取上传文件失败：" + err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "upload_read_failed", "detail": err.Error()})
 		return
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请选择要上传的文件"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_file"})
 		return
 	}
 	defer file.Close()
@@ -475,12 +503,12 @@ func (s *server) handleCommandFileUpload(w http.ResponseWriter, r *http.Request)
 		request.Port = "22"
 	}
 	if request.Host == "" || request.User == "" || request.Secret == "" || request.Fingerprint == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器连接信息不完整，请重新测试连接"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "incomplete_connection"})
 		return
 	}
 	filename := path.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
 	if filename == "." || filename == "/" || filename == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "文件名无效"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_filename"})
 		return
 	}
 	homeDirectory := path.Join("/home", request.User)
@@ -492,30 +520,30 @@ func (s *server) handleCommandFileUpload(w http.ResponseWriter, r *http.Request)
 		destination = homeDirectory
 	}
 	if strings.ContainsRune(destination, '\x00') {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器位置无效"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_destination"})
 		return
 	}
 	destination = path.Clean(destination)
 	if destination != homeDirectory && !strings.HasPrefix(destination, homeDirectory+"/") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器位置必须位于 " + homeDirectory + " 内"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "destination_outside_home", "detail": homeDirectory})
 		return
 	}
 	remotePath := path.Join(destination, filename)
 	client, err := newCommandSSHClient(request)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "SSH 连接失败：" + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ssh_connect_failed", "detail": err.Error()})
 		return
 	}
 	defer client.Close()
 	session, err := client.NewSession()
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "创建 SSH 会话失败：" + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ssh_session_failed", "detail": err.Error()})
 		return
 	}
 	defer session.Close()
 	session.Stdin = file
 	if err := session.Run("umask 077 && mkdir -p -- " + shellQuote(destination) + " && cat > " + shellQuote(remotePath)); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "写入远程文件失败：" + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "remote_write_failed", "detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": remotePath})
@@ -561,7 +589,7 @@ func splitCommandWords(command string) ([]string, error) {
 		current.WriteRune(char)
 	}
 	if escaped || quote != 0 {
-		return nil, errors.New("指令中的引号或转义不完整")
+		return nil, &apiError{code: "unbalanced_quotes"}
 	}
 	flush()
 	return words, nil
@@ -587,14 +615,14 @@ func commandPathInsideHome(value, home string) bool {
 
 func validateRemoteCommand(command, user string) error {
 	if strings.ContainsAny(command, "`$;&|<>\r\n") {
-		return errors.New("不允许使用重定向、管道、命令拼接或变量展开")
+		return &apiError{code: "forbidden_syntax"}
 	}
 	words, err := splitCommandWords(command)
 	if err != nil {
 		return err
 	}
 	if len(words) == 0 {
-		return errors.New("指令不能为空")
+		return &apiError{code: "empty_command"}
 	}
 	if (words[0] == "systemctl" && len(words) == 3 && words[1] == "stop") || (words[0] == "docker" && len(words) == 3 && words[1] == "stop") {
 		return nil
@@ -611,7 +639,7 @@ func validateRemoteCommand(command, user string) error {
 	}
 	fileCommands := map[string]bool{"mv": true, "cp": true, "rm": true, "mkdir": true, "touch": true, "chmod": true}
 	if !fileCommands[words[0]] {
-		return fmt.Errorf("不允许执行 %q；仅支持主目录文件操作、只读命令和停止服务", words[0])
+		return &apiError{code: "command_not_allowed", detail: words[0]}
 	}
 	home := commandHomeDirectory(user)
 	start := 1
@@ -630,11 +658,11 @@ func validateRemoteCommand(command, user string) error {
 		}
 		pathCount++
 		if !commandPathInsideHome(word, home) {
-			return fmt.Errorf("文件操作仅限 %s 目录内", home)
+			return &apiError{code: "path_outside_home", detail: home}
 		}
 	}
 	if pathCount == 0 {
-		return errors.New("文件操作缺少有效路径")
+		return &apiError{code: "missing_path"}
 	}
 	return nil
 }
@@ -667,7 +695,7 @@ func (output *limitedCommandOutput) String() string {
 	defer output.mu.Unlock()
 	result := string(output.data)
 	if output.truncated {
-		result += "\n[输出过长，已截断]"
+		result += "\n[output truncated]"
 	}
 	return result
 }
@@ -692,7 +720,7 @@ func runCommandSSH(request commandExecutionRequest) (string, error) {
 		return output.String(), err
 	case <-time.After(2 * time.Minute):
 		_ = session.Close()
-		return output.String(), errors.New("命令执行超时（限制 2 分钟）")
+		return output.String(), &apiError{code: "command_timeout"}
 	}
 }
 
@@ -703,7 +731,7 @@ func (s *server) handleCommandExecute(w http.ResponseWriter, r *http.Request) {
 	}
 	var request commandExecutionRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 128<<10)).Decode(&request); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "执行参数无效"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	request.Host, request.Port, request.User, request.Auth, request.Fingerprint, request.Command = strings.TrimSpace(request.Host), strings.TrimSpace(request.Port), strings.TrimSpace(request.User), strings.TrimSpace(request.Auth), strings.TrimSpace(request.Fingerprint), strings.TrimSpace(request.Command)
@@ -711,16 +739,16 @@ func (s *server) handleCommandExecute(w http.ResponseWriter, r *http.Request) {
 		request.Port = "22"
 	}
 	if request.Host == "" || request.User == "" || request.Secret == "" || request.Fingerprint == "" || request.Command == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "服务器连接信息或指令不完整"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "incomplete_execution"})
 		return
 	}
 	if err := validateRemoteCommand(request.Command, request.User); err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusForbidden, err)
 		return
 	}
 	output, err := commandExecutionRun(request)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "命令执行失败：" + err.Error(), "output": output})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "execution_failed", "detail": err.Error(), "output": output})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "output": output})
@@ -1165,7 +1193,7 @@ func (s *server) handleContainerHistorySearch(w http.ResponseWriter, r *http.Req
 		if errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
 		}
-		writeJSON(w, status, map[string]string{"error": "筛选完整时间范围日志失败: " + err.Error()})
+		writeJSON(w, status, map[string]string{"error": "history_search_failed", "detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, containerHistorySearchResponse{Logs: logs})
@@ -1205,7 +1233,7 @@ func (s *server) handleContainerHistoryPage(w http.ResponseWriter, r *http.Reque
 	defer cancel()
 	oldest, count, logs, err := s.fetchDozzleHistorySearchPage(ctx, node, node.hostID, containerID, from, to, "")
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "加载更早日志失败: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "history_page_failed", "detail": err.Error()})
 		return
 	}
 	hasMore := count == dozzleHistoryPageSize && !oldest.IsZero() && oldest.After(from)
@@ -1901,6 +1929,13 @@ func (s *server) loadAIProfileSecret(id int64, modelName string) (aiProfile, err
 	return normalizeAIProfile(profile), nil
 }
 
+// aiWantsChinese reports whether the chat request's UI language tag asks for
+// Chinese; anything else (including empty) defaults to English, matching the
+// dashboard's shipped default.
+func aiWantsChinese(lang string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(lang)), "zh")
+}
+
 func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -1948,11 +1983,15 @@ func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	answerLanguage := "Answer in English unless the user asks otherwise."
+	if aiWantsChinese(request.Lang) {
+		answerLanguage = "Answer in Chinese unless the user asks otherwise."
+	}
 	messages := []aiMessage{{
 		Role:    "system",
-		Content: "You are a log analysis assistant. Analyze the supplied logs carefully. Do not invent facts. If the logs are insufficient, say what is missing. Answer in Chinese unless the user asks otherwise.",
+		Content: "You are a log analysis assistant. Analyze the supplied logs carefully. Do not invent facts. If the logs are insufficient, say what is missing. " + answerLanguage,
 	}}
-	if contextMessage := formatAIContext(request.Logs); contextMessage != "" {
+	if contextMessage := formatAIContext(request.Logs, request.Lang); contextMessage != "" {
 		messages = append(messages, aiMessage{Role: "user", Content: contextMessage})
 	}
 	for _, message := range request.Messages {
@@ -1989,13 +2028,13 @@ func (s *server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 			System    string              `json:"system,omitempty"`
 			Messages  []aiProviderMessage `json:"messages"`
 			MaxTokens int                 `json:"max_tokens"`
-		}{Model: profile.Model, System: systemPrompt, Messages: anthropicProviderMessages(anthropicMessages, attachments), MaxTokens: 4096}
+		}{Model: profile.Model, System: systemPrompt, Messages: anthropicProviderMessages(anthropicMessages, attachments, request.Lang), MaxTokens: 4096}
 		body, err = json.Marshal(payload)
 	} else {
 		payload := struct {
 			Model    string              `json:"model"`
 			Messages []aiProviderMessage `json:"messages"`
-		}{Model: profile.Model, Messages: openAIProviderMessages(messages, attachments)}
+		}{Model: profile.Model, Messages: openAIProviderMessages(messages, attachments, request.Lang)}
 		body, err = json.Marshal(payload)
 	}
 	if err != nil {
@@ -2108,12 +2147,16 @@ func normalizeAIProfile(profile aiProfile) aiProfile {
 	return profile
 }
 
-func formatAIContext(logs []LogEntry) string {
+func formatAIContext(logs []LogEntry, lang string) string {
 	if len(logs) == 0 {
 		return ""
 	}
 	var builder strings.Builder
-	builder.WriteString("以下是用户选中的日志上下文：\n")
+	if aiWantsChinese(lang) {
+		builder.WriteString("以下是用户选中的日志上下文：\n")
+	} else {
+		builder.WriteString("Below is the log context the user selected:\n")
+	}
 	for index, entry := range logs {
 		message := entry.Message
 		if len([]rune(message)) > 4000 {
@@ -2170,7 +2213,7 @@ func normalizeAIAttachments(attachments []aiAttachment) ([]aiAttachment, error) 
 	return normalized, nil
 }
 
-func aiTextAttachmentContext(attachments []aiAttachment) string {
+func aiTextAttachmentContext(attachments []aiAttachment, lang string) string {
 	var builder strings.Builder
 	for _, attachment := range attachments {
 		if !isAITextAttachment(attachment.Type) {
@@ -2184,12 +2227,16 @@ func aiTextAttachmentContext(attachments []aiAttachment) string {
 		if len([]rune(text)) > 12000 {
 			text = string([]rune(text)[:12000]) + "…"
 		}
-		fmt.Fprintf(&builder, "\n\n附件文件：%s\n%s", attachment.Name, text)
+		if aiWantsChinese(lang) {
+			fmt.Fprintf(&builder, "\n\n附件文件：%s\n%s", attachment.Name, text)
+		} else {
+			fmt.Fprintf(&builder, "\n\nAttached file: %s\n%s", attachment.Name, text)
+		}
 	}
 	return builder.String()
 }
 
-func openAIProviderMessages(messages []aiMessage, attachments []aiAttachment) []aiProviderMessage {
+func openAIProviderMessages(messages []aiMessage, attachments []aiAttachment, lang string) []aiProviderMessage {
 	providerMessages := make([]aiProviderMessage, 0, len(messages))
 	for _, message := range messages {
 		providerMessages = append(providerMessages, aiProviderMessage{Role: message.Role, Content: message.Content})
@@ -2209,7 +2256,7 @@ func openAIProviderMessages(messages []aiMessage, attachments []aiAttachment) []
 		target = len(providerMessages) - 1
 	}
 	text, _ := providerMessages[target].Content.(string)
-	parts := []map[string]any{{"type": "text", "text": text + aiTextAttachmentContext(attachments)}}
+	parts := []map[string]any{{"type": "text", "text": text + aiTextAttachmentContext(attachments, lang)}}
 	for _, attachment := range attachments {
 		if isAIImageAttachment(attachment.Type) {
 			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]string{"url": "data:" + attachment.Type + ";base64," + attachment.Data}})
@@ -2219,7 +2266,7 @@ func openAIProviderMessages(messages []aiMessage, attachments []aiAttachment) []
 	return providerMessages
 }
 
-func anthropicProviderMessages(messages []aiMessage, attachments []aiAttachment) []aiProviderMessage {
+func anthropicProviderMessages(messages []aiMessage, attachments []aiAttachment, lang string) []aiProviderMessage {
 	providerMessages := make([]aiProviderMessage, 0, len(messages))
 	for _, message := range messages {
 		providerMessages = append(providerMessages, aiProviderMessage{Role: message.Role, Content: message.Content})
@@ -2239,7 +2286,7 @@ func anthropicProviderMessages(messages []aiMessage, attachments []aiAttachment)
 		target = len(providerMessages) - 1
 	}
 	text, _ := providerMessages[target].Content.(string)
-	parts := []map[string]any{{"type": "text", "text": text + aiTextAttachmentContext(attachments)}}
+	parts := []map[string]any{{"type": "text", "text": text + aiTextAttachmentContext(attachments, lang)}}
 	for _, attachment := range attachments {
 		if isAIImageAttachment(attachment.Type) {
 			parts = append(parts, map[string]any{"type": "image", "source": map[string]string{"type": "base64", "media_type": attachment.Type, "data": attachment.Data}})
@@ -2260,7 +2307,7 @@ func requireFileBackend(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	writeJSON(w, http.StatusForbidden, map[string]string{
-		"error": "该页面未在本机打开，节点配置保存在浏览器本地",
+		"error": "browser_storage_only",
 	})
 	return false
 }

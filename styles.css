@@ -41,7 +41,7 @@ button { color: inherit; cursor: pointer; }
    rather than to the label: as a padding-bottom on the label it also shifted the
    text up by half of it (align-items:center centers boxes), which left
    "Dozzle 节点" sitting ~5px above the count and the 多选 toggle next to it. */
-.workspace-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 30px; margin-bottom: 10px; }.workspace-heading .sidebar-label { padding-bottom: 0; }.node-total { margin-right: 12px; color: var(--muted-2); font-size:12px; font-variant-numeric: tabular-nums; }
+.workspace-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 30px; margin-bottom: 10px; }.workspace-heading .sidebar-label { padding-bottom: 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.node-total { margin-right: 12px; color: var(--muted-2); font-size:12px; font-variant-numeric: tabular-nums; }
 /* Node multi-select switch. It sits in the sidebar heading; the mobile
    breakpoint below hides the label so only the switch survives the collapse. */
 .workspace-heading-actions { display: flex; align-items: center; }

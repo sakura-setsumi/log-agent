@@ -1,5 +1,6 @@
 // This file is loaded after the core and assistant modules. It is the sole
 // application bootstrap point, which keeps cross-module initialization order explicit.
+initializeLanguage();
 initializeTheme();
 restoreSelection();
 // Containers dropped from 连接管理 are a display choice of their own, so they

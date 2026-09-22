@@ -164,7 +164,10 @@ func TestE2ELogStreamPauseFreezesAndResumes(t *testing.T) {
 		t.Fatalf("wait while paused: %v", err)
 	}
 	pausedView := readLogStreamPauseView(t, browserContext)
-	if pausedView.Processed != "1" || !pausedView.Paused || pausedView.NewLogCount != 0 || pausedView.StreamStatus != "已暂停接收" {
+	// The label is read from the page's own language table: the UI ships English
+	// by default and switches to Chinese, so hardcoding either wording here would
+	// break the moment the copy changes.
+	if pausedView.Processed != "1" || !pausedView.Paused || pausedView.NewLogCount != 0 || pausedView.StreamStatus != i18nLabel(t, browserContext, "stream.status.paused") {
 		t.Fatalf("paused view changed while backend received a log: %+v", pausedView)
 	}
 
@@ -216,7 +219,7 @@ func TestE2ELogStreamPauseFreezesAndResumes(t *testing.T) {
 	if err := chromedp.Run(browserContext, chromedp.Text(`#stream-status`, &pausedStatus, chromedp.ByQuery)); err != nil {
 		t.Fatalf("read stream status after burst: %v", err)
 	}
-	if pausedStatus != "已暂停接收" {
+	if pausedStatus != i18nLabel(t, browserContext, "stream.status.paused") {
 		t.Fatalf("dashboard did not remain interactive after burst, status=%q", pausedStatus)
 	}
 	waitForSubscriberCount(t, s, 0)
@@ -541,6 +544,19 @@ func firstExistingPath(paths ...string) string {
 	return ""
 }
 
+// i18nLabel reads a copy string out of the page's own language table. The UI ships
+// English and can switch to Chinese, so a test that hardcoded either wording would
+// break the moment the copy changes -- asking the page keeps the assertion about
+// behaviour instead.
+func i18nLabel(t *testing.T, ctx context.Context, key string) string {
+	t.Helper()
+	var label string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`t('`+key+`')`, &label)); err != nil {
+		t.Fatalf("read i18n label %q: %v", key, err)
+	}
+	return label
+}
+
 func writeE2EPixel(t *testing.T) string {
 	t.Helper()
 	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLq7wAAAABJRU5ErkJggg==")
@@ -562,6 +578,8 @@ func writeE2EPixel(t *testing.T) string {
 type storageModeView struct {
 	Mode            string `json:"mode"`
 	Note            string `json:"note"`
+	BrowserNote     string `json:"browserNote"`
+	FileNote        string `json:"fileNote"`
 	SectionHidden   bool   `json:"sectionHidden"`
 	ActionsHidden   bool   `json:"actionsHidden"`
 	RevealPresent   bool   `json:"revealPresent"`
@@ -644,6 +662,8 @@ func TestE2EStorageModeFollowsRequestOrigin(t *testing.T) {
 			chromedp.Sleep(2*time.Second),
 			chromedp.Evaluate(`JSON.stringify({
 				note: document.querySelector('#settings-config-note')?.textContent || '',
+				browserNote: t('settings.configNoteBrowser'),
+				fileNote: t('settings.configNotePlain'),
 				sectionHidden: !!document.querySelector('#settings-config-storage')?.classList.contains('hidden'),
 				actionsHidden: !!document.querySelector('#settings-config-actions')?.classList.contains('hidden'),
 				revealPresent: !!document.querySelector('#settings-config-reveal'),
@@ -729,8 +749,10 @@ func TestE2EStorageModeFollowsRequestOrigin(t *testing.T) {
 		if !view.RevealHidden {
 			t.Fatal("remote caller must not see the file-manager link")
 		}
-		if !strings.Contains(view.Note, "浏览器") {
-			t.Fatalf("remote caller note must explain browser storage, got %q", view.Note)
+		// The copy follows the UI language (English by default), so compare it
+		// against the page's own dictionary instead of hard-coding a language.
+		if view.Note != view.BrowserNote || view.Note == view.FileNote {
+			t.Fatalf("remote caller note must be the browser-storage wording: %+v", view)
 		}
 		// Export and import are storage-agnostic (they read and write whatever
 		// backend is active), so they stay visible in both modes.
@@ -2136,7 +2158,9 @@ func TestE2EContainerClicksDoNotWidenNodeSelection(t *testing.T) {
 		t.Fatalf("expected the container click to move the selection to node-b, got %v (%+v)", single.Active, single)
 	}
 	// The caption is the second half of the report: it must not claim two nodes.
-	if strings.Contains(single.Caption, "已选 2 个") {
+	// Copy follows the UI language, so compare against the page's dictionary.
+	multiCaption := strings.ReplaceAll(i18nLabel(t, ctx, "stream.captionNodes"), "{count}", "2")
+	if strings.Contains(single.Caption, multiCaption) {
 		t.Fatalf("detail caption still reports a multi-node selection: %q (%+v)", single.Caption, single)
 	}
 	// And the earlier node's container scope must have been dropped, not left

@@ -306,7 +306,7 @@ function hideConnectionContainer(key) {
   dropContainersFromScope([key]);
   // renderNodes() repaints the sidebar tree and cascades into the card list.
   renderNodes();
-  showToast('已从列表去掉；卡片上的「恢复」可放回');
+  showToast(t('connections.toast.dropped'));
 }
 
 function restoreConnectionContainers(nodeId) {
@@ -352,7 +352,7 @@ function removeOtherConnectionContainers(nodeId) {
   persistHiddenContainers();
   dropContainersFromScope(dropped);
   renderNodes();
-  showToast(dropped.length ? `已保留 ${kept.size} 个，其余 ${dropped.length} 个已去掉` : '没有需要去掉的容器');
+  showToast(dropped.length ? t('connections.toast.keptOthers', { kept: kept.size, dropped: dropped.length }) : t('connections.toast.nothingDropped'));
 }
 
 function normalizeAIProvider(profile, index = 0) {
@@ -428,15 +428,15 @@ function syncActiveAssistantSession() {
   const session = activeAssistantSession();
   if (!session) return;
   Object.assign(session, copyAssistantSessionData({ context: state.assistantContext, messages: state.assistantMessages }), { activeLogId: state.activeAnalysisLogId, updatedAt: Date.now() });
-  if (session.title === '新对话' && session.messages.length) session.title = String(session.messages.find((message) => message.role === 'user')?.content || '新对话').replace(/\s+/g, ' ').slice(0, 80);
+  if (session.title === t('assistant.defaultSessionTitle') && session.messages.length) session.title = String(session.messages.find((message) => message.role === 'user')?.content || t('assistant.defaultSessionTitle')).replace(/\s+/g, ' ').slice(0, 80);
   state.assistantSessions = [session, ...state.assistantSessions.filter((item) => item.id !== session.id)].slice(0, maxAssistantSessions);
   persistAssistantSessions();
 }
 
-function startAssistantSession({ context = [], activeLogId = '', title = '新对话' } = {}) {
+function startAssistantSession({ context = [], activeLogId = '', title = t('assistant.defaultSessionTitle') } = {}) {
   syncActiveAssistantSession();
   const now = Date.now();
-  const session = { id: `assistant-session-${now}-${Math.random().toString(36).slice(2, 8)}`, title: String(title).slice(0, 80) || '新对话', createdAt: now, updatedAt: now, activeLogId: String(activeLogId || ''), ...copyAssistantSessionData({ context, messages: [] }) };
+  const session = { id: `assistant-session-${now}-${Math.random().toString(36).slice(2, 8)}`, title: String(title).slice(0, 80) || t('assistant.defaultSessionTitle'), createdAt: now, updatedAt: now, activeLogId: String(activeLogId || ''), ...copyAssistantSessionData({ context, messages: [] }) };
   state.assistantSessions = [session, ...state.assistantSessions].slice(0, maxAssistantSessions);
   state.activeAssistantSessionId = session.id;
   state.activeAnalysisLogId = session.activeLogId;
@@ -488,14 +488,14 @@ function renderAssistantSessions() {
     const context = session.context || [];
     const activeLog = context.find((log) => String(log.id) === String(session.activeLogId)) || context[0];
     const errorLine = activeLog?.message ? String(activeLog.message).replace(/\s+/g, ' ').trim() : '';
-    return `<div class="assistant-session-item${session.id === state.activeAssistantSessionId ? ' active' : ''}"><button class="assistant-session-select" type="button" data-select-assistant-session="${escapeHtml(session.id)}"><span>${escapeHtml(session.title)}</span>${errorLine ? `<em class="assistant-session-error" title="${escapeHtml(errorLine)}">${escapeHtml(errorLine)}</em>` : ''}<small>${new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small></button><button class="assistant-session-remove" type="button" data-delete-assistant-session="${escapeHtml(session.id)}" aria-label="删除会话">×</button></div>`;
-  }).join('') : '<div class="assistant-session-empty">暂无历史会话</div>';
+    return `<div class="assistant-session-item${session.id === state.activeAssistantSessionId ? ' active' : ''}"><button class="assistant-session-select" type="button" data-select-assistant-session="${escapeHtml(session.id)}"><span>${escapeHtml(session.title)}</span>${errorLine ? `<em class="assistant-session-error" title="${escapeHtml(errorLine)}">${escapeHtml(errorLine)}</em>` : ''}<small>${new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small></button><button class="assistant-session-remove" type="button" data-delete-assistant-session="${escapeHtml(session.id)}" aria-label="${t('assistant.removeSession')}">×</button></div>`;
+  }).join('') : `<div class="assistant-session-empty">${t('assistant.noSessions')}</div>`;
 }
 
 function loadAssistantSessions() {
   try {
     const saved = JSON.parse(localStorage.getItem(assistantSessionsStorageKey) || '[]');
-    state.assistantSessions = Array.isArray(saved) ? saved.filter((session) => session && session.id).slice(0, maxAssistantSessions).map((session) => ({ id: String(session.id), title: String(session.title || '新对话').slice(0, 80), createdAt: Number(session.createdAt) || Date.now(), updatedAt: Number(session.updatedAt) || Date.now(), activeLogId: String(session.activeLogId || ''), ...copyAssistantSessionData(session) })) : [];
+    state.assistantSessions = Array.isArray(saved) ? saved.filter((session) => session && session.id).slice(0, maxAssistantSessions).map((session) => ({ id: String(session.id), title: String(session.title || t('assistant.defaultSessionTitle')).slice(0, 80), createdAt: Number(session.createdAt) || Date.now(), updatedAt: Number(session.updatedAt) || Date.now(), activeLogId: String(session.activeLogId || ''), ...copyAssistantSessionData(session) })) : [];
     if (state.assistantSessions[0]) selectAssistantSession(state.assistantSessions[0].id);
   } catch (error) { state.assistantSessions = []; }
 }
@@ -577,10 +577,10 @@ function renderAIModelPicker() {
   if (!triggerName || !options) return;
   const profile = activeAIProfile();
   const model = activeAIModel();
-  triggerName.textContent = profile && model ? model.name : state.aiEnvConfigured ? (state.aiModel || '服务端默认模型') : '选择模型';
-  const envOption = state.aiEnvConfigured ? `<button class="assistant-model-option${!profile ? ' selected' : ''}" type="button" data-select-ai-model="" data-model-id=""><span>${escapeHtml(state.aiModel || '服务端默认模型')}</span><small>服务端默认配置</small></button>` : '';
+  triggerName.textContent = profile && model ? model.name : state.aiEnvConfigured ? (state.aiModel || t('assistant.serverDefaultModel')) : t('assistant.selectModel');
+  const envOption = state.aiEnvConfigured ? `<button class="assistant-model-option${!profile ? ' selected' : ''}" type="button" data-select-ai-model="" data-model-id=""><span>${escapeHtml(state.aiModel || t('assistant.serverDefaultModel'))}</span><small>${t('assistant.serverDefaultHint')}</small></button>` : '';
   const profileOptions = state.aiProfiles.flatMap((provider) => provider.enabled === false ? [] : provider.models.map((item) => `<button class="assistant-model-option${provider.id === state.activeAIProfileId && item.id === state.activeAIModelId ? ' selected' : ''}" type="button" data-select-ai-model="${escapeHtml(provider.id)}" data-model-id="${escapeHtml(item.id)}"><span>${escapeHtml(item.name)}</span><small>${escapeHtml(provider.name)}</small></button>`)).join('');
-  options.innerHTML = envOption + profileOptions || '<div class="assistant-model-empty">请先在“管理模型”中添加配置</div>';
+  options.innerHTML = envOption + profileOptions || `<div class="assistant-model-empty">${t('assistant.noModels')}</div>`;
   $$('[data-select-ai-model]').forEach((button) => button.addEventListener('click', () => selectAIModel(button.dataset.selectAiModel, button.dataset.modelId)));
 }
 
@@ -592,7 +592,7 @@ function selectAIModel(providerId, modelId) {
   renderAssistant();
   const profile = activeAIProfile();
   const model = activeAIModel();
-  showToast(profile && model ? `已切换至 ${profile.name} / ${model.name}` : '已切换至服务端默认模型');
+  showToast(profile && model ? t('assistant.toast.switched', { provider: profile.name, model: model.name }) : t('assistant.toast.switchedDefault'));
 }
 
 function renderAIProviderList() {
@@ -600,7 +600,7 @@ function renderAIProviderList() {
   if (!list) return;
   list.innerHTML = `${state.aiProfiles.map((profile) => `
     <button class="ai-provider-item${profile.id === state.settingsAIProfileId ? ' active' : ''}" type="button" data-select-ai-provider="${escapeHtml(profile.id)}"><span class="ai-provider-icon">◈</span><span>${escapeHtml(profile.name)}</span><i class="ai-provider-status ${profile.enabled === false ? 'offline' : 'connected'}"></i></button>
-  `).join('')}<button class="ai-add-provider" type="button" id="ai-add-provider">＋ 添加供应商</button>`;
+  `).join('')}<button class="ai-add-provider" type="button" id="ai-add-provider"<span>＋</span> ${t('assistant.addProvider')}</button>`;
   $$('[data-select-ai-provider]').forEach((button) => button.addEventListener('click', () => selectAISettingsProvider(button.dataset.selectAiProvider)));
   $('#ai-add-provider')?.addEventListener('click', () => selectAISettingsProvider(''));
 }
@@ -610,8 +610,8 @@ function renderAIModelList() {
   const profile = state.aiProfiles.find((item) => item.id === state.settingsAIProfileId);
   if (!list) return;
   list.innerHTML = profile?.models?.length ? profile.models.map((model) => `
-    <div class="ai-model-item"><span>${escapeHtml(model.name)}</span><div><button class="text-button" type="button" data-edit-ai-model="${escapeHtml(model.id)}">编辑</button><button class="text-button danger-text" type="button" data-delete-ai-model="${escapeHtml(model.id)}">删除</button></div></div>
-  `).join('') : '<div class="ai-model-empty">暂无模型，请添加一个模型</div>';
+    <div class="ai-model-item"><span>${escapeHtml(model.name)}</span><div><button class="text-button" type="button" data-edit-ai-model="${escapeHtml(model.id)}">${t('common.edit')}</button><button class="text-button danger-text" type="button" data-delete-ai-model="${escapeHtml(model.id)}">${t('common.delete')}</button></div></div>
+  `).join('') : `<div class="ai-model-empty">${t('assistant.noModelYet')}</div>`;
   $$('[data-edit-ai-model]').forEach((button) => button.addEventListener('click', () => editAIModel(button.dataset.editAiModel)));
   $$('[data-delete-ai-model]').forEach((button) => button.addEventListener('click', () => deleteAIModel(button.dataset.deleteAiModel)));
 }
@@ -626,8 +626,8 @@ function fillAISettingsForm() {
   form.elements.apiKey.value = profile?.apiKey || '';
   form.elements.connectionType.value = profile?.type || 'openai';
   form.elements.enabled.checked = profile?.enabled !== false;
-  $('#ai-editor-provider-name').textContent = profile?.name || '新供应商';
-  $('#ai-editor-provider-status').textContent = profile?.enabled === false ? '未启用' : profile ? '已启用' : '新配置';
+  $('#ai-editor-provider-name').textContent = profile?.name || t('ai.newProvider');
+  $('#ai-editor-provider-status').textContent = profile?.enabled === false ? t('ai.notEnabled') : profile ? t('ai.enabled') : t('assistant.newProfile');
   $('#ai-new-model-name').value = '';
   renderAIModelList();
 }
@@ -653,9 +653,9 @@ function renderAssistant() {
     <div class="assistant-context-item" data-assistant-context-id="${escapeHtml(log.id)}">
       <span class="assistant-context-level ${escapeHtml(log.level)}">${escapeHtml(log.level || 'log').toUpperCase()}</span>
       <span class="assistant-context-copy" title="${escapeHtml(`${log.node} / ${log.container}\n${log.message}`)}">${escapeHtml(log.node)} / ${escapeHtml(log.container)}: ${escapeHtml(log.message)}</span>
-      <button class="assistant-context-remove" type="button" data-remove-assistant-log="${escapeHtml(log.id)}" aria-label="移除日志">×</button>
+      <button class="assistant-context-remove" type="button" data-remove-assistant-log="${escapeHtml(log.id)}" aria-label="${t('assistant.removeLog')}">×</button>
     </div>
-  `).join('') : '<div class="assistant-context-empty">未选择日志</div>';
+  `).join('') : `<div class="assistant-context-empty">${t('assistant.noLogsSelected')}</div>`;
 
   const messages = $('#assistant-messages');
   const empty = $('#assistant-empty');
@@ -672,18 +672,18 @@ function renderAssistant() {
   if (state.assistantBusy) {
     const loading = document.createElement('div');
     loading.className = 'assistant-message assistant assistant-loading';
-    loading.innerHTML = '<img class="loading-animation" src="loading.gif" alt="" aria-hidden="true" /><span>正在分析日志…</span>';
+    loading.innerHTML = `<img class="loading-animation" src="loading.gif" alt="" aria-hidden="true" /><span>${t('assistant.analyzingLog')}</span>`;
     messages.appendChild(loading);
-    $('#assistant-status').textContent = '正在分析中…';
+    $('#assistant-status').textContent = t('assistant.analyzing');
   } else if (currentAIConfigured()) {
     const provider = activeAIProfile();
     const selectedModel = activeAIModel();
-    $('#assistant-status').textContent = provider && selectedModel ? `AI 已就绪 · ${provider.name} / ${selectedModel.name}` : `AI 已就绪 · ${state.aiModel || '服务端默认模型'}`;
+    $('#assistant-status').textContent = provider && selectedModel ? `${t('assistant.readyWithModel', { provider: provider.name, model: selectedModel.name })}` : t('assistant.readyDefault', { model: state.aiModel || t('assistant.serverDefaultModel') });
   } else {
-    $('#assistant-status').textContent = 'AI 未配置 · 点击选择模型';
+    $('#assistant-status').textContent = t('assistant.notConfiguredHint');
   }
   $('#assistant-send').disabled = state.assistantBusy;
-  $('#assistant-send').textContent = state.assistantBusy ? '分析中…' : '发送';
+  $('#assistant-send').textContent = state.assistantBusy ? t('assistant.analysingShort') : t('assistant.send');
   $('#assistant-input').disabled = state.assistantBusy;
   // While a run streams, the newest line stays in view. Once it finishes, the
   // view parks on the START of the answer instead: a finished answer is read from
@@ -710,15 +710,15 @@ function renderAssistantAttachments() {
   list.innerHTML = state.assistantAttachments.map((attachment, index) => `
     <span class="assistant-attachment ${attachment.type.startsWith('image/') ? 'image' : 'file'}" title="${escapeHtml(`${attachment.name} · ${Math.ceil(attachment.size / 1024)} KB`)}">
       ${attachment.type.startsWith('image/')
-        ? `<button class="assistant-attachment-preview" type="button" data-preview-assistant-attachment="${index}" aria-label="放大预览 ${escapeHtml(attachment.name)}"><img src="${escapeHtml(attachment.data)}" alt="${escapeHtml(attachment.name)}" /></button>`
+        ? `<button class="assistant-attachment-preview" type="button" data-preview-assistant-attachment="${index}" aria-label="${t('assistant.zoomPreview', { name: attachment.name })}"><img src="${escapeHtml(attachment.data)}" alt="${escapeHtml(attachment.name)}" /></button>`
         : '<span class="assistant-attachment-file-icon" aria-hidden="true">FILE</span>'}
       <span class="assistant-attachment-name">${escapeHtml(attachment.name)}</span>
-      <button class="assistant-attachment-remove" type="button" data-remove-assistant-attachment="${index}" aria-label="移除附件 ${escapeHtml(attachment.name)}">×</button>
+      <button class="assistant-attachment-remove" type="button" data-remove-assistant-attachment="${index}" aria-label="${t('assistant.removeAttachment', { name: attachment.name })}">×</button>
     </span>
   `).join('');
   list.classList.toggle('hidden', state.assistantAttachments.length === 0);
   attachButton.disabled = state.assistantBusy || state.assistantAttachments.length >= maxAssistantAttachmentCount;
-  attachButton.setAttribute('aria-label', state.assistantAttachments.length >= maxAssistantAttachmentCount ? '最多添加 5 个附件' : '添加图片或文件');
+  attachButton.setAttribute('aria-label', state.assistantAttachments.length >= maxAssistantAttachmentCount ? t('assistant.attachLimit') : t('assistant.attach'));
 }
 
 function openAssistantAttachmentPreview(index) {
@@ -739,7 +739,7 @@ function closeAssistantAttachmentPreview() {
 function readAssistantAttachment(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error(`无法读取附件：${file.name}`));
+    reader.onerror = () => reject(new Error(t('assistant.toast.readFailed', { name: file.name })));
     reader.onload = () => resolve(String(reader.result || ''));
     reader.readAsDataURL(file);
   });
@@ -761,23 +761,23 @@ async function addAssistantAttachments(files) {
   for (const file of candidates) {
     const type = assistantAttachmentType(file);
     if (!assistantAttachmentAccept.test(type)) {
-      showToast(`暂支持图片和文本类文件：${file.name}`);
+      showToast(t('assistant.toast.unsupported', { name: file.name }));
       continue;
     }
     if (file.size > maxAssistantAttachmentBytes) {
-      showToast(`附件不能超过 2 MB：${file.name}`);
+      showToast(t('assistant.toast.tooLarge', { name: file.name }));
       continue;
     }
     if (totalBytes + file.size > maxAssistantAttachmentTotalBytes) {
-      showToast('本次附件总大小不能超过 5 MB');
+      showToast(t('assistant.toast.totalTooLarge'));
       continue;
     }
     try {
       const data = (await readAssistantAttachment(file)).replace(/^data:[^;]+;base64,/i, `data:${type};base64,`);
-      accepted.push({ name: file.name || '未命名附件', type, size: file.size, data });
+      accepted.push({ name: file.name || t('assistant.unnamedAttachment'), type, size: file.size, data });
       totalBytes += file.size;
     } catch (error) {
-      showToast(error.message || '读取附件失败');
+      showToast(error.message || t('assistant.toast.attachmentReadFailed'));
     }
   }
   if (!accepted.length) return;
@@ -916,7 +916,7 @@ function renderAssistantMarkdown(content) {
     if (ordered) { rendered.push(`<div class="markdown-list-item"><span>${escapeHtml(ordered[1])}.</span><span class="markdown-list-copy">${renderAssistantMarkdownInline(ordered[2])}</span></div>`); continue; }
     rendered.push(`<div>${renderAssistantMarkdownInline(line)}</div>`);
   }
-  if (truncated) rendered.push('<div class="markdown-spacer"></div><div>内容过长，已截断显示。</div>');
+  if (truncated) rendered.push(`<div class="markdown-spacer"></div><div>${t('assistant.truncated')}</div>`);
   return sanitizeAssistantMarkdownHTML(rendered.join(''));
 }
 
@@ -924,13 +924,13 @@ function addAssistantContext(log) {
   if (!log) return;
   if (!activeAssistantSession()) startAssistantSession();
   if (state.assistantContext.some((item) => item.id === log.id)) {
-    showToast('这条日志已在 AI 上下文中');
+    showToast(t('assistant.toast.alreadyInContext'));
     return;
   }
   state.assistantContext = [log, ...state.assistantContext].slice(0, 20);
   syncActiveAssistantSession();
   renderAssistant();
-  showToast('日志已加入 AI 分析上下文');
+  showToast(t('assistant.toast.addedToContext'));
 }
 
 function removeAssistantContext(id) {
@@ -954,7 +954,7 @@ function clearAssistantContext() {
   startAssistantSession();
   renderLogs();
   renderAssistant();
-  showToast('已开始新聊天');
+  showToast(t('assistant.toast.newChat'));
 }
 
 function beginLogAnalysis(log) {
@@ -973,9 +973,9 @@ function beginLogAnalysis(log) {
   assistantRequestController = null;
   assistantRequestId += 1;
   state.assistantBusy = false;
-  startAssistantSession({ context: orderedLogs.slice(contextStart, contextEnd), activeLogId: String(log.id), title: `${String(log.level || '日志').toUpperCase()} · ${String(log.container || log.node || '日志分析')}` });
+  startAssistantSession({ context: orderedLogs.slice(contextStart, contextEnd), activeLogId: String(log.id), title: `${String(log.level || t('assistant.logLevelFallback')).toUpperCase()} · ${String(log.container || log.node || t('assistant.logAnalysisTitle'))}` });
   $('#assistant-dock').classList.add('open');
-  $('#assistant-input').value = `请重点分析选中的这条日志有什么问题。请结合前后各 3 条日志，说明异常现象、可能原因和建议的排查步骤。\n\n选中日志：${log.time} · ${String(log.level || '').toUpperCase()} · ${log.node} / ${log.container}`;
+  $('#assistant-input').value = `${t('assistant.analysisPrompt')}${log.time} · ${String(log.level || '').toUpperCase()} · ${log.node} / ${log.container}`;
   renderAssistant();
   sendAssistantMessage({ preventDefault() {} });
 }
@@ -1000,7 +1000,7 @@ function analyzeLogFromButton(button) {
 function openAISettings(profileId = '') {
   const modal = $('#ai-settings-modal');
   state.settingsAIProfileId = profileId || state.activeAIProfileId || state.aiProfiles[0]?.id || '';
-  $('#ai-settings-title').textContent = '模型设置';
+  $('#ai-settings-title').textContent = t('ai.title');
   modal.classList.remove('hidden');
   renderAIProviderList();
   fillAISettingsForm();
@@ -1059,14 +1059,14 @@ async function saveAIProfile(event) {
   const apiKey = String(form.get('apiKey') || '').trim();
   const id = String(form.get('profileId') || '').trim();
   if (!name || !baseURL) {
-    showToast('请填写配置名称和 API 地址');
+    showToast(t('ai.toast.needNameAndUrl'));
     return;
   }
   try {
     const parsed = new URL(baseURL);
     if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.host) throw new Error('invalid URL');
   } catch (error) {
-    showToast('API 地址必须是 http 或 https 地址');
+    showToast(t('ai.toast.badUrl'));
     return;
   }
   const existing = state.aiProfiles.find((item) => item.id === id);
@@ -1074,7 +1074,7 @@ async function saveAIProfile(event) {
   const models = existing?.models ? existing.models.map((model) => ({ ...model })) : [];
   if (newModelName && !models.some((model) => model.name === newModelName)) models.push({ id: `model-${Date.now()}-${Math.random().toString(36).slice(2)}`, name: newModelName });
   if (!models.length) {
-    showToast('请至少添加一个模型');
+    showToast(t('ai.toast.needModel'));
     return;
   }
   const profile = { id: id || `ai-profile-${Date.now()}-${Math.random().toString(36).slice(2)}`, name, baseURL, apiKey, type: String(form.get('connectionType') || 'openai'), enabled: Boolean(form.get('enabled')), models };
@@ -1083,14 +1083,14 @@ async function saveAIProfile(event) {
   // credentials to a machine the visitor does not control.
   if (!isBrowserStorageMode()) {
     aiAdminToken = await resolveAIAdminToken();
-    if (serverAdminTokenConfigured && !aiAdminToken) { showToast('未提供管理员令牌，模型未保存'); return; }
+    if (serverAdminTokenConfigured && !aiAdminToken) { showToast(t('ai.toast.noTokenSave')); return; }
     try {
       const response = await fetch('/api/ai/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Log-Agent-Admin-Token': aiAdminToken }, body: JSON.stringify(profile) });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || '模型保存失败');
+      if (!response.ok) throw new Error(payload.error || t('ai.toast.saveFailed'));
       profile.id = payload.id || profile.id;
     } catch (error) {
-      showToast(error.message || '模型保存失败');
+      showToast(error.message || t('ai.toast.saveFailed'));
       return;
     }
   }
@@ -1102,18 +1102,18 @@ async function saveAIProfile(event) {
   persistAIProfiles();
   closeAISettings();
   renderAssistant();
-  showToast(`${name} 已保存并切换`);
+  showToast(t('ai.toast.saved', { name }));
 }
 
 async function deleteAIProfile(id) {
   const profile = state.aiProfiles.find((item) => item.id === id);
-  if (!profile || !window.confirm(`确定删除 AI 配置“${profile.name}”吗？`)) return;
+  if (!profile || !window.confirm(t('ai.confirmDeleteProfile', { name: profile.name }))) return;
   const dbID = profile.id.match(/^ai-profile-db-(\d+)$/)?.[1];
   if (dbID && !isBrowserStorageMode()) {
     aiAdminToken = await resolveAIAdminToken();
-    if (serverAdminTokenConfigured && !aiAdminToken) { showToast('未提供管理员令牌，模型未删除'); return; }
+    if (serverAdminTokenConfigured && !aiAdminToken) { showToast(t('ai.toast.noTokenDelete')); return; }
     const response = await fetch(`/api/ai/profiles?id=${dbID}`, { method: 'DELETE', headers: { Accept: 'application/json', 'X-Log-Agent-Admin-Token': aiAdminToken } });
-    if (!response.ok) { const payload = await response.json().catch(() => ({})); showToast(payload.error || '模型删除失败'); return; }
+    if (!response.ok) { const payload = await response.json().catch(() => ({})); showToast(payload.error || t('ai.toast.deleteFailed')); return; }
   }
   state.aiProfiles = state.aiProfiles.filter((item) => item.id !== id);
   if (state.activeAIProfileId === id) {
@@ -1125,7 +1125,7 @@ async function deleteAIProfile(id) {
   renderAIProviderList();
   fillAISettingsForm();
   renderAssistant();
-  showToast(`${profile.name} 已删除`);
+  showToast(t('ai.toast.deleted', { name: profile.name }));
 }
 
 function addAIModel() {
@@ -1133,16 +1133,16 @@ function addAIModel() {
   const input = $('#ai-new-model-name');
   const name = input.value.trim();
   if (!profile) {
-    showToast('请先保存供应商，再添加更多模型');
+    showToast(t('ai.toast.saveProviderFirst'));
     return;
   }
   if (!name) {
-    showToast('请输入模型名称');
+    showToast(t('ai.toast.needModelName'));
     input.focus();
     return;
   }
   if (profile.models.some((model) => model.name === name)) {
-    showToast('该模型已经存在');
+    showToast(t('ai.toast.modelExists'));
     return;
   }
   profile.models.push({ id: `model-${Date.now()}-${Math.random().toString(36).slice(2)}`, name });
@@ -1150,17 +1150,17 @@ function addAIModel() {
   input.value = '';
   renderAIModelList();
   renderAIModelPicker();
-  showToast(`${name} 已添加`);
+  showToast(t('ai.toast.modelAdded', { name }));
 }
 
 function editAIModel(id) {
   const profile = state.aiProfiles.find((item) => item.id === state.settingsAIProfileId);
   const model = profile?.models.find((item) => item.id === id);
   if (!profile || !model) return;
-  const name = window.prompt('修改模型名称', model.name)?.trim();
+  const name = window.prompt(t('ai.promptRenameModel'), model.name)?.trim();
   if (!name || name === model.name) return;
   if (profile.models.some((item) => item.id !== id && item.name === name)) {
-    showToast('该模型已经存在');
+    showToast(t('ai.toast.modelExists'));
     return;
   }
   model.name = name;
@@ -1172,7 +1172,7 @@ function editAIModel(id) {
 function deleteAIModel(id) {
   const profile = state.aiProfiles.find((item) => item.id === state.settingsAIProfileId);
   const model = profile?.models.find((item) => item.id === id);
-  if (!profile || !model || !window.confirm(`确定删除模型“${model.name}”吗？`)) return;
+  if (!profile || !model || !window.confirm(t('ai.confirmDeleteModel', { name: model.name }))) return;
   profile.models = profile.models.filter((item) => item.id !== id);
   if (state.activeAIProfileId === profile.id && state.activeAIModelId === id) state.activeAIModelId = profile.models[0]?.id || '';
   persistAIProfiles();
@@ -1187,7 +1187,7 @@ async function sendAssistantMessage(event) {
   const typedContent = input.value.trim();
   const attachments = state.assistantAttachments.slice();
   if (!typedContent && !attachments.length) return;
-  const content = typedContent || `请分析已附加的文件：${attachments.map((attachment) => attachment.name).join('、')}`;
+  const content = typedContent || t('ai.attachPrompt', { names: attachments.map((attachment) => attachment.name).join(activeLanguage() === 'zh' ? '、' : ', ') });
   if (!activeAssistantSession()) startAssistantSession();
   const profile = activeAIProfile();
   const model = activeAIModel();
@@ -1210,18 +1210,19 @@ async function sendAssistantMessage(event) {
         messages: state.assistantMessages.slice(-12),
         logs: state.assistantContext.slice(0, 20),
         attachments,
+        lang: activeLanguage(),
         config: profile && model ? { profile_id: Number(profile.id.match(/^ai-profile-db-(\d+)$/)?.[1] || 0), name: profile.name, base_url: profile.baseURL, api_key: profile.apiKey, model: model.name, type: profile.type } : null
       })
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || 'AI 请求失败');
-    state.assistantMessages.push({ role: 'assistant', content: payload.message || 'AI 未返回内容' });
+    if (!response.ok) throw new Error(payload.error || t('ai.toast.requestFailed'));
+    state.assistantMessages.push({ role: 'assistant', content: payload.message || t('ai.toast.noContent') });
     state.assistantMessages = state.assistantMessages.slice(-12);
   } catch (error) {
     if (error.name === 'AbortError' || requestId !== assistantRequestId) return;
-    state.assistantMessages.push({ role: 'assistant', content: error.message || 'AI 请求失败', error: true });
+    state.assistantMessages.push({ role: 'assistant', content: error.message || t('ai.toast.requestFailed'), error: true });
     state.assistantMessages = state.assistantMessages.slice(-12);
-    showToast(error.message || 'AI 请求失败');
+    showToast(error.message || t('ai.toast.requestFailed'));
   } finally {
     if (requestId !== assistantRequestId) return;
     assistantRequestController = null;
@@ -1256,7 +1257,7 @@ function fillAppSettingsForm(payload) {
   form.elements.currentAdminToken.value = '';
   form.elements.adminToken.value = '';
   serverAdminTokenConfigured = Boolean(payload.adminTokenConfigured);
-  $('#settings-admin-status').textContent = serverAdminTokenConfigured ? '已配置' : '未配置';
+  $('#settings-admin-status').textContent = serverAdminTokenConfigured ? t('settings.configured') : t('settings.notConfigured');
 }
 
 async function openAppSettings() {
@@ -1267,11 +1268,11 @@ async function openAppSettings() {
   try {
     const response = await fetch('/api/settings', { headers: { Accept: 'application/json' } });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || '设置读取失败');
+    if (!response.ok) throw new Error(payload.error || t('settings.toast.readFailed'));
     fillAppSettingsForm(payload);
   } catch (error) {
     modal.classList.add('hidden');
-    showToast(error.message || '设置读取失败');
+    showToast(error.message || t('settings.toast.readFailed'));
   }
 }
 
@@ -1283,7 +1284,7 @@ async function loadConfigInfo() {
   try {
     const response = await fetch('/api/config/info', { headers: { Accept: 'application/json' } });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || '配置信息读取失败');
+    if (!response.ok) throw new Error(payload.error || t('settings.toast.configReadFailed'));
     state.configInfo = payload;
     // Keeps the provider-save path from prompting for a token the server is
     // not asking for, even if the settings panel has never been opened.
@@ -1292,7 +1293,7 @@ async function loadConfigInfo() {
     // so re-apply it now that localMode is known for sure.
     updateStorageModeUI();
   } catch (error) {
-    showToast(error.message || '配置信息读取失败');
+    showToast(error.message || t('settings.toast.configReadFailed'));
   }
 }
 
@@ -1310,10 +1311,10 @@ async function revealConfigDirectory(event) {
   link.dataset.busy = '1';
   try {
     const response = await fetch('/api/config/reveal', { method: 'POST', headers: configAdminHeaders() });
-    await readSettingsResponse(response, '打开配置目录失败');
-    showToast('已在文件管理器中打开配置目录');
+    await readSettingsResponse(response, t('settings.toast.revealFailed'));
+    showToast(t('settings.toast.revealed'));
   } catch (error) {
-    showToast(error.message || '打开配置目录失败');
+    showToast(error.message || t('settings.toast.revealFailed'));
   } finally {
     link.dataset.busy = '0';
   }
@@ -1325,7 +1326,7 @@ async function exportConfiguration() {
   button.disabled = true;
   try {
     const response = await fetch('/api/config/export', { headers: configAdminHeaders() });
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '导出配置失败');
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || t('settings.toast.exportFailed'));
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1335,9 +1336,9 @@ async function exportConfiguration() {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    showToast('配置已导出');
+    showToast(t('settings.toast.exported'));
   } catch (error) {
-    showToast(error.message || '导出配置失败');
+    showToast(error.message || t('settings.toast.exportFailed'));
   } finally {
     button.disabled = false;
   }
@@ -1345,27 +1346,27 @@ async function exportConfiguration() {
 
 async function importConfiguration(file) {
   if (!file) return;
-  if (!window.confirm('导入将覆盖当前全部节点与模型配置，确定继续吗？')) return;
+  if (!window.confirm(t('settings.confirmImport'))) return;
   try {
     const text = await file.text();
     let parsed;
     try {
       parsed = JSON.parse(text);
     } catch (error) {
-      throw new Error('配置文件不是合法的 JSON');
+      throw new Error(t('settings.toast.badJson'));
     }
     const response = await fetch('/api/config/import', {
       method: 'POST',
       headers: { ...configAdminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(parsed),
     });
-    const payload = await readSettingsResponse(response, '导入配置失败');
-    showToast(`已导入 ${payload.nodes || 0} 个节点、${payload.providers || 0} 个模型配置`);
+    const payload = await readSettingsResponse(response, t('settings.toast.importFailed'));
+    showToast(t('settings.toast.imported', { nodes: payload.nodes || 0, providers: payload.providers || 0 }));
     // Nodes were rebuilt server-side; refresh so the sidebar reflects them.
     await syncGoBackend();
     loadConfigInfo();
   } catch (error) {
-    showToast(error.message || '导入配置失败');
+    showToast(error.message || t('settings.toast.importFailed'));
   } finally {
     const input = $('#settings-config-file');
     if (input) input.value = '';
@@ -1386,8 +1387,8 @@ function appSettingsAuthHeaders(form) {
 
 function ensureSettingsAdminToken(form) {
   const { currentAdminToken } = appSettingsAuthHeaders(form);
-  if ($('#settings-admin-status').textContent === '已配置' && !currentAdminToken) {
-    showToast('请先填写当前管理员 key');
+  if ($('#settings-admin-status').textContent === t('settings.configured') && !currentAdminToken) {
+    showToast(t('settings.toast.needCurrentAdminKey'));
     form.elements.currentAdminToken.focus();
     return false;
   }
@@ -1397,8 +1398,8 @@ function ensureSettingsAdminToken(form) {
 async function readSettingsResponse(response, fallbackMessage) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = payload.error === 'admin token required' ? '请填写正确的当前管理员 key' : payload.error;
-    throw new Error(error || (response.status === 401 ? '当前管理员 key 不正确' : fallbackMessage));
+    if (payload.error === 'admin token required') throw new Error(t('settings.toast.wrongCurrentAdminKey'));
+    throw new Error(apiErrorMessage(payload, payload.error || (response.status === 401 ? t('settings.toast.incorrectAdminKey') : fallbackMessage)));
   }
   return payload;
 }
@@ -1412,13 +1413,13 @@ async function saveAdminSettings() {
   button.disabled = true;
   try {
     const response = await fetch('/api/settings/admin', { method: 'PUT', headers, body: JSON.stringify({ adminToken }) });
-    const payload = await readSettingsResponse(response, '管理员 key 保存失败');
+    const payload = await readSettingsResponse(response, t('settings.toast.adminKeySaveFailed'));
     if (adminToken) aiAdminToken = adminToken;
     else if (currentAdminToken) aiAdminToken = currentAdminToken;
     fillAppSettingsForm(payload);
-    showToast('管理员 key 已保存');
+    showToast(t('settings.toast.adminKeySaved'));
   } catch (error) {
-    showToast(error.message || '管理员 key 保存失败');
+    showToast(error.message || t('settings.toast.adminKeySaveFailed'));
   } finally {
     button.disabled = false;
   }
@@ -1436,12 +1437,12 @@ async function saveAppSettings(event) {
       method: 'PUT', headers,
       body: JSON.stringify({ environment: String(form.elements.environment.value || '').trim() })
     });
-    const payload = await readSettingsResponse(response, '运行环境保存失败');
+    const payload = await readSettingsResponse(response, t('settings.toast.envSaveFailed'));
     fillAppSettingsForm(payload);
     closeAppSettings();
-    showToast('运行环境已保存');
+    showToast(t('settings.toast.envSaved'));
   } catch (error) {
-    showToast(error.message || '运行环境保存失败');
+    showToast(error.message || t('settings.toast.envSaveFailed'));
   } finally {
     submitButton.disabled = false;
   }
@@ -1453,8 +1454,9 @@ function applyTheme(theme) {
   const button = $('#theme-toggle');
   if (button) {
     button.textContent = isLight ? '☾' : '☀';
-    button.setAttribute('aria-label', isLight ? '切换到黑夜模式' : '切换到白天模式');
-    button.title = isLight ? '切换到黑夜模式' : '切换到白天模式';
+    const themeLabel = isLight ? t('topbar.themeToDark') : t('topbar.themeToLight');
+    button.setAttribute('aria-label', themeLabel);
+    button.title = themeLabel;
   }
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', isLight ? '#f4f6f8' : '#101214');
 }
@@ -1535,10 +1537,10 @@ function refreshCustomSelect(select) {
     : (options.find((option) => option.value === select.value) || options[0]);
   const selectionLabel = select.multiple
     ? (selectedOptions.length === 0
-      ? (select.id === 'node-filter' ? '全部节点' : '全部容器')
+      ? (select.id === 'node-filter' ? t('common.allNodes') : t('common.allContainers'))
       : selectedOptions.length === 1
         ? selectedOptions[0].textContent
-        : `已选 ${selectedOptions.length} 个${select.id === 'node-filter' ? '节点' : '容器'}`)
+        : t('sidebar.selectedCount', { count: selectedOptions.length, kind: select.id === 'node-filter' ? t('common.node') : t('common.container') }))
     : selected?.textContent || '';
   const menu = custom.querySelector('.custom-select-menu');
   menu.innerHTML = options.map((option) => `
@@ -1688,14 +1690,14 @@ function scheduleFullRangeSearch() {
       const responses = await Promise.all(targets.map(async (target) => {
         const params = new URLSearchParams({ node: target.nodeId, container: target.containerId, range: state.range, q: query });
         const response = await fetch(`/api/logs/container/search?${params.toString()}`, { headers: { Accept: 'application/json' } });
-        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '完整时间范围筛选失败');
+        if (!response.ok) throw new Error(apiErrorMessage(await response.json().catch(() => ({})), t('stream.toast.fullRangeFailed')));
         return response.json();
       }));
       if (request !== fullRangeSearchRequest || key !== fullRangeSearchKey()) return;
       state.fullRangeSearchLogs = sortLogsNewest(responses.flatMap((payload) => payload.logs || []));
       state.fullRangeSearchKey = key;
     } catch (error) {
-      if (request === fullRangeSearchRequest) showToast(error.message || '完整时间范围筛选失败');
+      if (request === fullRangeSearchRequest) showToast(error.message || t('stream.toast.fullRangeFailed'));
     } finally {
       if (request === fullRangeSearchRequest) {
         state.fullRangeSearchLoading = false;
@@ -1786,7 +1788,7 @@ async function loadSelectedContainerLogs() {
       const cacheKey = containerKey(target.nodeId, target.containerId);
       const query = new URLSearchParams({ node: target.nodeId, container: target.containerId, range: state.range });
       const response = await fetch(`/api/logs/container?${query.toString()}`, { headers: { Accept: 'application/json' } });
-      if (!response.ok) throw new Error('容器日志加载失败');
+      if (!response.ok) throw new Error(t('stream.toast.containerLogsFailed'));
       const payload = await response.json();
       if (state.paused || state.selectedContainers.join('|') !== selectionKey) return;
       state.containerLogCache[cacheKey] = payload.logs || [];
@@ -1805,16 +1807,22 @@ async function loadSelectedContainerLogs() {
       loadedContainerSelectionKey = selectionKey;
     }
   } catch (error) {
-    showToast(error.message || '容器日志加载失败');
+    showToast(error.message || t('stream.toast.containerLogsFailed'));
   }
 }
 
+// The keys of this map are also the validity check for `state.range`; the visible
+// wording lives in i18n.js ('stream.range.*') so both languages stay in one place.
 const rangeLabels = {
-  '30m': '最近 30 分钟',
-  '5h': '最近 5 小时',
-  '1d': '最近 1 天',
-  '1w': '最近一周'
+  '30m': true,
+  '5h': true,
+  '1d': true,
+  '1w': true
 };
+
+function rangeText(range) {
+  return rangeLabels[range] ? t(`stream.range.${range}`) : t('stream.range.30m');
+}
 
 const rangeDurations = {
   '30m': 30 * 60 * 1000,
@@ -1830,9 +1838,9 @@ function isLogInSelectedRange(log, now = Date.now()) {
 }
 
 function nodeStatusLabel(node) {
-  if (node.status === 'connected') return '已连接';
-  if (node.status === 'error') return '连接失败';
-  return '连接中';
+  if (node.status === 'connected') return t('nodeStatus.connected');
+  if (node.status === 'error') return t('nodeStatus.error');
+  return t('nodeStatus.connecting');
 }
 
 function nodeStatusClass(node) {
@@ -1861,40 +1869,40 @@ function updateStorage(storage) {
   const lastEvictedAt = Number(storage?.lastEvictedAt);
   if (!Number.isFinite(used) || !Number.isFinite(capacity) || capacity <= 0) {
     $('#metric-storage').textContent = '—';
-    $('#metric-storage-foot').textContent = '等待数据';
-    $('#metric-storage-policy').textContent = '满额后自动淘汰最早日志';
+    $('#metric-storage-foot').textContent = t('metrics.storageIdle');
+    $('#metric-storage-policy').textContent = t('metrics.storagePolicy');
     return;
   }
   $('#metric-storage').innerHTML = `${Math.max(0, Math.min(100, percent))}<span class="unit">%</span>`;
-  $('#metric-storage-foot').textContent = `当前 ${used.toLocaleString('en-US')} / ${capacity.toLocaleString('en-US')} 条`;
+  $('#metric-storage-foot').textContent = t('metrics.storageFoot', { used: used.toLocaleString('en-US'), capacity: capacity.toLocaleString('en-US') });
   if (!evicted) {
-    $('#metric-storage-policy').textContent = '尚未发生淘汰；满额后新增一条，淘汰最早一条';
+    $('#metric-storage-policy').textContent = t('metrics.storagePolicyIdle');
     return;
   }
   const lastEvicted = Number.isFinite(lastEvictedAt) && lastEvictedAt > 0
     ? new Date(lastEvictedAt).toLocaleTimeString('zh-CN', { hour12: false })
-    : '时间未知';
-  $('#metric-storage-policy').textContent = `累计淘汰 ${evicted.toLocaleString('en-US')} 条 · 最近 ${lastEvicted}`;
+    : t('metrics.storagePolicyTimeUnknown');
+  $('#metric-storage-policy').textContent = t('metrics.storagePolicyEvicted', { count: evicted.toLocaleString('en-US'), time: lastEvicted });
 }
 
 async function clearLogCache() {
   const button = $('#storage-clear-cache');
   if (!button || button.disabled) return;
-  if (!window.confirm('确定清除全部已缓存的日志吗？此操作不可恢复，缓存将重新开始累积。')) return;
+  if (!window.confirm(t('stream.confirmClearCache'))) return;
   button.disabled = true;
   try {
     const response = await fetch('/api/logs/cache/clear', { method: 'POST', headers: { Accept: 'application/json' } });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || '清除缓存失败');
+    if (!response.ok) throw new Error(payload.error || t('stream.toast.cacheClearFailed'));
     state.logs = [];
     state.containerLogCache = {};
     resetLogPagination();
     renderLogs();
     updateStorage(payload.storage);
     const cleared = Number(payload.cleared) || 0;
-    showToast(cleared ? `已清除 ${cleared.toLocaleString('en-US')} 条缓存日志` : '缓存已是空的');
+    showToast(cleared ? t('stream.toast.cacheCleared', { count: cleared.toLocaleString(activeLanguage() === 'zh' ? 'zh-CN' : 'en-US') }) : t('stream.toast.cacheEmpty'));
   } catch (error) {
-    showToast(error.message || '清除缓存失败，请稍后重试');
+    showToast(error.message || t('stream.toast.cacheClearRetry'));
   } finally {
     button.disabled = false;
   }
@@ -1913,9 +1921,9 @@ function syncRuleButtons() {
 }
 
 const ruleNames = {
-  mask: '敏感信息脱敏',
-  structure: '结构化字段提取',
-  noise: '健康检查过滤'
+  mask: 'rules.nameMask',
+  structure: 'rules.nameStructure',
+  noise: 'rules.nameNoise'
 };
 
 function normalizeRuleOrder(order) {
@@ -1935,7 +1943,7 @@ function applyPipelineRuleOrder() {
     });
   }
   const summary = $('#rule-order-summary');
-  if (summary) summary.textContent = `日志接收 → ${state.ruleOrder.map((rule) => ruleNames[rule]).join(' → ')} → 日志缓存`;
+  if (summary) summary.textContent = t('rules.orderSummary', { chain: state.ruleOrder.map((rule) => t(ruleNames[rule])).join(' → ') });
 }
 
 async function persistRuleOrder(order, previousOrder) {
@@ -1948,15 +1956,15 @@ async function persistRuleOrder(order, previousOrder) {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ order: state.ruleOrder })
     });
-    if (!response.ok) throw new Error('规则顺序保存失败');
+    if (!response.ok) throw new Error(t('rules.toast.orderSaveFailed'));
     const payload = await response.json();
     state.ruleOrder = normalizeRuleOrder(payload.order);
     applyPipelineRuleOrder();
-    showToast('加工规则顺序已保存');
+    showToast(t('rules.toast.orderSaved'));
   } catch (error) {
     state.ruleOrder = normalizeRuleOrder(previousOrder);
     applyPipelineRuleOrder();
-    showToast(error.message || '规则顺序保存失败，已恢复原顺序');
+    showToast(error.message || t('rules.toast.orderSaveFailedRestored'));
   }
 }
 
@@ -2020,7 +2028,7 @@ async function persistRuleGroup(updates, successMessage) {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ rules: updates })
     });
-    if (!response.ok) throw new Error('规则保存失败');
+    if (!response.ok) throw new Error(t('rules.toast.saveFailed'));
     const payload = await response.json();
     state.ruleState = { ...state.ruleState, ...(payload.rules || {}) };
     syncRuleButtons();
@@ -2032,7 +2040,7 @@ async function persistRuleGroup(updates, successMessage) {
     syncRuleButtons();
     renderLogs();
     updatePreview();
-    showToast(error.message || '规则保存失败，已恢复原状态');
+    showToast(error.message || t('rules.toast.saveFailedRestored'));
   }
 }
 
@@ -2053,8 +2061,8 @@ function syncMultiSelectToggle() {
   toggle.classList.toggle('active', state.multiSelect);
   toggle.setAttribute('aria-checked', state.multiSelect ? 'true' : 'false');
   toggle.title = state.multiSelect
-    ? '多选已打开：点击节点可加选或取消，再点一次关闭'
-    : '多选已关闭：点击节点只选择该节点';
+    ? t('sidebar.multiSelectOnHint')
+    : t('sidebar.multiSelectOffHint');
 }
 
 function setMultiSelect(enabled) {
@@ -2080,7 +2088,7 @@ function setMultiSelect(enabled) {
     renderLogs();
     loadSelectedContainerLogs();
   }
-  showToast(next ? '多选已打开，可同时选择多个节点' : '多选已关闭，点击节点只选择该节点');
+  showToast(next ? t('sidebar.multiSelectOnToast') : t('sidebar.multiSelectOffToast'));
 }
 
 // bindMultiSelectToggle is called after renderNodes() so the switch it syncs is
@@ -2102,17 +2110,17 @@ function renderNodes() {
   const connectedNodes = nodes.filter((node) => node.status === 'connected').length;
   const activeContainers = nodes.reduce((total, node) => node.status === 'connected' ? total + (Number(node.count) || 0) : total, 0);
   $('#metric-nodes-foot').textContent = nodes.length
-    ? `${connectedNodes} / ${nodes.length} 个节点已连接`
-    : '尚未接入节点';
+    ? t('metrics.nodesFoot', { connected: connectedNodes, total: nodes.length })
+    : t('metrics.nodesFootNone');
   $('#metric-containers').textContent = activeContainers.toLocaleString('en-US');
   $('#metric-containers-foot').textContent = activeContainers
-    ? `${activeContainers} 个运行中容器`
-    : '当前没有运行中的容器';
+    ? t('metrics.containersFoot', { count: activeContainers })
+    : t('metrics.containersFootNone');
   $('#metric-processed-foot').textContent = state.paused
-    ? '已暂停，当前视图不会接收新日志'
+    ? t('metrics.processedPaused')
     : state.processed
-      ? '服务启动后累计接收，不等于缓存条数'
-      : '等待日志流';
+      ? t('metrics.processedFoot')
+      : t('metrics.processedIdle');
   // The switch markup lives outside #node-list, so it survives the innerHTML
   // write below and only needs its state re-mirrored when the node list is redrawn.
   syncMultiSelectToggle();
@@ -2125,7 +2133,7 @@ function renderNodes() {
       const containerId = container.id || container.name;
       return !hiddenContainers.has(containerKey(node.id, containerId));
     });
-    const emptyNote = (node.containers || []).length ? '容器已在连接管理里去掉' : '暂无容器数据';
+    const emptyNote = (node.containers || []).length ? t('connections.sidebarAllRemoved') : t('connections.sidebarEmpty');
     const expanded = state.expandedNodes.includes(node.id);
     return `
       <div class="node-group ${expanded ? 'expanded' : ''}" data-node-group-id="${escapeHtml(node.id)}">
@@ -2135,17 +2143,17 @@ function renderNodes() {
             <span class="node-copy"><strong>${escapeHtml(node.name)}</strong><span>${escapeHtml(node.url.replace(/^https?:\/\//, ''))}</span></span>
             <span class="node-live">${node.count}</span>
           </button>
-          <button class="node-expand-button" type="button" data-expand-node-id="${escapeHtml(node.id)}" aria-expanded="${expanded}" aria-label="${expanded ? '收起容器' : '展开容器'}" title="${expanded ? '收起容器' : '展开容器'}"><span class="node-expand-icon${expanded ? ' expanded' : ''}" aria-hidden="true">›</span></button>
+          <button class="node-expand-button" type="button" data-expand-node-id="${escapeHtml(node.id)}" aria-expanded="${expanded}" aria-label="${expanded ? t('connections.collapse') : t('connections.expand')}" title="${expanded ? t('connections.collapse') : t('connections.expand')}"><span class="node-expand-icon${expanded ? ' expanded' : ''}" aria-hidden="true">›</span></button>
         </div>
         ${expanded ? `<div class="node-children" data-container-list-for="${escapeHtml(node.id)}">${containers.length ? containers.map((container) => {
           const containerId = container.id || container.name;
-          const containerName = container.name || containerId || '未命名容器';
+          const containerName = container.name || containerId || t('common.unnamedContainer');
           const selected = state.selectedContainers.includes(containerKey(node.id, containerId));
           return `<button class="container-item ${selected ? 'active' : ''}" type="button" data-node-id="${escapeHtml(node.id)}" data-container-id="${escapeHtml(containerId)}" title="${escapeHtml(containerName)}"><i class="container-dot ${container.state === 'running' ? '' : 'stopped'}"></i><span>${escapeHtml(containerName)}</span></button>`;
         }).join('') : `<div class="container-empty">${emptyNote}</div>`}</div>` : ''}
       </div>
     `;
-  }).join('') : '<div class="node-empty">暂无已连接节点</div>';
+  }).join('') : `<div class="node-empty">${t('sidebar.noNodes')}</div>`;
   renderConnectionsView();
   $('#stream-nav-count').textContent = String(state.logs.length).padStart(2, '0');
   $$('[data-expand-node-id]').forEach((button) => button.addEventListener('click', (event) => {
@@ -2185,13 +2193,13 @@ function renderNodes() {
     updateDetailPanel();
     renderLogs();
     persistSelection();
-    const nodeName = getNode(nodeId)?.name || '节点';
+    const nodeName = getNode(nodeId)?.name || t('common.node');
     if (multi) {
       showToast(alreadySelected
-        ? `已取消选择 ${nodeName}`
-        : `已选择 ${nodeName} · 共 ${state.selectedNodes.length} 个节点`);
+        ? t('sidebar.toast.deselected', { name: nodeName })
+        : t('sidebar.toast.selectedMany', { name: nodeName, count: state.selectedNodes.length }));
     } else {
-      showToast(`已切换至 ${nodeName}`);
+      showToast(t('sidebar.toast.switched', { name: nodeName }));
     }
     loadSelectedContainerLogs();
   }));
@@ -2233,7 +2241,7 @@ function renderNodes() {
     renderLogs();
     persistSelection();
     loadSelectedContainerLogs();
-    showToast(`${alreadySelected ? '已取消选择' : '已选择'} ${node?.name || '节点'} / ${container?.name || containerId}`);
+    showToast(t('sidebar.scopePicked', { action: alreadySelected ? t('sidebar.toast.deselectedOnly') : t('sidebar.toast.selectedOnly'), node: node?.name || t('common.node'), container: container?.name || containerId }));
   }));
 }
 
@@ -2241,7 +2249,7 @@ function renderConnectionsView() {
   const list = $('#connections-list');
   if (!list) return;
   if (!nodes.length) {
-    list.innerHTML = '<div class="connection-empty panel"><strong>暂无 Dozzle 节点</strong><span>点击右上角添加节点开始同步日志。</span></div>';
+    list.innerHTML = `<div class="connection-empty panel"><strong>${t('connections.noNodes')}</strong><span>${t('connections.noNodesBody')}</span></div>`;
     return;
   }
   list.innerHTML = nodes.map((node) => {
@@ -2257,7 +2265,7 @@ function renderConnectionsView() {
     // Dropping one promotes the next into its place instead of leaving a gap.
     const tags = visible.slice(0, 8).map((container) => {
       const containerId = container.id || container.name;
-      const containerName = container.name || containerId || '未命名容器';
+      const containerName = container.name || containerId || t('common.unnamedContainer');
       const key = containerKey(node.id, containerId);
       const ticked = kept.has(key);
       // Discovered but not running (Dify's one-shot *_init_permissions-1, say).
@@ -2265,23 +2273,23 @@ function renderConnectionsView() {
       // running count of 20 reads as "one of them is not up" rather than as a
       // miscount.
       const stopped = !!container.state && container.state !== 'running';
-      const stateNote = stopped ? ` · 状态 ${container.state}（未在运行）` : '';
-      return `<span class="connection-container-tag${ticked ? ' kept' : ''}${stopped ? ' stopped' : ''}">${stopped ? '<i class="container-dot stopped"></i>' : ''}<button class="connection-container-pick" type="button" data-keep-container="${escapeHtml(key)}" aria-pressed="${ticked}" title="${ticked ? '已点选，再次点击取消' : '点选要保留的容器，再用「去掉其他」'}${stateNote}">${escapeHtml(containerName)}</button><button class="container-hide-button" type="button" data-hide-container="${escapeHtml(key)}" aria-label="从列表中去掉 ${escapeHtml(containerName)}" title="从容器列表中去掉">×</button></span>`;
+      const stateNote = stopped ? ` · ${t('connections.stoppedNote', { state: container.state })}` : '';
+      return `<span class="connection-container-tag${ticked ? ' kept' : ''}${stopped ? ' stopped' : ''}">${stopped ? '<i class="container-dot stopped"></i>' : ''}<button class="connection-container-pick" type="button" data-keep-container="${escapeHtml(key)}" aria-pressed="${ticked}" title="${ticked ? t('connections.pickHintActive') : t('connections.pickHint')}${stateNote}">${escapeHtml(containerName)}</button><button class="container-hide-button" type="button" data-hide-container="${escapeHtml(key)}" aria-label="${t('connections.removeOne', { name: containerName })}" title="${t('connections.dropFromList')}">×</button></span>`;
     }).join('');
-    const meta = [`<span>${allContainers.length} 个已发现</span>`];
+    const meta = [`<span>${t('connections.discovered', { count: allContainers.length })}</span>`];
     if (kept.size) {
-      meta.push(`<button class="container-keep-button" type="button" data-remove-others="${escapeHtml(node.id)}" title="只保留已点选的 ${kept.size} 个容器，其余从列表去掉">去掉其他（保留 ${kept.size}）</button>`);
-      meta.push(`<button class="container-cancel-button" type="button" data-clear-kept="${escapeHtml(node.id)}" title="取消点选">取消</button>`);
+      meta.push(`<button class="container-keep-button" type="button" data-remove-others="${escapeHtml(node.id)}" title="${t('connections.removeOthersHint', { count: kept.size })}">${t('connections.removeOthers', { count: kept.size })}</button>`);
+      meta.push(`<button class="container-cancel-button" type="button" data-clear-kept="${escapeHtml(node.id)}" title="${t('connections.cancelPick')}">${t('connections.cancelPick')}</button>`);
     }
     if (hiddenCount) {
-      meta.push(`<button class="container-restore-button" type="button" data-restore-containers="${escapeHtml(node.id)}" title="把该节点被去掉的容器放回列表">已去掉 ${hiddenCount} · 恢复</button>`);
+      meta.push(`<button class="container-restore-button" type="button" data-restore-containers="${escapeHtml(node.id)}" title="${t('connections.restoreHint')}">${t('connections.restore', { count: hiddenCount })}</button>`);
     }
     return `
       <article class="connection-card panel">
         <div class="connection-card-heading"><div class="connection-node"><div class="node-avatar orange-bg">${escapeHtml(node.initial)}</div><div><strong>${escapeHtml(node.name)}</strong><span>${escapeHtml(node.url)}</span></div></div><span class="healthy-badge status-${nodeStatusClass(node)}" title="${escapeHtml(nodeStatusLabel(node))}" aria-label="${escapeHtml(nodeStatusLabel(node))}"><i></i></span></div>
-        <div class="connection-stats"><div><span>延迟</span><strong>${node.latency > 0 ? `${node.latency} ms` : '—'}</strong></div><div><span>运行中容器</span><strong>${node.count ?? '—'}</strong></div><div><span>版本</span><strong>${escapeHtml(node.version || '—')}</strong></div></div>
-        <div class="connection-containers"><div><strong>容器列表</strong><div class="connection-container-meta">${meta.join('')}</div></div><div class="connection-container-tags">${tags || `<em>${allContainers.length ? '容器已全部去掉，点击「恢复」找回' : '等待容器同步'}</em>`}</div></div>
-        <div class="connection-card-actions"><span>${escapeHtml(node.error || (node.status === 'connected' ? '实时同步正常' : '等待连接结果'))}</span><div class="connection-card-buttons"><button class="secondary-button compact-button" type="button" data-edit-connection-id="${escapeHtml(node.id)}">编辑连接</button><button class="danger-button" type="button" data-unbind-connection-id="${escapeHtml(node.id)}">解绑节点</button></div></div>
+        <div class="connection-stats"><div><span>${t('connections.latency')}</span><strong>${node.latency > 0 ? `${node.latency} ms` : '—'}</strong></div><div><span>${t('connections.running')}</span><strong>${node.count ?? '—'}</strong></div><div><span>${t('connections.version')}</span><strong>${escapeHtml(node.version || '—')}</strong></div></div>
+        <div class="connection-containers"><div><strong>${t('connections.containers')}</strong><div class="connection-container-meta">${meta.join('')}</div></div><div class="connection-container-tags">${tags || `<em>${allContainers.length ? t('connections.allRemoved') : t('connections.noneDiscovered')}</em>`}</div></div>
+        <div class="connection-card-actions"><span>${escapeHtml(node.error || (node.status === 'connected' ? t('connections.syncOk') : t('connections.syncIdle')))}</span><div class="connection-card-buttons"><button class="secondary-button compact-button" type="button" data-edit-connection-id="${escapeHtml(node.id)}">${t('connections.edit')}</button><button class="danger-button" type="button" data-unbind-connection-id="${escapeHtml(node.id)}">${t('connections.unbind')}</button></div></div>
       </article>
     `;
   }).join('');
@@ -2365,7 +2373,7 @@ async function loadOlderSelectedContainerLogs() {
       if (!Number.isFinite(oldest)) return { key, logs: [], hasMore: false };
       const params = new URLSearchParams({ node: target.nodeId, container: target.containerId, range: state.range, before: String(oldest) });
       const response = await fetch(`/api/logs/container/page?${params.toString()}`, { headers: { Accept: 'application/json' } });
-      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '加载更早日志失败');
+      if (!response.ok) throw new Error(apiErrorMessage(await response.json().catch(() => ({})), t('stream.toast.olderFailed')));
       return { key, ...(await response.json()) };
     }));
     let added = 0;
@@ -2376,9 +2384,9 @@ async function loadOlderSelectedContainerLogs() {
     });
     lastVirtualWindowKey = '';
     renderLogs({ preserveScroll: true });
-    if (!added) showToast('已到所选时间范围的最早日志');
+    if (!added) showToast(t('stream.toast.oldestReached'));
   } catch (error) {
-    showToast(error.message || '加载更早日志失败');
+    showToast(error.message || t('stream.toast.olderFailed'));
   } finally {
     olderLogsLoading = false;
     $('#older-log-loader')?.classList.add('hidden');
@@ -2478,23 +2486,25 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   const { start, end } = logVirtualWindow(stagedResults.length, stream, stickToBottom);
   const results = stagedResults.slice(start, end);
   const loadedLabel = state.fullRangeSearchLoading
-    ? `正在筛选完整${rangeLabels[state.range] || '时间范围'}日志…`
+    ? t('stream.rowCountLoadingFull', { range: rangeText(state.range) })
     : state.historyLoading
-    ? `历史日志加载中 · 已发现 ${allResults.length} 条`
-    : `显示 ${allResults.length} 条`;
+    ? t('stream.rowCountLoadingHistory', { count: allResults.length })
+    : t('stream.rowCount', { count: allResults.length });
   $('#all-count').textContent = levelCounts.all.toLocaleString('en-US');
   $('#info-count').textContent = levelCounts.info.toLocaleString('en-US');
   $('#warn-count').textContent = levelCounts.warn.toLocaleString('en-US');
   $('#error-count').textContent = levelCounts.error.toLocaleString('en-US');
   $('#row-count').textContent = loadedLabel;
   const selectedNodeNames = state.selectedNodes.map((id) => getNode(id)?.name).filter(Boolean);
-  const rangeLabel = rangeLabels[state.range] || rangeLabels['30m'];
-  const nodeCaption = selectedNodeNames.length === 1
-    ? selectedNodeNames[0]
+  const rangeLabel = rangeText(state.range);
+  // The caption is a whole sentence per case ("from N Dozzle nodes · last 30
+  // minutes"), so the language table owns the shape, not just the words.
+  const caption = selectedNodeNames.length === 1
+    ? t('stream.captionNode', { name: selectedNodeNames[0], range: rangeLabel })
     : selectedNodeNames.length > 1
-      ? `已选 ${selectedNodeNames.length} 个 Dozzle 节点`
-      : `${nodes.length} 个 Dozzle 节点`;
-  $('#stream-caption').textContent = `来自 ${nodeCaption} · ${rangeLabel}`;
+      ? t('stream.captionNodes', { count: selectedNodeNames.length, range: rangeLabel })
+      : t('stream.captionAllNodes', { count: nodes.length, range: rangeLabel });
+  $('#stream-caption').textContent = caption;
   $('#stream-nav-count').textContent = String(allResults.length).padStart(2, '0');
   const firstId = results[0]?.id || 0;
   const lastId = results[results.length - 1]?.id || 0;
@@ -2512,12 +2522,12 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
       <span class="log-meta">
         <span class="log-date">${highlightSearchText(logDate(log))}</span>
         <span class="log-time">${highlightSearchText(logTime(log))}</span>
-        <span class="log-container-origin" title="${escapeHtml(`${log.node || '未知节点'}/${log.container || '未知容器'}`)}">${highlightSearchText(`${log.node || '未知节点'}/${log.container || '未知容器'}`)}</span>
+        <span class="log-container-origin" title="${escapeHtml(`${log.node || t('stream.unknownNode')}/${log.container || t('stream.unknownContainer')}`)}">${highlightSearchText(`${log.node || t('stream.unknownNode')}/${log.container || t('stream.unknownContainer')}`)}</span>
       </span>
       <span class="log-level ${log.level}">${highlightSearchText(log.level.toUpperCase())}</span>
       <span class="log-source"><span class="source-tag">${highlightSearchText(log.node)}</span><span class="container-tag">/${highlightSearchText(log.container)}</span></span>
       <span class="log-level-marker ${escapeHtml(log.level || 'info')}" aria-hidden="true"></span>
-      <span class="log-message" title="${escapeHtml(log.message)}">${highlightMessage(log.message)}</span><span class="row-actions"><button class="row-ai-button${String(log.id) === state.activeAnalysisLogId ? ' active' : ''}" type="button" data-analyze-log="${log.id}" aria-label="分析这条日志" aria-pressed="${String(log.id) === state.activeAnalysisLogId}" title="让 AI 分析这条日志"><img src="ai-icon.png" alt="" aria-hidden="true" /></button></span>
+      <span class="log-message" title="${escapeHtml(log.message)}">${highlightMessage(log.message)}</span><span class="row-actions"><button class="row-ai-button${String(log.id) === state.activeAnalysisLogId ? ' active' : ''}" type="button" data-analyze-log="${log.id}" aria-label="${t('assistant.analyzeAria')}" aria-pressed="${String(log.id) === state.activeAnalysisLogId}" title="${t('assistant.analyzeTitle')}"><img src="ai-icon.png" alt="" aria-hidden="true" /></button></span>
     </div>
   `).join('')}${bottomSpacer}`;
   stream.append(emptyState);
@@ -2535,17 +2545,17 @@ function updateDetailPanel() {
   const unbindButton = $('#unbind-node-button');
   const editButton = $('#edit-node-button');
   if (!node) {
-    $('#detail-node-name').textContent = '未选择节点';
-    $('#detail-node-url').textContent = '暂无连接';
+    $('#detail-node-name').textContent = t('nodeDetail.noSelection');
+    $('#detail-node-url').textContent = t('nodeDetail.noConnection');
     selectedNodeAvatar.classList.remove('orange-bg');
     selectedNodeAvatar.style.background = '';
     $('#detail-latency').textContent = '—';
     $('#detail-containers').textContent = '—';
     $('#detail-version').textContent = '—';
-    $('#detail-heartbeat').textContent = '暂无心跳数据';
+    $('#detail-heartbeat').textContent = t('nodeDetail.noHeartbeat');
     $('#detail-node-status').className = 'healthy-badge status-offline';
     $('#detail-node-status').innerHTML = '<i></i>';
-    $('#detail-node-status').title = '未连接';
+    $('#detail-node-status').title = t('stream.status.disconnected');
     unbindButton.disabled = true;
     delete unbindButton.dataset.nodeId;
     editButton.disabled = true;
@@ -2567,14 +2577,14 @@ function updateDetailPanel() {
   $('#detail-latency').textContent = node.latency > 0 ? `${node.latency} ms` : '—';
   $('#detail-containers').textContent = node.count ?? '—';
   $('#detail-version').textContent = node.version || '—';
-  $('#detail-heartbeat').textContent = node.error || (node.status === 'connected' ? '等待日志数据' : '等待连接结果');
+  $('#detail-heartbeat').textContent = node.error || (node.status === 'connected' ? t('stream.waitingLogs') : t('connections.syncIdle'));
 }
 
 function updatePreview() {
   if (!$('#preview-code')) return;
   const log = logByID(state.selectedLog) || state.logs[0];
   if (!log) {
-    $('#preview-code').textContent = '暂无日志数据';
+    $('#preview-code').textContent = t('stream.emptyTitle');
     return;
   }
   const level = log.level;
@@ -2654,16 +2664,16 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
     state.ruleOrder = normalizeRuleOrder(payload.ruleOrder || state.ruleOrder);
     syncRuleButtons();
     goServerConnected = true;
-    const syncLabel = eventStream?.readyState === EventSource.OPEN ? '实时同步中' : '服务端已连接';
-    $('#sync-status').textContent = state.paused ? '接收已暂停' : syncLabel;
-    if (!state.paused) $('#stream-status').textContent = state.historyLoading ? '正在加载历史日志' : '正在监听';
-    updateSyncFooter(state.paused ? '已暂停接收' : syncLabel, state.paused ? 'paused' : 'connected');
+    const syncLabel = eventStream?.readyState === EventSource.OPEN ? t('sync.live') : t('sync.connected');
+    $('#sync-status').textContent = state.paused ? t('sync.paused') : syncLabel;
+    if (!state.paused) $('#stream-status').textContent = state.historyLoading ? t('stream.status.loadingHistory') : t('stream.status.live');
+    updateSyncFooter(state.paused ? t('stream.status.paused') : syncLabel, state.paused ? 'paused' : 'connected');
     if (updateLogView) $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
     $('#metric-processed-foot').textContent = state.paused
-      ? '已暂停，当前视图不会接收新日志'
+      ? t('metrics.processedPaused')
       : state.processed
-        ? '服务启动后累计接收，不等于缓存条数'
-        : '等待日志流';
+        ? t('metrics.processedFoot')
+        : t('metrics.processedIdle');
     renderNodes();
     if (updateLogView && (!incremental || serverRestarted || logsChanged || previousRange !== state.range || previousHistoryLoading !== state.historyLoading)) {
       const renderLimit = initialLogPreviewActive ? initialLogPreviewLimit : 0;
@@ -2678,8 +2688,8 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
   } catch (error) {
     goServerConnected = false;
     if (state.paused) return false;
-    $('#sync-status').textContent = '等待后端连接';
-    updateSyncFooter('等待服务连接', 'offline');
+    $('#sync-status').textContent = t('overview.waitingBackend');
+    updateSyncFooter(t('sidebar.status.connecting'), 'offline');
     return false;
   }
 }
@@ -2730,8 +2740,8 @@ function flushPendingStreamLogs() {
 
   state.processed += incomingLogs.length;
   $('#metric-processed').textContent = state.processed.toLocaleString('en-US');
-  $('#metric-processed-foot').textContent = '服务启动后累计接收，不等于缓存条数';
-  updateSyncFooter('实时同步中', 'connected');
+  $('#metric-processed-foot').textContent = t('metrics.processedFoot');
+  updateSyncFooter(t('sync.live'), 'connected');
   const newestTimestamp = incomingLogs.reduce((latest, log) => Math.max(latest, Number(log.timestamp) || 0), 0);
   updateLastSync(newestTimestamp);
   scheduleLogRender();
@@ -2759,9 +2769,9 @@ function connectGoStream() {
       stream.close();
       return;
     }
-    $('#sync-status').textContent = '实时同步中';
-    $('#stream-status').textContent = '正在监听';
-    updateSyncFooter('实时同步中', 'connected');
+    $('#sync-status').textContent = t('sync.live');
+    $('#stream-status').textContent = t('stream.status.live');
+    updateSyncFooter(t('sync.live'), 'connected');
   };
   stream.onmessage = (event) => {
     if (state.paused || eventStream !== stream) return;
@@ -2771,9 +2781,9 @@ function connectGoStream() {
     stream.close();
     if (state.paused || eventStream !== stream) return;
     goServerConnected = false;
-    $('#sync-status').textContent = '实时流未连接';
-    $('#stream-status').textContent = '等待连接';
-    updateSyncFooter('实时流未连接', 'offline');
+    $('#sync-status').textContent = t('sync.offline');
+    $('#stream-status').textContent = t('stream.status.waiting');
+    updateSyncFooter(t('sync.offline'), 'offline');
   };
 }
 
@@ -2785,8 +2795,8 @@ function openNodeModal(node = null) {
   form.elements.url.value = node?.url || '';
   form.elements.protocol.value = node?.style || 'HTTP / WebSocket';
   $('#modal-kicker').textContent = node ? 'EDIT CONNECTION' : 'NEW CONNECTION';
-  $('#modal-title').textContent = node ? '编辑 Dozzle 节点' : '添加 Dozzle 节点';
-  $('#node-submit-button').textContent = node ? '保存修改' : '连接并添加';
+  $('#modal-title').textContent = node ? t('modal.editNodeTitle') : t('modal.addNodeTitle');
+  $('#node-submit-button').textContent = node ? t('modal.saveChanges') : t('modal.connectAndAdd');
   modal.classList.remove('hidden');
 }
 
@@ -2796,8 +2806,8 @@ function closeNodeModal() {
   delete modal.dataset.nodeId;
   $('#add-node-form').reset();
   $('#modal-kicker').textContent = 'NEW CONNECTION';
-  $('#modal-title').textContent = '添加 Dozzle 节点';
-  $('#node-submit-button').textContent = '连接并添加';
+  $('#modal-title').textContent = t('modal.addNodeTitle');
+  $('#node-submit-button').textContent = t('modal.connectAndAdd');
 }
 
 // ---------------------------------------------------------------------------
@@ -2832,7 +2842,7 @@ function applyStorageMode(mode) {
   if (state.storageMode === next) return;
   const isFirstResolve = state.storageMode === '';
   state.storageMode = next;
-  if (!isFirstResolve) showToast('存储位置已切换，正在重新加载');
+  if (!isFirstResolve) showToast(t('modal.toast.storageSwitched'));
   if (isFirstResolve) {
     loadAIProfiles();
     if (next === 'file') loadAIProfilesFromFile();
@@ -2865,7 +2875,7 @@ function persistBrowserNodes() {
       initial: node.initial,
     }))));
   } catch (error) {
-    showToast('浏览器本地存储不可用，节点配置无法保存');
+    showToast(t('modal.toast.storageUnavailable'));
   }
 }
 
@@ -2881,8 +2891,8 @@ function updateStorageModeUI() {
   if (section) section.classList.toggle('hidden', false);
   if (note) {
     note.textContent = browser
-      ? '当前页面未在本机打开，节点与模型配置保存在此浏览器中，不会上传到服务器。'
-      : '节点与模型保存在程序目录下的 data 文件夹，整个目录拷到别的机器即可带走配置。保存模型密钥的文件含明文凭据，请勿分享或同步到公开位置。';
+      ? t('settings.configNoteBrowser')
+      : t('settings.configNotePlain');
   }
   if (reveal) {
     // canReveal is false on a desktop-less host, where opening a file manager
@@ -2910,11 +2920,11 @@ async function persistNodeToGo(name, url, style) {
     persistBrowserNodes();
     renderNodes();
     updateDetailPanel();
-    showToast('节点已添加到此浏览器');
+    showToast(t('modal.toast.addedToBrowser'));
     return node;
   }
   if (!goServerConnected) {
-    showToast('服务端未连接，暂时无法添加节点');
+    showToast(t('modal.toast.serverOfflineAdd'));
     return null;
   }
   try {
@@ -2934,7 +2944,7 @@ async function persistNodeToGo(name, url, style) {
     updateDetailPanel();
     return node;
   } catch (error) {
-    showToast(error.message === 'node already exists' ? '该节点已经添加' : `节点添加失败：${error.message}`);
+    showToast(error.message === 'node already exists' ? t('modal.toast.nodeExists') : t('modal.toast.addFailed', { error: apiErrorMessage(error, error.message) }));
     return null;
   }
 }
@@ -2947,11 +2957,11 @@ async function updateNodeToGo(id, name, url, style) {
     persistBrowserNodes();
     renderNodes();
     updateDetailPanel();
-    showToast('节点已更新');
+    showToast(t('modal.toast.nodeUpdated'));
     return nodes[index];
   }
   if (!goServerConnected) {
-    showToast('服务端未连接，暂时无法修改节点');
+    showToast(t('modal.toast.serverOfflineEdit'));
     return null;
   }
   try {
@@ -2969,17 +2979,17 @@ async function updateNodeToGo(id, name, url, style) {
     if (index >= 0) nodes[index] = node; else nodes.push(node);
     renderNodes();
     updateDetailPanel();
-    showToast('节点连接信息已更新，正在重新连接');
+    showToast(t('modal.toast.nodeReconnecting'));
     return node;
   } catch (error) {
-    showToast(error.message === 'node already exists' ? '该节点已经添加' : `节点修改失败：${error.message}`);
+    showToast(error.message === 'node already exists' ? t('modal.toast.nodeExists') : t('modal.toast.editFailed', { error: apiErrorMessage(error, error.message) }));
     return null;
   }
 }
 
 async function unbindNode(node) {
   if (isBrowserStorageMode()) {
-    if (!window.confirm(`确定解绑 Dozzle 节点“${node.name}”吗？`)) return;
+    if (!window.confirm(t('modal.confirmUnbind', { name: node.name }))) return;
     const index = nodes.findIndex((item) => item.id === node.id);
     if (index >= 0) nodes.splice(index, 1);
     state.selectedNodes = state.selectedNodes.filter((id) => id !== node.id);
@@ -2993,14 +3003,14 @@ async function unbindNode(node) {
     updateDetailPanel();
     updatePreview();
     persistSelection();
-    showToast('节点已从此浏览器移除');
+    showToast(t('modal.toast.removedFromBrowser'));
     return;
   }
   if (!goServerConnected) {
-    showToast('服务端未连接，暂时无法解绑节点');
+    showToast(t('modal.toast.serverOfflineUnbind'));
     return;
   }
-  if (!window.confirm(`确定解绑 Dozzle 节点“${node.name}”吗？`)) return;
+  if (!window.confirm(t('modal.confirmUnbind', { name: node.name }))) return;
   try {
     const response = await fetch(`/api/nodes/${encodeURIComponent(node.id)}`, { method: 'DELETE' });
     if (!response.ok) {
@@ -3019,9 +3029,9 @@ async function unbindNode(node) {
     updateDetailPanel();
     updatePreview();
     persistSelection();
-    showToast(`${node.name} 已解绑`);
+    showToast(t('modal.toast.unbound', { name: node.name }));
   } catch (error) {
-    showToast(`解绑失败：${error.message}`);
+    showToast(t('modal.toast.unbindFailed', { error: apiErrorMessage(error, error.message) }));
   }
 }
 
@@ -3031,8 +3041,8 @@ const commandServerStorageKey = 'log-agent-command-servers';
 const commandFavoritesStorageKey = 'log-agent-command-favorites';
 
 function commandDefaults() {
-  return [{ id: `flow-${Date.now()}`, name: '发布前检查', serverId: '', lines: [
-    { text: 'echo "开始检查"', status: 'idle' },
+  return [{ id: `flow-${Date.now()}`, name: t('commands.defaultFlowName'), serverId: '', lines: [
+    { text: t('commands.defaultFlowLine'), status: 'idle' },
     { text: 'docker ps --format "table {{.Names}}\\t{{.Status}}"', status: 'idle' },
     { text: 'df -h', status: 'idle' }
   ] }];
@@ -3095,15 +3105,15 @@ function renderCommandFavorites() {
   list.innerHTML = favorites.length ? favorites.map((item) => {
     const lineCount = item.flows.reduce((total, flow) => total + (flow.lines?.length || 0), 0);
     const date = new Date(item.createdAt || Date.now()).toLocaleString('zh-CN', { hour12: false });
-    return `<article class="command-favorite-item"><div><strong>${escapeHtml(item.name || '未命名收藏')}</strong><small>${escapeHtml(date)} · ${item.flows.length} 组 · ${lineCount} 行</small></div><div class="command-favorite-item-actions"><button class="secondary-button compact-button" type="button" data-restore-command-favorite="${escapeHtml(item.id)}">还原</button><button class="danger-button compact-button" type="button" data-delete-command-favorite="${escapeHtml(item.id)}">删除</button></div></article>`;
-  }).join('') : '<div class="command-favorites-empty">暂无收藏的指令集组</div>';
+    return `<article class="command-favorite-item"><div><strong>${escapeHtml(item.name || t('commands.untitledFavorite'))}</strong><small>${escapeHtml(date)} · ${t('commands.favoriteCount', { flows: item.flows.length, lines: lineCount })}</small></div><div class="command-favorite-item-actions"><button class="secondary-button compact-button" type="button" data-restore-command-favorite="${escapeHtml(item.id)}">${t('commands.restore')}</button><button class="danger-button compact-button" type="button" data-delete-command-favorite="${escapeHtml(item.id)}">${t('common.delete')}</button></div></article>`;
+  }).join('') : `<div class="command-favorites-empty">${t('commands.noFavorites')}</div>`;
 }
 
 function openCommandFavorites() {
   const modal = $('#command-favorites-modal');
   if (!modal) return;
   const flow = activeCommandFlow();
-  $('#command-favorite-name').value = flow?.name ? `${flow.name}收藏` : `指令集组收藏 ${new Date().toLocaleDateString('zh-CN')}`;
+  $('#command-favorite-name').value = flow?.name ? t('commands.favoriteNameSuffix', { name: flow.name }) : t('commands.favoriteNameDefault', { date: new Date().toLocaleDateString(activeLanguage() === 'zh' ? 'zh-CN' : 'en-US') });
   renderCommandFavorites();
   modal.classList.remove('hidden');
   requestAnimationFrame(() => { $('#command-favorite-name').focus(); $('#command-favorite-name').select(); });
@@ -3114,13 +3124,13 @@ function closeCommandFavorites() { $('#command-favorites-modal')?.classList.add(
 function saveCommandFavorite(event) {
   event?.preventDefault();
   const name = $('#command-favorite-name')?.value.trim();
-  if (!name) { $('#command-favorite-name')?.focus(); return showToast('请输入收藏名称'); }
+  if (!name) { $('#command-favorite-name')?.focus(); return showToast(t('commands.toast.needFavoriteName')); }
   state.commandFavorites = state.commandFavorites || [];
   state.commandFavorites.unshift({ id: `favorite-${Date.now()}-${Math.random().toString(16).slice(2)}`, name, createdAt: Date.now(), flows: commandFavoriteSnapshot() });
   state.commandFavorites = state.commandFavorites.slice(0, 50);
   saveCommandFlows();
   renderCommandFavorites();
-  showToast(`已收藏整个指令集组：${name}`);
+  showToast(t('commands.toast.favorited', { name }));
 }
 
 function restoreCommandFavorite(favoriteId) {
@@ -3137,7 +3147,7 @@ function restoreCommandFavorite(favoriteId) {
   renderCommandFlows();
   renderCommandEditor();
   closeCommandFavorites();
-  showToast(`已还原“${favorite.name}”的可编辑副本`);
+  showToast(t('commands.toast.restored', { name: favorite.name }));
 }
 
 function deleteCommandFavorite(favoriteId) {
@@ -3145,7 +3155,7 @@ function deleteCommandFavorite(favoriteId) {
   state.commandFavorites = (state.commandFavorites || []).filter((item) => item.id !== favoriteId);
   saveCommandFlows();
   renderCommandFavorites();
-  if (favorite) showToast(`已删除收藏：${favorite.name}`);
+  if (favorite) showToast(t('commands.toast.favoriteDeleted', { name: favorite.name }));
 }
 
 function activeCommandFlow() { return state.commandFlows.find((flow) => flow.id === state.activeCommandFlowId) || state.commandFlows[0]; }
@@ -3159,7 +3169,7 @@ function bindServerToFlow(flowId, serverId) {
   saveCommandFlows();
   renderCommandFlows();
   if (flow.id === state.activeCommandFlowId) renderCommandEditor();
-  showToast(`已绑定服务器：${commandServer(serverId).name || commandServer(serverId).host}`);
+  showToast(t('commands.toast.bound', { name: commandServer(serverId).name || commandServer(serverId).host }));
 }
 
 function addCommandFiles(fileList) {
@@ -3171,15 +3181,15 @@ function addCommandFiles(fileList) {
     if (!existing) { const imageFile = file.type?.startsWith('image/') || /\.(?:avif|gif|jpe?g|png|webp)$/i.test(file.name); state.commandFiles.push({ id: `file-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: file.name, size: file.size, type: file.type || 'application/octet-stream', file, previewURL: imageFile ? URL.createObjectURL(file) : '', uploadProgress: 0, uploadStatus: '' }); }
   });
   renderCommandFileShelf();
-  showToast(`已添加 ${files.length} 个文件，可拖入指令行`);
+  showToast(t('commands.toast.filesAdded', { count: files.length }));
 }
 function formatFileSize(size) { if (size < 1024) return `${size} B`; if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`; return `${(size / (1024 * 1024)).toFixed(1)} MB`; }
 function renderCommandFileShelf() {
   const list = $('#command-file-list');
   if (!list) return;
   const files = state.commandFiles || [];
-  $('#command-file-count').textContent = `${files.length} 个文件`;
-  list.innerHTML = files.map((item) => `<article class="command-file-card upload-${escapeHtml(item.uploadStatus || 'idle')}" draggable="true" data-command-file-id="${escapeHtml(item.id)}"><div class="command-file-thumb${item.previewURL ? ' image' : ''}">${item.previewURL ? `<img src="${escapeHtml(item.previewURL)}" alt="${escapeHtml(item.name)}" />` : `<span>${escapeHtml((item.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span>`}</div><div class="command-file-copy"><strong>${escapeHtml(item.name)}</strong><small><span>${formatFileSize(item.size || 0)}</span><span class="command-file-progress-label">${item.uploadStatus === 'uploading' ? `${item.uploadProgress || 0}%` : item.uploadStatus === 'success' ? '已上传' : item.uploadStatus === 'error' ? '上传失败' : ''}</span></small></div><div class="command-file-progress"><i style="width:${Math.max(0, Math.min(100, item.uploadProgress || 0))}%"></i></div><button type="button" class="command-file-remove" aria-label="移除文件">×</button></article>`).join('');
+  $('#command-file-count').textContent = t('commands.fileCount', { count: files.length });
+  list.innerHTML = files.map((item) => `<article class="command-file-card upload-${escapeHtml(item.uploadStatus || 'idle')}" draggable="true" data-command-file-id="${escapeHtml(item.id)}"><div class="command-file-thumb${item.previewURL ? ' image' : ''}">${item.previewURL ? `<img src="${escapeHtml(item.previewURL)}" alt="${escapeHtml(item.name)}" />` : `<span>${escapeHtml((item.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span>`}</div><div class="command-file-copy"><strong>${escapeHtml(item.name)}</strong><small><span>${formatFileSize(item.size || 0)}</span><span class="command-file-progress-label">${item.uploadStatus === 'uploading' ? `${item.uploadProgress || 0}%` : item.uploadStatus === 'success' ? t('commands.uploaded') : item.uploadStatus === 'error' ? t('commands.uploadFailed') : ''}</span></small></div><div class="command-file-progress"><i style="width:${Math.max(0, Math.min(100, item.uploadProgress || 0))}%"></i></div><button type="button" class="command-file-remove" aria-label="${t('commands.removeFile')}">×</button></article>`).join('');
   list.querySelectorAll('.command-file-card').forEach((card) => {
     card.addEventListener('dragstart', (event) => { event.dataTransfer.setData('text/command-file-id', card.dataset.commandFileId); event.dataTransfer.effectAllowed = 'copy'; });
     card.querySelector('.command-file-remove').addEventListener('click', () => { const removed = state.commandFiles.find((item) => item.id === card.dataset.commandFileId); if (removed?.previewURL) URL.revokeObjectURL(removed.previewURL); state.commandFiles = state.commandFiles.filter((item) => item.id !== card.dataset.commandFileId); renderCommandFileShelf(); });
@@ -3201,33 +3211,33 @@ function renderCommandServers() {
   const list = $('#server-card-list');
   if (!list) return;
   if (!state.commandServers.length) {
-    list.innerHTML = '<div class="server-library-empty">暂无服务器，点击右上角新增后即可复用。</div>';
+    list.innerHTML = `<div class="server-library-empty">${t('commands.noServerYet')}</div>`;
     return;
   }
   list.innerHTML = state.commandServers.map((server) => {
     const connectionStatus = ['success', 'failed'].includes(server.connectionStatus) ? server.connectionStatus : 'untested';
     return `
     <article class="reusable-server-card connection-${connectionStatus}" draggable="${connectionStatus === 'success'}" data-server-id="${escapeHtml(server.id)}" title="${escapeHtml(server.connectionError || '')}">
-      <div class="reusable-server-heading"><span class="server-drag-handle">⁙</span><input data-server-field="name" value="${escapeHtml(server.name || '')}" placeholder="服务器名称" /><button type="button" class="server-test-button" data-test-server="${escapeHtml(server.id)}">${connectionStatus === 'success' ? '已连接' : connectionStatus === 'failed' ? '重试' : '测试连接'}</button><button type="button" class="server-remove-button" aria-label="删除服务器">×</button></div>
+      <div class="reusable-server-heading"><span class="server-drag-handle">⁙</span><input data-server-field="name" value="${escapeHtml(server.name || '')}" placeholder="${t('commands.serverNamePlaceholder')}" /><button type="button" class="server-test-button" data-test-server="${escapeHtml(server.id)}">${connectionStatus === 'success' ? t('nodeStatus.connected') : connectionStatus === 'failed' ? t('commands.retry') : t('commands.testConnection')}</button><button type="button" class="server-remove-button" aria-label="${t('commands.deleteServer')}">×</button></div>
       <div class="reusable-server-fields">
-        <label>地址<input data-server-field="host" value="${escapeHtml(server.host || '')}" placeholder="192.168.1.20" /></label>
-        <label>端口<input data-server-field="port" type="number" min="1" max="65535" value="${escapeHtml(server.port || '22')}" /></label>
-        <label>用户名<input data-server-field="user" value="${escapeHtml(server.user || '')}" placeholder="deploy" /></label>
-        <label>认证<select data-server-field="auth"><option value="key" ${server.auth !== 'password' ? 'selected' : ''}>SSH Key</option><option value="password" ${server.auth === 'password' ? 'selected' : ''}>密码</option></select></label>
+        <label>${t('commands.address')}<input data-server-field="host" value="${escapeHtml(server.host || '')}" placeholder="192.168.1.20" /></label>
+        <label>${t('commands.port')}<input data-server-field="port" type="number" min="1" max="65535" value="${escapeHtml(server.port || '22')}" /></label>
+        <label>${t('commands.username')}<input data-server-field="user" value="${escapeHtml(server.user || '')}" placeholder="deploy" /></label>
+        <label>${t('commands.auth')}<select data-server-field="auth"><option value="key" ${server.auth !== 'password' ? 'selected' : ''}>SSH Key</option><option value="password" ${server.auth === 'password' ? 'selected' : ''}>${t('commands.authPassword')}</option></select></label>
       </div>
-      ${server.auth === 'password' ? `<input class="reusable-server-secret" data-server-field="secret" type="password" value="${escapeHtml(server.secret || '')}" placeholder="登录密码" />` : `<label class="server-key-picker"><span>选择密钥文件</span><small>${escapeHtml(server.keyName || '未选择文件')}</small><input data-server-key-file type="file" accept=".key,.pem,.ppk,application/x-pem-file" hidden /></label>`}
+      ${server.auth === 'password' ? `<input class="reusable-server-secret" data-server-field="secret" type="password" value="${escapeHtml(server.secret || '')}" placeholder="${t('commands.loginPassword')}" />` : `<label class="server-key-picker"><span>${t('commands.chooseKeyFile')}</span><small>${escapeHtml(server.keyName || t('commands.noFileChosen'))}</small><input data-server-key-file type="file" accept=".key,.pem,.ppk,application/x-pem-file" hidden /></label>`}
     </article>`;
   }).join('');
   list.querySelectorAll('.reusable-server-card').forEach((card) => {
-    card.addEventListener('dragstart', (event) => { const server = commandServer(card.dataset.serverId); if (server?.connectionStatus !== 'success') { event.preventDefault(); showToast('请先测试连接，只有连接成功的服务器可以拖动'); return; } const preview = document.createElement('div'); preview.className = 'server-drag-preview'; preview.innerHTML = `<span>⁙</span><strong>${escapeHtml(server.name || server.host || '未命名服务器')}</strong>`; document.body.appendChild(preview); event.dataTransfer.setDragImage(preview, 18, 17); setTimeout(() => preview.remove(), 0); card.classList.add('dragging'); event.dataTransfer.setData('text/server-id', card.dataset.serverId); event.dataTransfer.effectAllowed = 'copy'; });
+    card.addEventListener('dragstart', (event) => { const server = commandServer(card.dataset.serverId); if (server?.connectionStatus !== 'success') { event.preventDefault(); showToast(t('commands.pickKeyFirst')); return; } const preview = document.createElement('div'); preview.className = 'server-drag-preview'; preview.innerHTML = `<span>⁙</span><strong>${escapeHtml(server.name || server.host || t('commands.unnamedServer'))}</strong>`; document.body.appendChild(preview); event.dataTransfer.setDragImage(preview, 18, 17); setTimeout(() => preview.remove(), 0); card.classList.add('dragging'); event.dataTransfer.setData('text/server-id', card.dataset.serverId); event.dataTransfer.effectAllowed = 'copy'; });
     card.addEventListener('dragend', () => card.classList.remove('dragging'));
     card.querySelectorAll('[data-server-field]').forEach((input) => {
-      const updateServer = () => { const server = commandServer(card.dataset.serverId); const field = input.dataset.serverField; server[field] = input.value; server.connectionStatus = 'untested'; server.connectionError = ''; if (field === 'host' || field === 'port') server.hostFingerprint = ''; card.classList.remove('connection-success', 'connection-failed'); card.classList.add('connection-untested'); card.draggable = false; const testButton = card.querySelector('.server-test-button'); if (testButton) testButton.textContent = '测试连接'; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); if (field === 'auth' && input.matches('select')) renderCommandServers(); };
+      const updateServer = () => { const server = commandServer(card.dataset.serverId); const field = input.dataset.serverField; server[field] = input.value; server.connectionStatus = 'untested'; server.connectionError = ''; if (field === 'host' || field === 'port') server.hostFingerprint = ''; card.classList.remove('connection-success', 'connection-failed'); card.classList.add('connection-untested'); card.draggable = false; const testButton = card.querySelector('.server-test-button'); if (testButton) testButton.textContent = t('commands.testConnection'); saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); if (field === 'auth' && input.matches('select')) renderCommandServers(); };
       input.addEventListener('input', updateServer);
       input.addEventListener('change', updateServer);
       input.addEventListener('pointerdown', (event) => event.stopPropagation());
     });
-    card.querySelector('[data-server-key-file]')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const server = commandServer(card.dataset.serverId); try { state.commandServerKeys[server.id] = await file.text(); server.keyName = file.name; server.connectionStatus = 'untested'; server.connectionError = ''; saveCommandFlows(); renderCommandServers(); renderCommandFlows(); showToast(`已选择密钥：${file.name}`); } catch (error) { showToast(`读取密钥失败：${error.message}`); } });
+    card.querySelector('[data-server-key-file]')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const server = commandServer(card.dataset.serverId); try { state.commandServerKeys[server.id] = await file.text(); server.keyName = file.name; server.connectionStatus = 'untested'; server.connectionError = ''; saveCommandFlows(); renderCommandServers(); renderCommandFlows(); showToast(t('commands.toast.keyChosen', { name: file.name })); } catch (error) { showToast(t('commands.toast.keyReadFailed', { error: error.message })); } });
     card.querySelector('.server-test-button').addEventListener('click', () => testCommandServerConnection(card.dataset.serverId));
     card.querySelector('.server-remove-button').addEventListener('click', () => {
       const id = card.dataset.serverId;
@@ -3243,22 +3253,22 @@ async function testCommandServerConnection(serverId) {
   const card = document.querySelector(`.reusable-server-card[data-server-id="${CSS.escape(serverId)}"]`);
   const button = card?.querySelector('.server-test-button');
   if (!server || !button) return;
-  button.disabled = true; button.textContent = '测试中…';
+  button.disabled = true; button.textContent = t('commands.testing');
   try {
     const requestConnection = () => fetch('/api/commands/test', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ host: server.host || '', port: server.port || '22', user: server.user || '', auth: server.auth || 'key', secret: server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || ''), fingerprint: server.hostFingerprint || '' }) });
     let response = await requestConnection();
     let payload = await response.json().catch(() => ({}));
     if (response.status === 428 && payload.fingerprint) {
-      if (!window.confirm(`首次连接，请核对服务器指纹：\n\n${payload.fingerprint}\n\n确认信任此服务器吗？`)) { server.connectionStatus = 'untested'; server.connectionError = ''; return; }
+      if (!window.confirm(t('commands.confirmFingerprint', { fingerprint: payload.fingerprint }))) { server.connectionStatus = 'untested'; server.connectionError = ''; return; }
       server.hostFingerprint = payload.fingerprint;
       response = await requestConnection();
       payload = await response.json().catch(() => ({}));
     }
-    if (!response.ok) throw new Error(payload.error || '连接失败');
+    if (!response.ok) throw new Error(apiErrorMessage(payload, t('commands.toast.connectFailed')));
     server.connectionStatus = 'success'; server.connectionError = '';
-    showToast(`连接成功：${server.name || server.host}`);
+    showToast(t('commands.toast.connected', { name: server.name || server.host }));
   } catch (error) {
-    server.connectionStatus = 'failed'; server.connectionError = error.message || '连接失败';
+    server.connectionStatus = 'failed'; server.connectionError = error.message || t('commands.toast.connectFailed');
     showToast(server.connectionError);
   } finally {
     saveCommandFlows(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
@@ -3271,9 +3281,9 @@ function renderCommandFlows() {
   list.innerHTML = state.commandFlows.map((flow) => {
     const server = commandServer(flow.serverId);
     const done = flow.lines.length && flow.lines.every((line) => line.status === 'success');
-    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || '未命名指令集')}</strong><span>${flow.lines.length} 行指令</span></div><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : '拖入服务器')}</span></button><i class="command-flow-status ${done ? 'ok' : ''}"></i></div>`;
+    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><span>${t('commands.lineCount', { count: flow.lines.length })}</span></div><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))}</span></button><i class="command-flow-status ${done ? 'ok' : ''}"></i></div>`;
   }).join('');
-  $('#commands-flow-count').textContent = `${state.commandFlows.length} 组`;
+  $('#commands-flow-count').textContent = t('commands.flowCount', { count: state.commandFlows.length });
   list.querySelectorAll('.command-flow-card').forEach((card) => {
     card.addEventListener('click', (event) => { if (event.target.closest('.flow-bind-slot')) return; state.activeCommandFlowId = card.dataset.flowId; renderCommandFlows(); renderCommandEditor(); });
     card.addEventListener('dragstart', (event) => { if (event.target.closest('.flow-bind-slot')) return; card.classList.add('dragging'); event.dataTransfer.setData('text/flow-id', card.dataset.flowId); });
@@ -3286,7 +3296,7 @@ function renderCommandFlows() {
     slot.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/server-id')) { event.preventDefault(); event.stopPropagation(); slot.classList.add('drop-ready'); } });
     slot.addEventListener('dragleave', () => slot.classList.remove('drop-ready'));
     slot.addEventListener('drop', (event) => { const serverId = event.dataTransfer.getData('text/server-id'); if (!serverId) return; event.preventDefault(); event.stopPropagation(); slot.classList.remove('drop-ready'); bindServerToFlow(slot.dataset.bindFlow, serverId); });
-    slot.addEventListener('click', () => { const flow = state.commandFlows.find((item) => item.id === slot.dataset.bindFlow); if (!state.commandServers.length) return showToast('请先在上方新增服务器'); const current = Math.max(-1, state.commandServers.findIndex((server) => server.id === flow.serverId)); bindServerToFlow(flow.id, state.commandServers[(current + 1) % state.commandServers.length].id); });
+    slot.addEventListener('click', () => { const flow = state.commandFlows.find((item) => item.id === slot.dataset.bindFlow); if (!state.commandServers.length) return showToast(t('commands.toast.noServerAbove')); const current = Math.max(-1, state.commandServers.findIndex((server) => server.id === flow.serverId)); bindServerToFlow(flow.id, state.commandServers[(current + 1) % state.commandServers.length].id); });
   });
 }
 
@@ -3315,14 +3325,14 @@ function serializeCommandLine(element) {
 }
 
 function defaultCommandUploadDestination(flow) { const server = commandServer(flow?.serverId); if (!server?.user) return ''; return server.user === 'root' ? '/root' : `/home/${server.user}`; }
-function commandUploadLineMarkup(line, index) { const file = (state.commandFiles || []).find((item) => item.id === line.fileId); const fileName = file?.name || line.fileName || ''; const progress = Math.max(0, Math.min(100, line.uploadProgress || 0)); const status = line.status === 'running' ? `${progress}%` : line.status === 'success' ? '上传完成' : line.status === 'error' ? '上传失败' : '等待上传'; return `<div class="command-line command-upload-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index">${String(index + 1).padStart(2, '0')}</span><div class="command-upload-fields"><div class="command-upload-file-box">${file?.previewURL ? `<img src="${escapeHtml(file.previewURL)}" alt="" />` : '<span>FILE</span>'}<strong title="${escapeHtml(fileName)}">${escapeHtml(file ? fileName : fileName ? `${fileName}（需重新拖入）` : '文件已移除')}</strong></div><label class="command-upload-destination"><span>服务器位置</span><input value="${escapeHtml(line.destination || '')}" placeholder="例如：/home/opc" /></label><div class="command-line-upload-progress"><i style="width:${progress}%"></i><span>${status}</span></div></div><button class="command-line-remove" type="button" aria-label="删除第 ${index + 1} 行">×</button></div>`; }
+function commandUploadLineMarkup(line, index) { const file = (state.commandFiles || []).find((item) => item.id === line.fileId); const fileName = file?.name || line.fileName || ''; const progress = Math.max(0, Math.min(100, line.uploadProgress || 0)); const status = line.status === 'running' ? `${progress}%` : line.status === 'success' ? t('commands.uploadDone') : line.status === 'error' ? t('commands.uploadFailed') : t('commands.uploadWaiting'); return `<div class="command-line command-upload-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index">${String(index + 1).padStart(2, '0')}</span><div class="command-upload-fields"><div class="command-upload-file-box">${file?.previewURL ? `<img src="${escapeHtml(file.previewURL)}" alt="" />` : '<span>FILE</span>'}<strong title="${escapeHtml(fileName)}">${escapeHtml(file ? fileName : fileName ? t('commands.fileNeedsRedrop', { name: fileName }) : t('commands.fileRemoved'))}</strong></div><label class="command-upload-destination"><span>${t('commands.serverLocation')}</span><input value="${escapeHtml(line.destination || '')}" placeholder="${t('commands.destinationPlaceholder')}" /></label><div class="command-line-upload-progress"><i style="width:${progress}%"></i><span>${status}</span></div></div><button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`; }
 function renderCommandEditor() {
   const flow = activeCommandFlow();
   if (!flow) return;
   $('#command-flow-name').value = flow.name || '';
-  $('#commands-editor-title').textContent = flow.name || '运行指令';
+  $('#commands-editor-title').textContent = flow.name || t('commands.editor');
   const lines = $('#command-lines');
-  lines.innerHTML = flow.lines.map((line, index) => line.type === 'upload' ? commandUploadLineMarkup(line, index) : `<div class="command-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index">${String(index + 1).padStart(2, '0')}</span><div class="command-editable" contenteditable="true" spellcheck="false" data-placeholder="输入服务器指令">${commandLineMarkup(line.text)}</div><button class="command-line-remove" type="button" aria-label="删除第 ${index + 1} 行">×</button></div>`).join('');
+  lines.innerHTML = flow.lines.map((line, index) => line.type === 'upload' ? commandUploadLineMarkup(line, index) : `<div class="command-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index">${String(index + 1).padStart(2, '0')}</span><div class="command-editable" contenteditable="true" spellcheck="false" data-placeholder="${t('commands.inputPlaceholder')}">${commandLineMarkup(line.text)}</div><button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`).join('');
   lines.querySelectorAll('.command-editable').forEach((input) => {
     input.addEventListener('input', () => { const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.text = serializeCommandLine(input); line.status = 'idle'; delete line.error; saveCommandFlows(); renderCommandFlows(); });
     input.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/command-file-id')) { event.preventDefault(); input.classList.add('file-drop-target'); } });
@@ -3333,16 +3343,16 @@ function renderCommandEditor() {
   lines.querySelectorAll('.command-upload-destination input').forEach((input) => input.addEventListener('input', () => { const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.destination = input.value; line.status = 'idle'; line.uploadProgress = 0; delete line.error; saveCommandFlows(); renderCommandFlows(); }));
   lines.querySelectorAll('.command-line-remove').forEach((button) => button.addEventListener('click', () => { flow.lines.splice(Number(button.closest('.command-line').dataset.index), 1); if (!flow.lines.length) flow.lines.push({ text: '', status: 'idle' }); saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); }));
   const firstError = flow.lines.findIndex((line) => line.status === 'error');
-  $('#command-progress').textContent = firstError >= 0 ? `第 ${firstError + 1} 行失败，可修改后继续` : `${flow.lines.filter((line) => line.status === 'success').length} / ${flow.lines.length} 行已完成`;
+  $('#command-progress').textContent = firstError >= 0 ? t('commands.lineFailedEditable', { index: firstError + 1 }) : t('commands.linesDone', { done: flow.lines.filter((line) => line.status === 'success').length, total: flow.lines.length });
   $('#command-error').classList.toggle('hidden', firstError < 0);
-  if (firstError >= 0) $('#command-error-text').textContent = flow.lines[firstError].error || '服务器返回了错误';
+  if (firstError >= 0) $('#command-error-text').textContent = flow.lines[firstError].error || t('commands.serverReturnedError');
 }
-function updateCommandUploadProgress(line, item, index, progress, status = 'uploading') { line.uploadProgress = progress; item.uploadProgress = progress; item.uploadStatus = status; const commandLine = document.querySelector(`.command-line[data-index="${index}"]`); if (commandLine) { const bar = commandLine.querySelector('.command-line-upload-progress i'); const label = commandLine.querySelector('.command-line-upload-progress span'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? '上传完成' : status === 'error' ? '上传失败' : `${progress}%`; } const card = document.querySelector(`[data-command-file-id="${CSS.escape(item.id)}"]`); if (card) { card.classList.remove('upload-idle', 'upload-uploading', 'upload-success', 'upload-error'); card.classList.add(`upload-${status}`); const bar = card.querySelector('.command-file-progress i'); const label = card.querySelector('.command-file-progress-label'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? '已上传' : status === 'error' ? '上传失败' : `${progress}%`; } }
-async function uploadCommandFile(server, line, item, index) { const body = new FormData(); body.append('host', server.host || ''); body.append('port', server.port || '22'); body.append('user', server.user || ''); body.append('auth', server.auth || 'key'); body.append('secret', server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || '')); body.append('fingerprint', server.hostFingerprint || ''); body.append('destination', line.destination || defaultCommandUploadDestination({ serverId: server.id })); body.append('file', item.file, item.name); return new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); updateCommandUploadProgress(line, item, index, 0); xhr.open('POST', '/api/commands/upload'); xhr.upload.addEventListener('progress', (event) => { if (event.lengthComputable) updateCommandUploadProgress(line, item, index, Math.min(99, Math.round((event.loaded / event.total) * 100))); }); xhr.addEventListener('load', () => { let payload = {}; try { payload = JSON.parse(xhr.responseText || '{}'); } catch {} if (xhr.status >= 200 && xhr.status < 300) { updateCommandUploadProgress(line, item, index, 100, 'success'); resolve(payload); } else { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(payload.error || `文件上传失败：${item.name}`)); } }); xhr.addEventListener('error', () => { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(`文件上传失败：${item.name}`)); }); xhr.send(body); }); }
+function updateCommandUploadProgress(line, item, index, progress, status = 'uploading') { line.uploadProgress = progress; item.uploadProgress = progress; item.uploadStatus = status; const commandLine = document.querySelector(`.command-line[data-index="${index}"]`); if (commandLine) { const bar = commandLine.querySelector('.command-line-upload-progress i'); const label = commandLine.querySelector('.command-line-upload-progress span'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? t('commands.uploadDone') : status === 'error' ? t('commands.uploadFailed') : `${progress}%`; } const card = document.querySelector(`[data-command-file-id="${CSS.escape(item.id)}"]`); if (card) { card.classList.remove('upload-idle', 'upload-uploading', 'upload-success', 'upload-error'); card.classList.add(`upload-${status}`); const bar = card.querySelector('.command-file-progress i'); const label = card.querySelector('.command-file-progress-label'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? t('commands.uploaded') : status === 'error' ? t('commands.uploadFailed') : `${progress}%`; } }
+async function uploadCommandFile(server, line, item, index) { const body = new FormData(); body.append('host', server.host || ''); body.append('port', server.port || '22'); body.append('user', server.user || ''); body.append('auth', server.auth || 'key'); body.append('secret', server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || '')); body.append('fingerprint', server.hostFingerprint || ''); body.append('destination', line.destination || defaultCommandUploadDestination({ serverId: server.id })); body.append('file', item.file, item.name); return new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); updateCommandUploadProgress(line, item, index, 0); xhr.open('POST', '/api/commands/upload'); xhr.upload.addEventListener('progress', (event) => { if (event.lengthComputable) updateCommandUploadProgress(line, item, index, Math.min(99, Math.round((event.loaded / event.total) * 100))); }); xhr.addEventListener('load', () => { let payload = {}; try { payload = JSON.parse(xhr.responseText || '{}'); } catch {} if (xhr.status >= 200 && xhr.status < 300) { updateCommandUploadProgress(line, item, index, 100, 'success'); resolve(payload); } else { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(apiErrorMessage(payload, t('commands.toast.uploadFailedFile', { name: item.name })))); } }); xhr.addEventListener('error', () => { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(t('commands.toast.uploadFailedFile', { name: item.name }))); }); xhr.send(body); }); }
 async function uploadCommandFiles(server, line, index) {
   const ids = line.type === 'upload' ? [line.fileId] : [...String(line.text || '').matchAll(/\[\[file:([^\]]+)\]\]/g)].map((match) => match[1]);
   const files = ids.map((id) => (state.commandFiles || []).find((item) => item.id === id)).filter((item) => item?.file);
-  if (line.type === 'upload' && !files.length) throw new Error('上传文件已被移除，请重新拖入文件');
+  if (line.type === 'upload' && !files.length) throw new Error(t('commands.toast.uploadFileRemoved'));
   if (!files.length || !goServerConnected) return 0;
   for (const item of files) {
     await uploadCommandFile(server, line, item, index);
@@ -3354,18 +3364,18 @@ async function executeCommandLine(flow, line, index) {
   const server = commandServer(flow.serverId);
   if (line.type === 'upload') line.uploadProgress = 0;
   line.status = 'running'; renderCommandEditor();
-  $('#commands-run-status').textContent = `正在运行第 ${index + 1} 行`;
+  $('#commands-run-status').textContent = t('commands.status.runningLine', { index: index + 1 });
   await new Promise((resolve) => setTimeout(resolve, 380));
   try {
-    if (!server) throw new Error('当前指令集尚未绑定服务器');
+    if (!server) throw new Error(t('commands.error.noServerBound'));
     const uploadedFiles = await uploadCommandFiles(server, line, index);
     const executableText = commandTextForExecution(line.text);
     if (line.type === 'upload' || (uploadedFiles && /^\s*scp\s+/i.test(executableText))) { line.status = 'success'; line.error = ''; return true; }
     if (goServerConnected) {
       const response = await fetch('/api/commands/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host: server.host || '', port: server.port || '22', user: server.user || '', auth: server.auth || 'key', secret: server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || ''), fingerprint: server.hostFingerprint || '', command: executableText }) });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error([payload.error || '服务器执行失败', payload.output].filter(Boolean).join('\n'));
-    } else if (/fail|error|错误/i.test(executableText)) throw new Error('演示执行失败：检测到 fail/error 关键字');
+      if (!response.ok) throw new Error([apiErrorMessage(payload, t('commands.error.serverFailed')), String(payload.output || '').replace('[output truncated]', t('commands.outputTruncated'))].filter(Boolean).join('\n'));
+    } else if (/fail|error|错误/i.test(executableText)) throw new Error(t('commands.error.demoFailed'));
     line.status = 'success'; line.error = ''; return true;
   } catch (error) { line.status = 'error'; line.error = error.message; return false; }
 }
@@ -3379,8 +3389,8 @@ async function runCommandFlow(startAt = 0, flow = activeCommandFlow()) {
   let failed = -1;
   for (let i = begin; i < flow.lines.length; i += 1) { if (flow.lines[i].type !== 'upload' && !String(flow.lines[i].text || '').trim()) continue; const ok = await executeCommandLine(flow, flow.lines[i], i); saveCommandFlows(); renderCommandFlows(); if (!ok) { failed = i; break; } }
   state.commandRunning = false; $('#commands-run-all').disabled = false; $('#commands-run-current').disabled = false; renderCommandEditor();
-  $('#commands-run-status').textContent = failed >= 0 ? `第 ${failed + 1} 行执行失败` : '当前指令集执行完成';
-  if (failed >= 0) showToast('指令执行失败，可修改后从错误处继续');
+  $('#commands-run-status').textContent = failed >= 0 ? t('commands.status.lineFailed', { index: failed + 1 }) : t('commands.status.flowDone');
+  if (failed >= 0) showToast(t('commands.toast.flowFailedEditable'));
   return failed < 0;
 }
 
@@ -3390,16 +3400,16 @@ async function runAllCommandFlows() {
     state.activeCommandFlowId = flow.id; renderCommandFlows(); renderCommandEditor();
     const ok = await runCommandFlow(0, flow); if (!ok) return;
   }
-  $('#commands-run-status').textContent = '全部指令集执行完成'; showToast('全部指令集已按顺序执行完成');
+  $('#commands-run-status').textContent = t('commands.status.allDone'); showToast(t('commands.toast.allDone'));
 }
 
 function bindCommandEvents() {
   loadCommandFlows(); bindCommandFileShelf(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
-  $('#command-flow-name')?.addEventListener('input', (event) => { const flow = activeCommandFlow(); flow.name = event.target.value; saveCommandFlows(); $('#commands-editor-title').textContent = flow.name || '运行指令'; renderCommandFlows(); });
-  $('#commands-add-server')?.addEventListener('click', () => { state.commandServers.push({ id: `server-${Date.now()}`, name: `服务器 ${state.commandServers.length + 1}`, host: '', port: '22', user: '', auth: 'key', secret: '', connectionStatus: 'untested', connectionError: '' }); saveCommandFlows(); renderCommandServers(); });
-  $('#commands-add-flow')?.addEventListener('click', () => { const flow = { id: `flow-${Date.now()}`, name: `新指令集 ${state.commandFlows.length + 1}`, serverId: '', lines: [{ text: '', status: 'idle' }] }; state.commandFlows.push(flow); state.activeCommandFlowId = flow.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
-  $('#commands-duplicate')?.addEventListener('click', () => { const source = activeCommandFlow(); const copy = JSON.parse(JSON.stringify(source)); copy.id = `flow-${Date.now()}`; copy.name = `${source.name || '指令集'} 副本`; copy.lines.forEach((line) => { line.status = 'idle'; delete line.error; }); state.commandFlows.push(copy); state.activeCommandFlowId = copy.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); showToast('指令集已复制，服务器绑定已保留'); });
-  $('#commands-delete')?.addEventListener('click', () => { if (state.commandFlows.length <= 1) return showToast('至少保留一组指令集'); const index = state.commandFlows.findIndex((flow) => flow.id === state.activeCommandFlowId); state.commandFlows.splice(index, 1); state.activeCommandFlowId = state.commandFlows[Math.max(0, index - 1)].id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
+  $('#command-flow-name')?.addEventListener('input', (event) => { const flow = activeCommandFlow(); flow.name = event.target.value; saveCommandFlows(); $('#commands-editor-title').textContent = flow.name || t('commands.editor'); renderCommandFlows(); });
+  $('#commands-add-server')?.addEventListener('click', () => { state.commandServers.push({ id: `server-${Date.now()}`, name: t('commands.newServerName', { index: state.commandServers.length + 1 }), host: '', port: '22', user: '', auth: 'key', secret: '', connectionStatus: 'untested', connectionError: '' }); saveCommandFlows(); renderCommandServers(); });
+  $('#commands-add-flow')?.addEventListener('click', () => { const flow = { id: `flow-${Date.now()}`, name: t('commands.newFlowName', { index: state.commandFlows.length + 1 }), serverId: '', lines: [{ text: '', status: 'idle' }] }; state.commandFlows.push(flow); state.activeCommandFlowId = flow.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
+  $('#commands-duplicate')?.addEventListener('click', () => { const source = activeCommandFlow(); const copy = JSON.parse(JSON.stringify(source)); copy.id = `flow-${Date.now()}`; copy.name = t('commands.flowCopySuffix', { name: source.name || t('commands.flowFallbackName') }); copy.lines.forEach((line) => { line.status = 'idle'; delete line.error; }); state.commandFlows.push(copy); state.activeCommandFlowId = copy.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); showToast(t('commands.toast.flowDuplicated')); });
+  $('#commands-delete')?.addEventListener('click', () => { if (state.commandFlows.length <= 1) return showToast(t('commands.toast.keepOneFlow')); const index = state.commandFlows.findIndex((flow) => flow.id === state.activeCommandFlowId); state.commandFlows.splice(index, 1); state.activeCommandFlowId = state.commandFlows[Math.max(0, index - 1)].id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
   $('#commands-favorite')?.addEventListener('click', openCommandFavorites);
   $('#command-favorite-form')?.addEventListener('submit', saveCommandFavorite);
   $$('[data-close-command-favorites]').forEach((button) => button.addEventListener('click', closeCommandFavorites));
@@ -3414,20 +3424,34 @@ function bindCommandEvents() {
   $('#commands-run-all')?.addEventListener('click', runAllCommandFlows);
   $('#commands-run-current')?.addEventListener('click', () => { const flow = activeCommandFlow(); const index = flow.lines.findIndex((line) => line.status !== 'success'); runCommandFlow(index >= 0 ? index : 0, flow); });
   $('#commands-import-button')?.addEventListener('click', () => $('#commands-file-input').click());
-  $('#commands-file-input')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const flow = activeCommandFlow(); const text = await file.text(); flow.lines = text.split(/\r?\n/).filter((line) => line.trim()).map((line) => ({ text: line, status: 'idle' })); if (!flow.lines.length) flow.lines = [{ text: '', status: 'idle' }]; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); showToast(`已导入 ${flow.lines.length} 行指令`); event.target.value = ''; });
+  $('#commands-file-input')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const flow = activeCommandFlow(); const text = await file.text(); flow.lines = text.split(/\r?\n/).filter((line) => line.trim()).map((line) => ({ text: line, status: 'idle' })); if (!flow.lines.length) flow.lines = [{ text: '', status: 'idle' }]; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); showToast(t('commands.toast.linesImported', { count: flow.lines.length })); event.target.value = ''; });
+}
+// A language switch repaints every view that builds its own copy, then re-paints
+// the shell's dynamic bits (status lines, metric foot notes, captions).
+function onLanguageChanged() {
+  const view = $('.nav-item.active')?.dataset.view || 'overview';
+  renderNodes();
+  renderLogs();
+  updateDetailPanel();
+  updatePreview();
+  renderConnectionsView();
+  if (typeof renderCommandServers === 'function') { renderCommandServers(); renderCommandFlows(); renderCommandEditor(); }
+  if (typeof renderAssistant === 'function') renderAssistant();
+  setView(view);
 }
 function setView(view) {
-  const labels = { overview: '实时日志流', rules: '加工规则', connections: '连接管理', commands: '服务器指令' };
   $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
-  $('#view-breadcrumb').textContent = labels[view];
+  // The breadcrumb label comes from the same table the sidebar uses, so the two
+  // cannot drift apart in either language.
+  $('#view-breadcrumb').textContent = t(`nav.${view}`);
   Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view', commands: '#commands-view' }).forEach(([name, selector]) => {
     $(selector).classList.toggle('hidden', name !== view);
   });
   if (view === 'rules') syncRuleButtons();
   if (view === 'connections') renderConnectionsView();
-  if (view === 'rules') showToast('规则中心已展开，当前规则可在右侧直接编辑');
-  if (view === 'connections') showToast('连接管理已就绪，可从左侧添加 Dozzle 节点');
-  if (view === 'overview') showToast('已回到实时日志流');
+  if (view === 'rules') showToast(t('view.toast.rules'));
+  if (view === 'connections') showToast(t('view.toast.connections'));
+  if (view === 'overview') showToast(t('view.toast.overview'));
 }
 
 function bindEvents() {
@@ -3452,7 +3476,7 @@ function bindEvents() {
     resetLogPagination();
     renderLogs();
     if (!goServerConnected) return;
-    $('#stream-status').textContent = '正在加载';
+    $('#stream-status').textContent = t('stream.status.loading');
     try {
       const rangeQuery = new URLSearchParams({ range: state.range });
       state.selectedNodes.forEach((nodeId) => rangeQuery.append('node', nodeId));
@@ -3461,7 +3485,7 @@ function bindEvents() {
       // selected container's older pages are reached.
       state.selectedContainers.forEach((scope) => rangeQuery.append('container', scope));
       const response = await fetch(`/api/logs/range?${rangeQuery.toString()}`, { method: 'POST' });
-      if (!response.ok) throw new Error('时间范围加载失败');
+      if (!response.ok) throw new Error(t('stream.toast.rangeLoadFailed'));
       const rangePayload = await response.json().catch(() => ({}));
       if (requestVersion !== historyRequestVersion) return;
       const strictReload = rangePayload.status === 'reloading';
@@ -3476,8 +3500,8 @@ function bindEvents() {
       if (requestVersion !== historyRequestVersion) return;
       if (state.historyLoading) scheduleHistorySync();
       showToast(state.historyLoading
-        ? `${strictReload ? '正在重新加载' : '正在增量加载'}${rangeLabels[state.range]}日志`
-        : `已切换至${rangeLabels[state.range]}`);
+        ? t(strictReload ? 'stream.toast.reloadingStrict' : 'stream.toast.reloadingIncremental', { range: rangeText(state.range) })
+        : t('stream.toast.switched', { range: rangeText(state.range) }));
     } catch (error) {
       showToast(error.message);
     }
@@ -3529,7 +3553,7 @@ function bindEvents() {
   $('#pause-button').addEventListener('click', async () => {
     state.paused = !state.paused;
     $('#pause-button').classList.toggle('paused', state.paused);
-    $('#pause-button').innerHTML = state.paused ? '<span>▶</span> 继续接收' : '<span>Ⅱ</span> 暂停接收';
+    $('#pause-button').innerHTML = state.paused ? `<span>▶</span> ${t('stream.resume')}` : `<span>Ⅱ</span> ${t('stream.pause')}`;
     $('.stream-indicator').style.background = state.paused ? 'var(--orange)' : 'var(--teal)';
     if (state.paused) {
       if (eventStream) eventStream.close();
@@ -3542,19 +3566,19 @@ function bindEvents() {
         clearTimeout(containerLogRetryTimer);
         containerLogRetryTimer = null;
       }
-      $('#sync-status').textContent = '接收已暂停';
-      $('#stream-status').textContent = '已暂停接收';
-      $('#metric-processed-foot').textContent = '已暂停，当前视图不会接收新日志';
-      updateSyncFooter('已暂停接收', 'paused');
-      showToast('日志接收已暂停');
+      $('#sync-status').textContent = t('sync.paused');
+      $('#stream-status').textContent = t('stream.status.paused');
+      $('#metric-processed-foot').textContent = t('metrics.processedPaused');
+      updateSyncFooter(t('sync.paused'), 'paused');
+      showToast(t('stream.toast.paused'));
       return;
     }
-    $('#stream-status').textContent = '正在恢复';
-    showToast('正在恢复日志接收');
+    $('#stream-status').textContent = t('stream.status.resuming');
+    showToast(t('stream.toast.resuming'));
     const connected = await syncGoBackend({ incremental: true });
     if (!state.paused && connected && state.historyLoading) scheduleHistorySync();
   });
-  $('#clear-button').addEventListener('click', () => { state.query = ''; $('#log-search').value = ''; resetLogPagination(); renderLogs(); showToast('已清空当前过滤条件'); });
+  $('#clear-button').addEventListener('click', () => { state.query = ''; $('#log-search').value = ''; resetLogPagination(); renderLogs(); showToast(t('stream.toast.filtersCleared')); });
   $('#storage-clear-cache')?.addEventListener('click', clearLogCache);
   bindAssistantEvents();
   $('#settings-button').addEventListener('click', openAppSettings);
@@ -3574,7 +3598,7 @@ function bindEvents() {
   $('#ai-admin-token-form').addEventListener('submit', (event) => { event.preventDefault(); closeAIAdminTokenPrompt($('#ai-admin-token-input').value); });
   $$('[data-close-ai-token]').forEach((button) => button.addEventListener('click', () => closeAIAdminTokenPrompt()));
   bindBackdropDismissal($('#ai-admin-token-modal'), () => closeAIAdminTokenPrompt());
-  $('#refresh-button').addEventListener('click', () => { $('#refresh-button').style.transform = 'rotate(360deg)'; setTimeout(() => $('#refresh-button').style.transform = '', 350); showToast('节点状态已刷新'); });
+  $('#refresh-button').addEventListener('click', () => { $('#refresh-button').style.transform = 'rotate(360deg)'; setTimeout(() => $('#refresh-button').style.transform = '', 350); showToast(t('stream.toast.nodesRefreshed')); });
   $('#export-button').addEventListener('click', exportLogs);
   const pipelineMoreButton = $('#pipeline-more-button');
   if (pipelineMoreButton) pipelineMoreButton.addEventListener('click', (event) => {
@@ -3590,9 +3614,9 @@ function bindEvents() {
   $$('[data-pipeline-action]').forEach((button) => button.addEventListener('click', async (event) => {
     const action = event.currentTarget.dataset.pipelineAction;
     closePipelineMenu();
-    if (action === 'enable-all') await persistRuleGroup({ mask: true, structure: true, noise: true }, '全部规则已启用');
-    if (action === 'disable-all') await persistRuleGroup({ mask: false, structure: false, noise: false }, '全部规则已停用');
-    if (action === 'reset') await persistRuleGroup({ mask: true, structure: true, noise: false }, '规则已恢复默认设置');
+    if (action === 'enable-all') await persistRuleGroup({ mask: true, structure: true, noise: true }, t('rules.toast.allEnabled'));
+    if (action === 'disable-all') await persistRuleGroup({ mask: false, structure: false, noise: false }, t('rules.toast.allDisabled'));
+    if (action === 'reset') await persistRuleGroup({ mask: true, structure: true, noise: false }, t('rules.toast.defaultsRestored'));
   }));
   // Resolve outside-click ancestry during the capture phase. Several click
   // handlers re-render the DOM (for example selecting an assistant session
@@ -3632,25 +3656,25 @@ function bindEvents() {
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ rule, enabled })
       });
-      if (!response.ok) throw new Error('规则保存失败');
+      if (!response.ok) throw new Error(t('rules.toast.saveFailed'));
       const payload = await response.json();
       state.ruleState = { ...state.ruleState, ...(payload.rules || {}) };
       syncRuleButtons();
       renderLogs(); updatePreview();
-      showToast(state.ruleState[rule] ? '规则已启用' : '规则已停用');
+      showToast(state.ruleState[rule] ? t('rules.toast.enabled') : t('rules.toast.disabled'));
     } catch (error) {
       state.ruleState[rule] = previous;
       syncRuleButtons();
       renderLogs(); updatePreview();
-      showToast(error.message || '规则保存失败，已恢复原状态');
+      showToast(error.message || t('rules.toast.saveFailedRestored'));
     } finally {
       button.disabled = false;
     }
   }));
   bindPipelineDragAndDrop();
   bindCommandEvents();
-  if ($('#add-rule-button')) $('#add-rule-button').addEventListener('click', () => showToast('规则模板面板即将开放')); 
-  $('#rules-add-rule').addEventListener('click', () => showToast('规则模板面板即将开放'));
+  if ($('#add-rule-button')) $('#add-rule-button').addEventListener('click', () => showToast(t('rules.toast.templatesSoon'))); 
+  $('#rules-add-rule').addEventListener('click', () => showToast(t('rules.toast.templatesSoon')));
   $('#open-add-node').addEventListener('click', () => openNodeModal());
   $('#connections-add-node').addEventListener('click', () => openNodeModal());
   if ($('#edit-node-button')) $('#edit-node-button').addEventListener('click', (event) => {
@@ -3673,7 +3697,7 @@ function bindEvents() {
     const node = nodeId ? await updateNodeToGo(nodeId, name, url, style) : await persistNodeToGo(name, url, style);
     if (!node) return;
     closeNodeModal();
-    showToast(nodeId ? '节点连接信息已保存' : `${name} 已添加，正在建立连接`);
+    showToast(nodeId ? t('modal.toast.connectionSaved') : t('modal.toast.addedConnecting', { name }));
   });
   document.addEventListener('keydown', (event) => {
     if (event.key === ' ' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA' && !document.activeElement.isContentEditable) { event.preventDefault(); $('#pause-button').click(); }
@@ -3693,5 +3717,5 @@ function exportLogs() {
   const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a'); link.href = url; link.download = `dozzle-logs-${new Date().toISOString().slice(0, 10)}.csv`; link.click(); URL.revokeObjectURL(url);
-  showToast(`已导出 ${rows.length} 条日志`);
+  showToast(t('stream.toast.exported', { count: rows.length }));
 }
