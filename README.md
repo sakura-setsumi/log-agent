@@ -1,132 +1,176 @@
-# 日志中枢 · Log Agent
+# Log Agent
 
-这是一个用 Go 标准库提供服务端、HTML/CSS/JavaScript 提供交互界面的 Dozzle 日志管理面板。
+> A focused, self-hosted dashboard for aggregating, searching, processing, and analyzing logs from multiple [Dozzle](https://dozzle.dev/) instances.
 
-## 启动
+**English (default)** · [中文 / Chinese](#中文)
 
-需要 Go 1.22 或更高版本：
+## Overview
+
+Log Agent is a single-binary Go service with an embedded HTML/CSS/JavaScript dashboard. It connects to one or more Dozzle v10 instances, combines their live streams, and keeps a bounded in-memory history for fast investigation.
+
+Highlights:
+
+- Multi-node Dozzle log stream with container selection, level filters, full-range search, CSV export, and pause/resume.
+- Time-window history loading with automatic older-page loading after the per-container browse limit is reached.
+- Processing pipeline for sensitive-data masking, structured-field extraction, and health-check filtering.
+- AI log analysis with selectable context, image/text attachments, model profiles, and browser-local conversation history.
+- Local node/model storage for localhost use, with browser-local storage for remote visitors.
+- No database required; frontend assets are embedded into the Go executable.
+
+## Quick start
+
+Requires Go 1.22 or newer for development:
 
 ```bash
 go run .
 ```
 
-浏览器打开 <http://localhost:8099>。
+Open <http://localhost:8099>.
 
-## 测试
-
-服务端与浏览器端到端测试均可通过下面的命令运行：
-
-```bash
-go test ./...
-```
-
-端到端测试会启动临时服务，并使用本机 Chrome 或 Edge 验证 AI 日志按钮首次点击、附件图片预览关闭和弹窗滚动隔离，不会使用 8099 端口或真实 Dozzle 节点。
-
-前端脚本按职责加载：`app.js` 负责共享状态、日志流、节点和规则；`assistant-ui.js` 负责 AI 助手交互；`bootstrap.js` 只负责在所有模块加载完成后初始化应用。
-
-AI 日志助手会将最近 12 个会话保存在当前浏览器中，可通过标题栏的“会话历史”切换或删除。每个会话保存文本消息与日志上下文；附件不会保存。分析新的日志会自动创建一个新会话。助手消息使用受限 Markdown 渲染：原始 HTML 不会生效，链接仅允许 `http`、`https` 和 `mailto`，并限制超长内容与表格规模。
-
-## 构建产物
-
-使用 PowerShell 构建时，统一执行：
+For a stable installation, build and run the executable instead of `go run .`:
 
 ```powershell
 .\scripts\build.ps1
+.\dist\dozzle-ops.exe
 ```
 
-可执行文件会生成到 `dist/dozzle-ops.exe`。脚本默认先运行全部测试；仅需快速构建时可使用 `.\scripts\build.ps1 -SkipTests`。
+The service listens on `:8099` by default. Set `LOG_AGENT_PORT` or `PORT` to use another port.
 
-`dist/`、项目级 `.gocache/` 和历史 `dozzle-ops*.exe` 都属于本地生成物，不会提交到 Git。执行 `.\scripts\clean.ps1` 可清理 `dist/`；使用 `-IncludeProjectCache` 可一并清理项目级 Go 缓存。
+The latest Windows amd64 executable is available in the [Releases](https://github.com/sakura-setsumi/log-agent/releases) page.
 
-## 当前能力
+## Configuration
 
-- 统一查看多个 Dozzle 节点，支持节点切换、日志级别筛选和关键词搜索
-- 日志实时流采用 Server-Sent Events（SSE）推送
-- 支持暂停 / 继续接收、清空过滤条件和 CSV 导出
-- 支持新增 Dozzle 节点，节点与 AI 供应商配置按访问来源自动存入本机 JSON 文件或访客浏览器
-- 支持敏感信息脱敏、结构化字段提取、健康检查过滤等加工开关
-- 前端资源通过 `embed` 打包进 Go 服务，单个项目即可运行
+The application stores node connections and AI providers as JSON files in a `data` directory beside the executable:
 
-服务端会连接真实 Dozzle v10 实例：读取实例配置和容器事件，拉取容器历史日志，并通过 Dozzle SSE 接收实时日志。添加地址可以填写 Dozzle 根地址，也可以填写具体容器页面地址（例如 `/container/<container-id>`）。节点信息会写入本地配置文件，服务重启后自动恢复。
-
-页面顶部的齿轮按钮可以打开“系统设置”，在不重新部署服务的情况下配置运行环境和管理员 key。在本机打开时，还可以查看、导出、导入上表中的本地配置文件；从其他机器打开时，设置面板只显示“配置保存在此浏览器”。
-
-## 配置文件
-
-节点和 AI 供应商分别保存在两个 JSON 文件中，无需安装数据库：
-
-| 文件 | 内容 |
-| --- | --- |
-| `nodes.json` | Dozzle 节点地址、名称和样式 |
-| `models.json` | AI 供应商名称、Base URL、模型列表和 API key |
-
-默认位置是**可执行文件旁边的 `data` 文件夹**：
-
-```
+```text
 dozzle-ops.exe
 data/
 ├─ nodes.json
 └─ models.json
 ```
 
-这样做的好处是：整个目录拷到另一台机器就是完整迁移；双击 exe 和从命令行启动读的是同一份文件（路径不依赖工作目录）；想手工改配置直接就能看到。
+When the dashboard is opened through localhost, this local directory is used. When it is opened from another machine, that visitor's browser `localStorage` is used instead. This keeps remote visitors' connections and API keys isolated from the host machine.
 
-### 两种存储位置（自动判定，无需选择）
+Useful environment variables:
 
-页面从哪里打开，决定配置存在哪里。**这件事由服务端按请求来源自动判定，页面上没有开关**：
+| Variable | Purpose |
+| --- | --- |
+| `LOG_AGENT_CONFIG_DIR` | Override the data directory. |
+| `LOG_AGENT_SETTINGS_FILE` | Choose the runtime settings JSON file. |
+| `LOG_AGENT_ADMIN_TOKEN` | Preconfigure the administrator token. |
+| `LOG_AGENT_ENVIRONMENT` | Set the displayed runtime environment. |
+| `LOG_AGENT_PORT` / `PORT` | Change the listening port. |
+| `LOG_AGENT_MAX_STORED_LOGS` | Set the global in-memory cache limit (1–1,000,000). |
 
-| 打开方式 | 配置存放位置 | 设置面板 |
-| --- | --- | --- |
-| 在本机打开（`localhost` / `127.0.0.1`） | 本机 `data/nodes.json`、`data/models.json` | 右上角显示「打开文件目录」链接 |
-| 从其他机器打开（局域网 IP / 域名 / 公网） | 该访客**自己浏览器的 localStorage** | 没有这个链接 |
-
-也就是说：**exe 只跟本机 JSON 文件打交道，线上网页只跟浏览器缓存打交道，两者互不干扰、互不同步。** 之所以这样设计，是因为浏览器无法读取服务器（或访客自己电脑）上的文件——服务端只能把配置存进访客的浏览器里。反过来，本机打开时也不用担心配置被别的访客看到。
-
-两种情况下配置都是**在设置面板里改**，改动会自动写回对应的存储位置，不需要手工编辑 JSON 文件。「打开文件目录」只是方便备份和查看，不是配置入口；它的有无就是当前页面对应哪种存储的唯一标志——有链接说明配置在本机文件里，没有说明配置在这个浏览器里。
-
-「导出配置」「导入配置」在两种模式下都可用，导出的内容永远是当前页面实际生效的那一份配置，与存储位置无关。
-
-访客在浏览器里配的节点和 AI 供应商只属于他自己那台机器上的那个浏览器，清除浏览器数据会一并清掉；宿主机的 JSON 文件不会因此产生任何变化。
-
-> 一台机器一份配置。在**本机**通过任意地址（`localhost` / `127.0.0.1`）打开，读写的都是同一份 `data/` 文件。
-
-若可执行文件所在目录不可写（例如放在 `C:\Program Files\` 或系统的只读路径下），会自动退回到用户配置目录：Windows `%AppData%\logAgent`，macOS `~/Library/Application Support/logAgent`，Linux `~/.config/logAgent`。想看实际生效的位置，在设置面板点「打开文件目录」即可。
-
-如需固定到某个位置，可设置 `LOG_AGENT_CONFIG_DIR`：
-
-```bash
-export LOG_AGENT_CONFIG_DIR=/etc/log-agent
-```
-
-Windows PowerShell 请使用 `$env:` 设置环境变量，且必须在同一个窗口中启动服务：
+Example:
 
 ```powershell
-$env:LOG_AGENT_CONFIG_DIR = "D:\log-agent-config"
-.\dozzle-ops.exe
+$env:LOG_AGENT_CONFIG_DIR = 'D:\log-agent-config'
+$env:LOG_AGENT_PORT = '9099'
+.\log-agent.exe
 ```
 
-> **不要用 `go run .` 启动。** `go run` 会把程序编译到系统临时目录再运行，配置也就跟着写进那个临时目录，而 Go 在进程退出时会把它清理掉——你辛苦配好的节点和 AI 供应商会一起消失，下一次 `go run .` 还会落到另一个全新的目录，看起来就像从没配过。
->
-> 程序检测到这种情况会**直接拒绝启动**并给出提示。请改用 `go build` 生成 exe 后运行；如果确实需要 `go run` 调试，显式指定 `LOG_AGENT_CONFIG_DIR` 即可：
->
-> ```bash
-> LOG_AGENT_CONFIG_DIR=./data go run .
-> ```
+`models.json` contains API keys in plain text. Keep it outside public repositories and backups that are shared with others.
 
-如需通过环境变量预置管理员 key 和环境，可设置 `LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`；之后也可以在页面设置中修改。
+## Development and tests
 
-服务默认监听 `:8099`。若该端口已被占用（例如本机已装了 Dozzle），可用 `LOG_AGENT_PORT`（或 `PORT`）指定其他端口：
+Run the complete test suite:
 
 ```bash
-LOG_AGENT_PORT=9099 ./dozzle-ops
+go test ./...
 ```
 
-启动日志中应看到 `node storage: <目录>\nodes.json and <目录>\models.json`。也可以通过 `LOG_AGENT_SETTINGS_FILE` 指定服务配置文件（存放运行环境和管理员 key）的路径。
+The end-to-end tests start an isolated temporary service and use a local Chrome or Edge session. They do not use port 8099 or real Dozzle nodes.
 
-> `models.json` 中的 API key 以明文保存，请勿把该文件提交到版本库或同步到公开位置。若文件被手工编辑出语法错误，服务会忽略无法解析的条目并在日志中提示，不会因此启动失败。
+Build the Windows executable with tests:
 
-日志在内存缓存中默认最多保存 100,000 条。缓存达到上限后，后续每新增一条日志都会淘汰时间最早的一条，因此缓存条数不会超过上限。可通过 `LOG_AGENT_MAX_STORED_LOGS` 调整上限，取值范围为 1～1,000,000；缓存越大，占用的内存越多。
+```powershell
+.\scripts\build.ps1
+```
 
-仪表盘中的“累计接收日志”是本次服务启动以来接收的总数，不会随着缓存淘汰而减少；实际缓存条数与淘汰规则显示在“日志缓存使用率”卡片中。
+Build quickly without tests:
 
-“日志缓存使用率”会同时显示当前缓存条数、上限、累计淘汰条数和最近淘汰时间。累计淘汰只统计新日志进入满额缓存时替换的旧日志；时间过旧而未进入缓存的历史日志不会计入该指标。
+```powershell
+.\scripts\build.ps1 -SkipTests
+```
+
+Build output is written to `dist/`; local binaries and caches are intentionally ignored by Git.
+
+## Architecture
+
+- `main.go` — HTTP API, Dozzle connectors, SSE ingestion, history paging, cache policy, and embedded frontend.
+- `app.js` — dashboard state, node/container selection, log stream, filtering, paging, and export.
+- `assistant-ui.js` — AI assistant conversations, context, attachments, and session history.
+- `bootstrap.js` — application initialization after frontend modules load.
+- `styles.css` — dashboard styling and responsive layout.
+
+The backend connects to real Dozzle v10 APIs for container metadata, historical logs, and SSE streams. A Dozzle root URL or a specific `/container/<container-id>` URL can be used when adding a node.
+
+## Security notes
+
+- Dozzle endpoints and AI provider URLs are user-configured; use HTTPS and network access controls in production.
+- Do not commit `data/models.json`, exported configuration files, private keys, or administrator tokens.
+- The service does not modify Nginx or host system configuration.
+
+## License
+
+No license file is currently included. Contact the repository owner before redistributing the project.
+
+<a id="中文"></a>
+
+<details>
+<summary>中文说明（点击展开）</summary>
+
+## 项目简介
+
+Log Agent 是一个面向 Dozzle 的自托管日志聚合、检索、加工和分析面板。服务端使用 Go 编写，前端 HTML/CSS/JavaScript 会嵌入最终可执行文件。
+
+主要能力：
+
+- 聚合多个 Dozzle 节点，支持容器选择、级别筛选、完整时间范围搜索、CSV 导出和暂停/继续接收。
+- 按时间窗口拉取历史日志；单容器浏览缓存达到上限后，滚动到顶部会自动加载更早日志。
+- 提供敏感信息脱敏、结构化字段提取和健康检查过滤等日志加工规则。
+- 支持 AI 日志分析、上下文选择、图片/文本附件、模型配置和浏览器本地会话历史。
+- 本机访问时使用可执行文件旁的本地 JSON 配置；远程访问时使用访客浏览器的 localStorage。
+- 无需数据库，前端资源直接嵌入 Go 可执行文件。
+
+## 快速启动
+
+开发环境需要 Go 1.22 或更高版本：
+
+```bash
+go run .
+```
+
+浏览器访问 <http://localhost:8099>。正式运行建议先构建可执行文件：
+
+```powershell
+.\scripts\build.ps1
+.\dist\dozzle-ops.exe
+```
+
+默认监听 `:8099`，可通过 `LOG_AGENT_PORT` 或 `PORT` 修改端口。Windows amd64 最新可执行文件位于 [Releases](https://github.com/sakura-setsumi/log-agent/releases)。
+
+## 配置和安全
+
+节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_PORT` 和 `LOG_AGENT_MAX_STORED_LOGS` 覆盖默认设置。
+
+`models.json` 会以明文保存 API key，请勿提交到公开仓库，也不要共享导出的敏感配置、私钥或管理员 token。服务不会修改 Nginx 或主机系统配置。
+
+## 开发测试
+
+```bash
+go test ./...
+```
+
+使用 `scripts/build.ps1` 构建 Windows 程序；使用 `scripts/build.ps1 -SkipTests` 可跳过测试。构建输出在 `dist/`，本地生成物会被 Git 忽略。
+
+## 代码结构
+
+- `main.go`：HTTP API、Dozzle 连接、SSE 日志接收、历史分页、缓存策略和嵌入式前端。
+- `app.js`：页面状态、节点/容器选择、日志流、筛选、分页和导出。
+- `assistant-ui.js`：AI 助手会话、上下文、附件和历史记录。
+- `bootstrap.js`：前端模块加载完成后的初始化。
+- `styles.css`：面板样式和响应式布局。
+
+</details>
