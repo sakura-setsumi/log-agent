@@ -3,6 +3,7 @@
 .idea/
 # Agent working memory (session notes, screenshots) - not project source.
 .workbuddy-ai/
+.workbuddy/
 
 # Build artifacts
 log-agent.exe

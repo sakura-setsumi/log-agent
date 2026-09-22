@@ -9,6 +9,9 @@ const logRenderInterval = 250;
 const maxPendingStreamLogs = 2000;
 let maxBufferedLogs = 100000;
 const selectionStorageKey = 'log-agent-selection';
+// Containers dropped from the 连接管理 list. A display-level choice, so it is
+// kept next to the log selection rather than in the server-side node store.
+const hiddenContainersStorageKey = 'log-agent-hidden-containers';
 const aiProfilesStorageKey = 'log-agent-ai-profiles';
 const aiActiveProfileStorageKey = 'log-agent-ai-active-profile';
 const aiActiveModelStorageKey = 'log-agent-ai-active-model';
@@ -19,6 +22,15 @@ const maxAssistantSessions = 12;
 const state = {
   selectedNodes: [],
   selectedContainers: [],
+  // `nodeId::containerId` keys removed from 连接管理's container list. Only that
+  // list is affected: the sidebar keeps every discovered container, because it is
+  // the picker for the log scope and hiding a container there would also hide it
+  // from the filter the user needs to reach it.
+  hiddenContainers: [],
+  // Containers ticked in 连接管理 as "keep these, drop the rest". Transient on
+  // purpose: it is an input to 去掉其他, not a stored preference, and it is
+  // cleared for a node as soon as the action runs (or when the user cancels).
+  keptConnectionContainers: [],
   // Off by default: clicking a node replaces the selection until the user
   // explicitly turns the sidebar switch on.
   multiSelect: false,
@@ -60,6 +72,9 @@ let goServerConnected = false;
 let eventStream;
 let assistantRequestController = null;
 let assistantRequestId = 0;
+// Previous value of state.assistantBusy, so renderAssistant() can tell the render
+// that closes a run apart from every other render.
+let assistantRunWasBusy = false;
 let loadedContainerSelectionKey = '';
 let containerLogRetryTimer;
 let fullRangeSearchTimer;
@@ -86,6 +101,9 @@ let logScrollFrame;
 let streamBatchTimer;
 let pendingStreamLogs = [];
 let lastFilteredLogs = [];
+// Level-chip badges from the last filter pass: counts per level with everything
+// applied but the level filter itself.
+let levelCounts = { all: 0, info: 0, warn: 0, error: 0 };
 let lastVirtualWindowKey = '';
 let logTextSelectionActive = false;
 let followLatestLogs = true;
@@ -224,6 +242,119 @@ function persistSelection() {
   }
 }
 
+// restoreHiddenContainers/persistHiddenContainers mirror the selection pair above
+// so the containers dropped from 连接管理 survive a reload. A stale key (node
+// gone, container replaced) is harmless: the list only ever looks keys up.
+function restoreHiddenContainers() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(hiddenContainersStorageKey) || '[]');
+    if (Array.isArray(saved)) {
+      state.hiddenContainers = saved.filter((key) => typeof key === 'string' && key.includes('::'));
+    }
+  } catch (error) {
+    // Unavailable storage simply means nothing is hidden yet.
+  }
+  // A stored scope must never point at a container the sidebar no longer lists.
+  state.selectedContainers = state.selectedContainers.filter((key) => !state.hiddenContainers.includes(key));
+}
+
+function persistHiddenContainers() {
+  try {
+    localStorage.setItem(hiddenContainersStorageKey, JSON.stringify(state.hiddenContainers));
+  } catch (error) {
+    // The current page still reflects the change.
+  }
+}
+
+function hiddenContainerKeys(nodeId) {
+  return new Set(state.hiddenContainers.filter((key) => containerKeyNodeId(key) === nodeId));
+}
+
+// dropContainersFromScope removes containers that just left 连接管理 from the log
+// scope. The sidebar is where the scope gets picked, so a filter pointing at a
+// container that is no longer listed would narrow the stream with nothing on
+// screen to explain why. Runs the same refresh sequence a sidebar container click
+// uses so the list, the detail panel and the logs stay in step.
+function dropContainersFromScope(keys) {
+  const dropped = new Set(keys);
+  if (!dropped.size) return false;
+  const remaining = state.selectedContainers.filter((key) => !dropped.has(key));
+  if (remaining.length === state.selectedContainers.length) return false;
+  state.selectedContainers = remaining;
+  clearFullRangeSearch();
+  state.containerLogCache = {};
+  loadedContainerSelectionKey = '';
+  state.selectedLog = 0;
+  resetLogPagination();
+  updateDetailPanel();
+  renderLogs();
+  persistSelection();
+  loadSelectedContainerLogs();
+  return true;
+}
+
+// hideConnectionContainer drops one container from a node's card list AND from
+// the sidebar tree -- both read the same hidden set, so a container the user
+// stopped caring about disappears wherever it was listed. The container itself is
+// untouched: it still streams, and 「恢复」 puts it back in both places.
+function hideConnectionContainer(key) {
+  if (!key || state.hiddenContainers.includes(key)) return;
+  state.hiddenContainers = [...state.hiddenContainers, key];
+  // A container that just left the list must not stay ticked as "keep this one".
+  state.keptConnectionContainers = state.keptConnectionContainers.filter((value) => value !== key);
+  persistHiddenContainers();
+  dropContainersFromScope([key]);
+  // renderNodes() repaints the sidebar tree and cascades into the card list.
+  renderNodes();
+  showToast('已从列表去掉；卡片上的「恢复」可放回');
+}
+
+function restoreConnectionContainers(nodeId) {
+  const remaining = state.hiddenContainers.filter((key) => containerKeyNodeId(key) !== nodeId);
+  if (remaining.length === state.hiddenContainers.length) return;
+  state.hiddenContainers = remaining;
+  persistHiddenContainers();
+  renderNodes();
+}
+
+// toggleConnectionContainerKeep ticks/unticks a container as "keep this one".
+// Ticking is the input for 去掉其他: the user says what they care about and the
+// list drops the rest, which beats dropping twenty containers one by one.
+function toggleConnectionContainerKeep(key) {
+  if (!key) return;
+  state.keptConnectionContainers = state.keptConnectionContainers.includes(key)
+    ? state.keptConnectionContainers.filter((value) => value !== key)
+    : [...state.keptConnectionContainers, key];
+  renderConnectionsView();
+}
+
+function clearConnectionContainerKeep(nodeId) {
+  const remaining = state.keptConnectionContainers.filter((key) => containerKeyNodeId(key) !== nodeId);
+  if (remaining.length === state.keptConnectionContainers.length) return;
+  state.keptConnectionContainers = remaining;
+  renderConnectionsView();
+}
+
+// removeOtherConnectionContainers drops every container of a node except the
+// ticked ones. It only ever ADDS to the hidden set, so containers the user
+// already removed stay removed, and 「恢复」 still brings the whole node back.
+function removeOtherConnectionContainers(nodeId) {
+  const node = getNode(nodeId);
+  const kept = new Set(state.keptConnectionContainers.filter((key) => containerKeyNodeId(key) === nodeId));
+  if (!node || !kept.size) return;
+  const dropped = [];
+  (node.containers || []).forEach((container) => {
+    const key = containerKey(nodeId, container.id || container.name);
+    if (!kept.has(key) && !state.hiddenContainers.includes(key)) dropped.push(key);
+  });
+  state.hiddenContainers = [...state.hiddenContainers, ...dropped];
+  state.keptConnectionContainers = state.keptConnectionContainers.filter((key) => containerKeyNodeId(key) !== nodeId);
+  persistHiddenContainers();
+  dropContainersFromScope(dropped);
+  renderNodes();
+  showToast(dropped.length ? `已保留 ${kept.size} 个，其余 ${dropped.length} 个已去掉` : '没有需要去掉的容器');
+}
+
 function normalizeAIProvider(profile, index = 0) {
   if (!profile || typeof profile !== 'object') return null;
   const name = String(profile.name || '').trim();
@@ -349,7 +480,16 @@ function closeAssistantSessionMenu() {
 function renderAssistantSessions() {
   const list = $('#assistant-session-list');
   if (!list) return;
-  list.innerHTML = state.assistantSessions.length ? state.assistantSessions.map((session) => `<div class="assistant-session-item${session.id === state.activeAssistantSessionId ? ' active' : ''}"><button class="assistant-session-select" type="button" data-select-assistant-session="${escapeHtml(session.id)}"><span>${escapeHtml(session.title)}</span><small>${new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small></button><button class="assistant-session-remove" type="button" data-delete-assistant-session="${escapeHtml(session.id)}" aria-label="删除会话">×</button></div>`).join('') : '<div class="assistant-session-empty">暂无历史会话</div>';
+  list.innerHTML = state.assistantSessions.length ? state.assistantSessions.map((session) => {
+    // The title ("ERROR · ly-api-container") is the same for every run against the
+    // same container, so the analysed log's own line sits between the title and
+    // the date: one row, same size as the date, truncated with an ellipsis. The
+    // title attribute carries the untruncated message.
+    const context = session.context || [];
+    const activeLog = context.find((log) => String(log.id) === String(session.activeLogId)) || context[0];
+    const errorLine = activeLog?.message ? String(activeLog.message).replace(/\s+/g, ' ').trim() : '';
+    return `<div class="assistant-session-item${session.id === state.activeAssistantSessionId ? ' active' : ''}"><button class="assistant-session-select" type="button" data-select-assistant-session="${escapeHtml(session.id)}"><span>${escapeHtml(session.title)}</span>${errorLine ? `<em class="assistant-session-error" title="${escapeHtml(errorLine)}">${escapeHtml(errorLine)}</em>` : ''}<small>${new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small></button><button class="assistant-session-remove" type="button" data-delete-assistant-session="${escapeHtml(session.id)}" aria-label="删除会话">×</button></div>`;
+  }).join('') : '<div class="assistant-session-empty">暂无历史会话</div>';
 }
 
 function loadAssistantSessions() {
@@ -495,6 +635,10 @@ function fillAISettingsForm() {
 function renderAssistant() {
   const panel = $('#assistant-panel');
   if (!panel) return;
+  // The render that closes a run (busy: true -> false) is the one that parks the
+  // view on the start of the answer it just produced.
+  const finishedRun = assistantRunWasBusy && !state.assistantBusy;
+  assistantRunWasBusy = state.assistantBusy;
   renderAssistantSessions();
   renderAIModelPicker();
   renderAssistantAttachments();
@@ -541,7 +685,17 @@ function renderAssistant() {
   $('#assistant-send').disabled = state.assistantBusy;
   $('#assistant-send').textContent = state.assistantBusy ? '分析中…' : '发送';
   $('#assistant-input').disabled = state.assistantBusy;
-  if (state.assistantMessages.length) messages.scrollTop = messages.scrollHeight;
+  // While a run streams, the newest line stays in view. Once it finishes, the
+  // view parks on the START of the answer instead: a finished answer is read from
+  // its first line, and the forced scroll-to-bottom left the user at the end
+  // having to scroll back up. A short answer clamps this to the panel's own top,
+  // which is the same thing.
+  const latestAnswer = [...messages.querySelectorAll('.assistant-message.assistant:not(.assistant-loading)')].pop();
+  if (state.assistantMessages.length) {
+    messages.scrollTop = finishedRun && latestAnswer
+      ? Math.max(0, Math.round(latestAnswer.getBoundingClientRect().top - messages.getBoundingClientRect().top + messages.scrollTop - 8))
+      : messages.scrollHeight;
+  }
 }
 
 const maxAssistantAttachmentCount = 5;
@@ -1963,7 +2117,15 @@ function renderNodes() {
   // write below and only needs its state re-mirrored when the node list is redrawn.
   syncMultiSelectToggle();
   $('#node-list').innerHTML = nodes.length ? nodes.map((node) => {
-    const containers = node.containers || [];
+    // The tree lists the same containers the 连接管理 card does, minus the ones the
+    // user dropped there -- keeping a container out of the inventory should not
+    // leave it in the picker right next to it.
+    const hiddenContainers = hiddenContainerKeys(node.id);
+    const containers = (node.containers || []).filter((container) => {
+      const containerId = container.id || container.name;
+      return !hiddenContainers.has(containerKey(node.id, containerId));
+    });
+    const emptyNote = (node.containers || []).length ? '容器已在连接管理里去掉' : '暂无容器数据';
     const expanded = state.expandedNodes.includes(node.id);
     return `
       <div class="node-group ${expanded ? 'expanded' : ''}" data-node-group-id="${escapeHtml(node.id)}">
@@ -1980,7 +2142,7 @@ function renderNodes() {
           const containerName = container.name || containerId || '未命名容器';
           const selected = state.selectedContainers.includes(containerKey(node.id, containerId));
           return `<button class="container-item ${selected ? 'active' : ''}" type="button" data-node-id="${escapeHtml(node.id)}" data-container-id="${escapeHtml(containerId)}" title="${escapeHtml(containerName)}"><i class="container-dot ${container.state === 'running' ? '' : 'stopped'}"></i><span>${escapeHtml(containerName)}</span></button>`;
-        }).join('') : '<div class="container-empty">暂无容器数据</div>'}</div>` : ''}
+        }).join('') : `<div class="container-empty">${emptyNote}</div>`}</div>` : ''}
       </div>
     `;
   }).join('') : '<div class="node-empty">暂无已连接节点</div>';
@@ -2083,16 +2245,66 @@ function renderConnectionsView() {
     return;
   }
   list.innerHTML = nodes.map((node) => {
-    const containers = (node.containers || []).slice(0, 8);
+    const allContainers = node.containers || [];
+    const hidden = hiddenContainerKeys(node.id);
+    const visible = allContainers.filter((container) => {
+      const containerId = container.id || container.name;
+      return !hidden.has(containerKey(node.id, containerId));
+    });
+    const hiddenCount = allContainers.length - visible.length;
+    const kept = new Set(state.keptConnectionContainers.filter((key) => containerKeyNodeId(key) === node.id));
+    // Eight chips is what fits next to the stats, so the card stays compact.
+    // Dropping one promotes the next into its place instead of leaving a gap.
+    const tags = visible.slice(0, 8).map((container) => {
+      const containerId = container.id || container.name;
+      const containerName = container.name || containerId || '未命名容器';
+      const key = containerKey(node.id, containerId);
+      const ticked = kept.has(key);
+      // Discovered but not running (Dify's one-shot *_init_permissions-1, say).
+      // Marked like the sidebar's grey container dot, so "21 个已发现" next to a
+      // running count of 20 reads as "one of them is not up" rather than as a
+      // miscount.
+      const stopped = !!container.state && container.state !== 'running';
+      const stateNote = stopped ? ` · 状态 ${container.state}（未在运行）` : '';
+      return `<span class="connection-container-tag${ticked ? ' kept' : ''}${stopped ? ' stopped' : ''}">${stopped ? '<i class="container-dot stopped"></i>' : ''}<button class="connection-container-pick" type="button" data-keep-container="${escapeHtml(key)}" aria-pressed="${ticked}" title="${ticked ? '已点选，再次点击取消' : '点选要保留的容器，再用「去掉其他」'}${stateNote}">${escapeHtml(containerName)}</button><button class="container-hide-button" type="button" data-hide-container="${escapeHtml(key)}" aria-label="从列表中去掉 ${escapeHtml(containerName)}" title="从容器列表中去掉">×</button></span>`;
+    }).join('');
+    const meta = [`<span>${allContainers.length} 个已发现</span>`];
+    if (kept.size) {
+      meta.push(`<button class="container-keep-button" type="button" data-remove-others="${escapeHtml(node.id)}" title="只保留已点选的 ${kept.size} 个容器，其余从列表去掉">去掉其他（保留 ${kept.size}）</button>`);
+      meta.push(`<button class="container-cancel-button" type="button" data-clear-kept="${escapeHtml(node.id)}" title="取消点选">取消</button>`);
+    }
+    if (hiddenCount) {
+      meta.push(`<button class="container-restore-button" type="button" data-restore-containers="${escapeHtml(node.id)}" title="把该节点被去掉的容器放回列表">已去掉 ${hiddenCount} · 恢复</button>`);
+    }
     return `
       <article class="connection-card panel">
         <div class="connection-card-heading"><div class="connection-node"><div class="node-avatar orange-bg">${escapeHtml(node.initial)}</div><div><strong>${escapeHtml(node.name)}</strong><span>${escapeHtml(node.url)}</span></div></div><span class="healthy-badge status-${nodeStatusClass(node)}" title="${escapeHtml(nodeStatusLabel(node))}" aria-label="${escapeHtml(nodeStatusLabel(node))}"><i></i></span></div>
         <div class="connection-stats"><div><span>延迟</span><strong>${node.latency > 0 ? `${node.latency} ms` : '—'}</strong></div><div><span>运行中容器</span><strong>${node.count ?? '—'}</strong></div><div><span>版本</span><strong>${escapeHtml(node.version || '—')}</strong></div></div>
-        <div class="connection-containers"><div><strong>容器列表</strong><span>${node.containers?.length || 0} 个已发现</span></div><div class="connection-container-tags">${containers.length ? containers.map((container) => `<span>${escapeHtml(container.name || container.id)}</span>`).join('') : '<em>等待容器同步</em>'}</div></div>
+        <div class="connection-containers"><div><strong>容器列表</strong><div class="connection-container-meta">${meta.join('')}</div></div><div class="connection-container-tags">${tags || `<em>${allContainers.length ? '容器已全部去掉，点击「恢复」找回' : '等待容器同步'}</em>`}</div></div>
         <div class="connection-card-actions"><span>${escapeHtml(node.error || (node.status === 'connected' ? '实时同步正常' : '等待连接结果'))}</span><div class="connection-card-buttons"><button class="secondary-button compact-button" type="button" data-edit-connection-id="${escapeHtml(node.id)}">编辑连接</button><button class="danger-button" type="button" data-unbind-connection-id="${escapeHtml(node.id)}">解绑节点</button></div></div>
       </article>
     `;
   }).join('');
+  $$('#connections-list [data-keep-container]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleConnectionContainerKeep(event.currentTarget.dataset.keepContainer);
+  }));
+  $$('#connections-list [data-remove-others]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    removeOtherConnectionContainers(event.currentTarget.dataset.removeOthers);
+  }));
+  $$('#connections-list [data-clear-kept]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    clearConnectionContainerKeep(event.currentTarget.dataset.clearKept);
+  }));
+  $$('#connections-list [data-hide-container]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    hideConnectionContainer(event.currentTarget.dataset.hideContainer);
+  }));
+  $$('#connections-list [data-restore-containers]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    restoreConnectionContainers(event.currentTarget.dataset.restoreContainers);
+  }));
   $$('#connections-list [data-unbind-connection-id]').forEach((button) => button.addEventListener('click', async (event) => {
     const node = getNode(event.currentTarget.dataset.unbindConnectionId);
     if (node) await unbindNode(node);
@@ -2116,15 +2328,27 @@ function filteredLogs() {
   const source = currentSearchKey && state.fullRangeSearchKey === currentSearchKey
     ? state.fullRangeSearchLogs
     : logsForActiveContainer();
-  return source.filter((log) => {
+  // One pass fills both the visible rows and the level-chip badges. A badge
+  // counts what its level would show WITHOUT the level filter of its own: a
+  // facet that counted itself would read 0 on every chip but the active one, and
+  // the numbers would jump on each click. Tallying here instead of in a second
+  // filteredLogs() call keeps a single scan over the buffered logs (100k+).
+  // Every entry normalises to info/warn/error, so `all` is exactly their sum.
+  const counts = { all: 0, info: 0, warn: 0, error: 0 };
+  const results = [];
+  for (const log of source) {
     const logNodeId = nodeIdByName(log.node);
     const nodeMatch = !state.selectedNodes.length || selectedNodeIds.has(logNodeId);
     const containerMatch = !state.selectedContainers.length || selectedTargets.some((target) => target.nodeId === logNodeId && (log.container === target.name || log.container === target.containerId));
-    const levelMatch = state.level === 'all' || log.level === state.level;
     const queryMatch = !query || normalizedLogSearch(`${log.node} ${log.container} ${log.message}`).includes(query);
     const noiseMatch = state.ruleState.noise ? !log.message.includes('/healthz') : true;
-    return isLogInSelectedRange(log, now) && nodeMatch && containerMatch && levelMatch && queryMatch && noiseMatch;
-  }).reverse();
+    if (!isLogInSelectedRange(log, now) || !nodeMatch || !containerMatch || !queryMatch || !noiseMatch) continue;
+    counts.all++;
+    if (counts[log.level] !== undefined) counts[log.level]++;
+    if (state.level === 'all' || log.level === state.level) results.push(log);
+  }
+  levelCounts = counts;
+  return results.reverse();
 }
 
 async function loadOlderSelectedContainerLogs() {
@@ -2258,7 +2482,10 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
     : state.historyLoading
     ? `历史日志加载中 · 已发现 ${allResults.length} 条`
     : `显示 ${allResults.length} 条`;
-  $('#all-count').textContent = allResults.length.toLocaleString('en-US');
+  $('#all-count').textContent = levelCounts.all.toLocaleString('en-US');
+  $('#info-count').textContent = levelCounts.info.toLocaleString('en-US');
+  $('#warn-count').textContent = levelCounts.warn.toLocaleString('en-US');
+  $('#error-count').textContent = levelCounts.error.toLocaleString('en-US');
   $('#row-count').textContent = loadedLabel;
   const selectedNodeNames = state.selectedNodes.map((id) => getNode(id)?.name).filter(Boolean);
   const rangeLabel = rangeLabels[state.range] || rangeLabels['30m'];

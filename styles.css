@@ -37,7 +37,11 @@ button { color: inherit; cursor: pointer; }
 .nav-item { height: 36px; width: 100%; display: flex; align-items: center; gap: 10px; padding: 0 11px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; text-align: left; transition: .18s ease; }
 .nav-item:hover { color: var(--text); background: rgba(255,255,255,.04); }.nav-item.active { color: var(--text); background: #252a30; box-shadow: inset 3px 0 0 var(--orange); }
 .nav-icon { width: 16px; color: var(--orange); font-size:19px; line-height: 1; }.nav-item:not(.active) .nav-icon { color: var(--muted-2); }.nav-count { margin-left: auto; color: var(--orange); font-size:12px; font-weight: 700; }
-.workspace-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 30px; }.workspace-heading .sidebar-label { padding-bottom: 10px; }.node-total { margin-right: 12px; color: var(--muted-2); font-size:12px; font-variant-numeric: tabular-nums; }
+/* The 10px under the label is the gap to the node list, so it belongs to the row
+   rather than to the label: as a padding-bottom on the label it also shifted the
+   text up by half of it (align-items:center centers boxes), which left
+   "Dozzle 节点" sitting ~5px above the count and the 多选 toggle next to it. */
+.workspace-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 30px; margin-bottom: 10px; }.workspace-heading .sidebar-label { padding-bottom: 0; }.node-total { margin-right: 12px; color: var(--muted-2); font-size:12px; font-variant-numeric: tabular-nums; }
 /* Node multi-select switch. It sits in the sidebar heading; the mobile
    breakpoint below hides the label so only the switch survives the collapse. */
 .workspace-heading-actions { display: flex; align-items: center; }
@@ -209,7 +213,7 @@ html[data-theme="light"] .assistant-input-shell, html[data-theme="light"] .assis
 .rule-note { max-width: 900px; display: flex; align-items: center; gap: 15px; margin-top: 14px; padding: 15px 21px; color: var(--muted); font-size:12px; }
 .rule-note strong { flex: 0 0 auto; color: var(--text); font-size:13px; }
 .connections-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
-.connection-card { min-width: 0; padding: 20px 21px 16px; }
+.connection-card { min-width: 0; padding: 20px 21px 16px; display: flex; flex-direction: column; }
 .connection-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .connection-node { min-width: 0; display: flex; align-items: center; gap: 10px; }
 .connection-node > div:last-child { min-width: 0; }
@@ -230,7 +234,37 @@ html[data-theme="light"] .assistant-input-shell, html[data-theme="light"] .assis
 .connection-container-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
 .connection-container-tags span { max-width: 170px; overflow: hidden; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; color: #cbd2d5; background: #20252b; font-size:11px; text-overflow: ellipsis; white-space: nowrap; }
 .connection-container-tags em { color: var(--muted-2); font-size:11px; font-style: normal; }
-.connection-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; color: var(--muted-2); font-size:11px; }
+/* A chip is name + a "drop it from this list" button. The wrapper turns the chip
+   into a flex row, so the ellipsis that used to sit on the chip moves to the name
+   button -- a flex container cannot ellipsise its own anonymous text. */
+.connection-container-tag { display: inline-flex; align-items: center; gap: 4px; }
+.connection-container-pick { min-width: 0; overflow: hidden; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; font-size:11px; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+/* Discovered, but not running: listed (it is still a real container on that node)
+   yet visibly set apart, so the card's discovered count and the node's running
+   count are not read as contradicting each other. */
+.connection-container-tag.stopped { border-style: dashed; }
+.connection-container-tag.stopped .connection-container-pick { color: var(--muted-2); }
+.connection-container-tag .container-dot { margin-right: 1px; }
+/* Ticked = "keep this one"; 去掉其他 drops every unticked container. */
+.connection-container-tag.kept { border-color: rgba(246, 166, 55, .7); color: #ffd8a8; background: rgba(246, 166, 55, .16); }
+html[data-theme="light"] .connection-container-tag.kept { border-color: #e39b33; color: #8b4d00; background: #fff1da; }
+.container-hide-button { width: 14px; height: 14px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; border: 0; border-radius: 3px; color: inherit; background: transparent; font-size:13px; line-height: 1; opacity: .5; cursor: pointer; }
+.container-hide-button:hover { color: #ff9d9d; background: rgba(255, 111, 111, .18); opacity: 1; }
+html[data-theme="light"] .container-hide-button:hover { color: #c23b3b; background: rgba(210, 80, 80, .12); }
+/* The header can carry the count plus up to three actions, so it wraps instead of
+   squeezing the "容器列表" label on a narrow card. */
+.connection-container-meta { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.container-restore-button { padding: 0; border: 0; color: var(--orange); background: transparent; font-size:11px; cursor: pointer; }
+.container-restore-button:hover { text-decoration: underline; }
+.container-keep-button { padding: 0; border: 0; color: var(--orange); background: transparent; font-size:11px; font-weight: 600; cursor: pointer; }
+.container-keep-button:hover { text-decoration: underline; }
+.container-cancel-button { padding: 0; border: 0; color: var(--muted-2); background: transparent; font-size:11px; cursor: pointer; }
+.container-cancel-button:hover { color: var(--text); text-decoration: underline; }
+/* The card is as tall as the tallest card in its row (grid stretch), so the
+   action row is pushed to the bottom instead of following the container list.
+   Without this, dropping containers pulled 实时同步正常 upwards and left the
+   slack under it, and no two cards in a row agreed on where their footer sat. */
+.connection-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; padding-top: 16px; color: var(--muted-2); font-size:11px; }
 .connection-empty { min-height: 180px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; color: var(--muted-2); }
 .connection-empty strong { color: var(--text); font-size:15px; }
 
@@ -611,7 +645,11 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 .assistant-dock.open .assistant-launcher { display: none; }
 .assistant-dock .assistant-messages { min-width: 0; min-height: 0; }
 .assistant-dock .assistant-message { min-width: 0; min-height: max-content; }
-.assistant-heading { position: relative; }.assistant-heading-actions { display: inline-flex; align-items: center; gap: 4px; }.assistant-session-toggle { position: relative; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: transparent; font-size: 20px; line-height: 1; }.assistant-session-toggle:hover, .assistant-session-toggle:focus-visible { border-color: var(--line); color: var(--text); background: var(--surface-soft); outline: none; }.assistant-session-toggle::after { content: attr(data-tooltip); position: absolute; z-index: 50; top: calc(100% + 6px); right: 0; padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-raised); box-shadow: 0 7px 18px rgba(0,0,0,.2); font-size: 12px; line-height: 1; white-space: nowrap; opacity: 0; pointer-events: none; }.assistant-session-toggle:hover::after, .assistant-session-toggle:focus-visible::after { opacity: 1; }.assistant-session-menu { position: absolute; z-index: 45; top: calc(100% - 8px); right: 14px; width: min(330px, calc(100% - 28px)); max-height: 300px; overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: 0 14px 30px rgba(0,0,0,.3); }.assistant-session-menu-label { padding: 5px 7px 7px; color: var(--muted-2); font-size: 11px; }.assistant-session-item { display: flex; align-items: center; gap: 4px; border-radius: 6px; }.assistant-session-item.active, .assistant-session-select:hover { background: var(--surface-soft); }.assistant-session-select { min-width: 0; flex: 1; display: grid; gap: 2px; padding: 7px; border: 0; border-radius: 6px; color: var(--text); background: transparent; text-align: left; }.assistant-session-select span, .assistant-session-select small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.assistant-session-select span { font-size: 12px; }.assistant-session-select small { color: var(--muted-2); font-size: 10px; }.assistant-session-remove { width: 24px; height: 24px; flex: 0 0 auto; margin-right: 3px; padding: 0; border: 0; border-radius: 5px; color: var(--muted-2); background: transparent; font-size: 17px; }.assistant-session-remove:hover { color: var(--danger); background: rgba(255,121,117,.1); }.assistant-session-empty { padding: 10px 7px; color: var(--muted-2); font-size: 11px; text-align: center; }
+.assistant-heading { position: relative; }.assistant-heading-actions { display: inline-flex; align-items: center; gap: 4px; }.assistant-session-toggle { position: relative; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: transparent; font-size: 20px; line-height: 1; }.assistant-session-toggle:hover, .assistant-session-toggle:focus-visible { border-color: var(--line); color: var(--text); background: var(--surface-soft); outline: none; }.assistant-session-toggle::after { content: attr(data-tooltip); position: absolute; z-index: 50; top: calc(100% + 6px); right: 0; padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-raised); box-shadow: 0 7px 18px rgba(0,0,0,.2); font-size: 12px; line-height: 1; white-space: nowrap; opacity: 0; pointer-events: none; }.assistant-session-toggle:hover::after, .assistant-session-toggle:focus-visible::after { opacity: 1; }.assistant-session-menu { position: absolute; z-index: 45; top: calc(100% - 8px); right: 14px; width: min(330px, calc(100% - 28px)); max-height: 300px; overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: 0 14px 30px rgba(0,0,0,.3); }.assistant-session-menu-label { padding: 5px 7px 7px; color: var(--muted-2); font-size: 11px; }.assistant-session-item { display: flex; align-items: center; gap: 4px; border-radius: 6px; }.assistant-session-item.active, .assistant-session-select:hover { background: var(--surface-soft); }.assistant-session-select { min-width: 0; flex: 1; display: grid; gap: 2px; padding: 7px; border: 0; border-radius: 6px; color: var(--text); background: transparent; text-align: left; }.assistant-session-select span, .assistant-session-select small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.assistant-session-select span { font-size: 12px; }
+/* Same colour as the title above it: it inherits the select button's --text, so
+   only the date below stays muted. */
+.assistant-session-error { overflow: hidden; font-size: 10px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-session-select small { color: var(--muted-2); font-size: 10px; }.assistant-session-remove { width: 24px; height: 24px; flex: 0 0 auto; margin-right: 3px; padding: 0; border: 0; border-radius: 5px; color: var(--muted-2); background: transparent; font-size: 17px; }.assistant-session-remove:hover { color: var(--danger); background: rgba(255,121,117,.1); }.assistant-session-empty { padding: 10px 7px; color: var(--muted-2); font-size: 11px; text-align: center; }
 @media (max-width: 680px) {
   .assistant-dock { top: 16px; bottom: 16px; }
   .assistant-dock .assistant-panel { height: auto; max-height: calc(100dvh - 96px); }
@@ -659,6 +697,14 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 .commands-column-left > .server-library { flex:1 1 auto; }
 .commands-column-left > .command-file-shelf { flex:0 0 auto; min-height:214px; }
 .server-card-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
+/* The list itself is the scroller, so a padding-bottom on the list would only
+   show up once the user scrolls all the way to the end -- while scrolling, the
+   last card was still cut flush against the panel's bottom border, which reads
+   as a broken panel rather than as "there is more below". The gutter therefore
+   lives on a wrapper instead: the wrapper is the panel's flex child, the list
+   fills it, and the scroll viewport ends `padding-bottom` above the border, so
+   the bottom margin is there at every scroll position. */
+.server-card-scroll { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding-bottom:16px; }
 .command-file-shelf .command-file-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
 .commands-board > .commands-flow-list { flex:1 1 auto; min-height:0; overflow-y:auto; }
 .command-editor-body { flex:1 1 auto; min-height:0; overflow-y:auto; }
@@ -691,7 +737,7 @@ html[data-theme="dark"] .logs-panel .log-row-tone-odd.selected { background: #20
 .command-upload-label input[type="file"] { height:auto; padding:7px 8px; color:var(--muted); font-size:11px; } .command-upload-label small { color:var(--muted-2); font-size:10px; }
 
 .server-library { min-width:0; }
-.server-card-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; padding:0 18px 16px; }
+.server-card-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; padding:0 18px; }
 .server-library-empty { grid-column:1/-1; min-height:90px; display:grid; place-items:center; border:1px dashed var(--line); border-radius:7px; color:var(--muted-2); font-size:12px; }
 .reusable-server-card { min-width:0; padding:11px; border:1px solid var(--line); border-radius:7px; background:var(--surface); cursor:default; }
 .reusable-server-card.connection-success { border-color:#25a97a; cursor:grab; }.reusable-server-card.connection-failed { border-color:var(--danger); }.reusable-server-card.connection-success:hover { border-color:#25a97a; }.reusable-server-card.connection-failed:hover { border-color:var(--danger); }.reusable-server-card.dragging { opacity:.5; cursor:grabbing; }

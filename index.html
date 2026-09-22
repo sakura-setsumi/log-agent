@@ -141,9 +141,9 @@
                 </div>
                 <div class="level-filters" role="group" aria-label="按日志级别筛选">
                   <button class="level-chip active" data-level="all">全部 <b id="all-count">0</b></button>
-                  <button class="level-chip" data-level="info"><i class="level-dot info"></i> INFO</button>
-                  <button class="level-chip" data-level="warn"><i class="level-dot warn"></i> WARN</button>
-                  <button class="level-chip" data-level="error"><i class="level-dot error"></i> ERROR</button>
+                  <button class="level-chip" data-level="info"><i class="level-dot info"></i> INFO <b id="info-count">0</b></button>
+                  <button class="level-chip" data-level="warn"><i class="level-dot warn"></i> WARN <b id="warn-count">0</b></button>
+                  <button class="level-chip" data-level="error"><i class="level-dot error"></i> ERROR <b id="error-count">0</b></button>
                 </div>
                 <div class="log-search-wrap">
                   <span>⌕</span><input id="log-search" type="search" placeholder="过滤当前日志" />
@@ -259,7 +259,7 @@
             <div class="commands-column commands-column-left">
               <section class="server-library panel">
                 <div class="panel-heading compact-heading"><div><div class="section-kicker">REUSABLE SERVERS</div><h2>服务器库</h2></div><button class="primary-button compact-button" id="commands-add-server" type="button"><span>＋</span> 新增服务器</button></div>
-                <div class="server-card-list" id="server-card-list"></div>
+                <div class="server-card-scroll"><div class="server-card-list" id="server-card-list"></div></div>
               </section>
               <section class="command-file-shelf panel" id="command-file-shelf">
                 <div class="panel-heading compact-heading"><div><div class="section-kicker">FILE STAGING</div><h2>上传文件</h2></div><div class="file-shelf-actions"><span id="command-file-count">0 个文件</span><button class="secondary-button compact-button" id="command-file-select" type="button"><span>⇧</span> 选择文件</button><input id="command-file-input-shelf" type="file" multiple hidden /></div></div>

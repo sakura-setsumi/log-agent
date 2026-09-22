@@ -2,6 +2,9 @@
 // application bootstrap point, which keeps cross-module initialization order explicit.
 initializeTheme();
 restoreSelection();
+// Containers dropped from 连接管理 are a display choice of their own, so they
+// load separately from the log selection they sit next to in storage.
+restoreHiddenContainers();
 // Establishes whether this deployment has an admin token, which decides whether
 // saving a model needs to prompt for one. Loaded here rather than only when the
 // settings panel opens, because the model panel is reachable on its own.
