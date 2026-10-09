@@ -1627,8 +1627,12 @@ func TestE2ECommandsPanelsScrollInsteadOfStretching(t *testing.T) {
 		for (let i = 0; i < 10; i++) {
 			flows.push({ id: 'flow-' + i, name: '测试 ' + (i + 1), lines: [{ id: 'l-' + i, text: 'ls -la' }], bindings: [] });
 		}
-		localStorage.setItem('log-agent-command-servers', JSON.stringify(servers));
-		localStorage.setItem('log-agent-command-flows', JSON.stringify(flows));
+		// Flows load from data/commands.json, which wins over localStorage.
+		const request = new XMLHttpRequest();
+		request.open('PUT', '/api/commands/state', false);
+		request.setRequestHeader('Content-Type', 'application/json');
+		request.send(JSON.stringify({ flows, servers }));
+		if (request.status !== 200) throw new Error('seed commands.json: ' + request.status);
 		return servers.length + '/' + flows.length;
 	})()`
 
@@ -1781,8 +1785,12 @@ func TestE2EFileShelfIsNotClippedByTheLeftColumn(t *testing.T) {
 			servers.push({ id: 'srv-' + i, name: '服务器 ' + (i + 1), host: '192.168.1.' + (i + 20), port: '22', user: 'deploy', auth: 'key', secret: '' });
 		}
 		const flows = [{ id: 'flow-0', name: '测试', lines: [{ id: 'l-0', text: '' }], bindings: [] }];
-		localStorage.setItem('log-agent-command-servers', JSON.stringify(servers));
-		localStorage.setItem('log-agent-command-flows', JSON.stringify(flows));
+		// Flows load from data/commands.json, which wins over localStorage.
+		const request = new XMLHttpRequest();
+		request.open('PUT', '/api/commands/state', false);
+		request.setRequestHeader('Content-Type', 'application/json');
+		request.send(JSON.stringify({ flows, servers }));
+		if (request.status !== 200) throw new Error('seed commands.json: ' + request.status);
 		return 'ok';
 	})()`
 
@@ -1938,8 +1946,12 @@ func TestE2ENarrowLayoutKeepsPanelsWhole(t *testing.T) {
 			{ id: 'srv-2', name: '服务器 3', host: '192.168.1.20', port: '22', user: 'deploy', auth: 'key', secret: '', connectionStatus: 'untested' },
 		];
 		const flows = [{ id: 'flow-0', name: '测试', lines: [{ id: 'l-0', text: '' }], bindings: [{ serverId: 'srv-1' }] }];
-		localStorage.setItem('log-agent-command-servers', JSON.stringify(servers));
-		localStorage.setItem('log-agent-command-flows', JSON.stringify(flows));
+		// Flows load from data/commands.json, which wins over localStorage.
+		const request = new XMLHttpRequest();
+		request.open('PUT', '/api/commands/state', false);
+		request.setRequestHeader('Content-Type', 'application/json');
+		request.send(JSON.stringify({ flows, servers }));
+		if (request.status !== 200) throw new Error('seed commands.json: ' + request.status);
 		return 'ok';
 	})()`
 

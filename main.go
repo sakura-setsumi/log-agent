@@ -402,6 +402,7 @@ func newHTTPHandler(s *server) http.Handler {
 	mux.HandleFunc("/api/commands/test", s.handleCommandConnectionTest)
 	mux.HandleFunc("/api/commands/upload", s.handleCommandFileUpload)
 	mux.HandleFunc("/api/commands/execute", s.handleCommandExecute)
+	mux.HandleFunc("/api/commands/state", s.handleCommandsState)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/settings/admin", s.handleAdminSettings)
 	mux.HandleFunc("/api/settings/environment", s.handleEnvironmentSettings)

@@ -3057,22 +3057,74 @@ function loadCommandFlows() {
   state.commandRunningGroups = state.commandRunningGroups || new Set();
   try { state.commandParallel = localStorage.getItem(commandParallelStorageKey) !== 'false'; } catch { state.commandParallel = true; }
   state.expandedCommandServers = state.expandedCommandServers || new Set();
-  try {
-    const savedFlows = JSON.parse(localStorage.getItem(commandStorageKey) || 'null');
-    const savedServers = JSON.parse(localStorage.getItem(commandServerStorageKey) || 'null');
-    const savedFavorites = JSON.parse(localStorage.getItem(commandFavoritesStorageKey) || '[]');
-    const savedGroups = JSON.parse(localStorage.getItem(commandGroupsStorageKey) || '[]');
-    state.commandFlows = Array.isArray(savedFlows) && savedFlows.length ? savedFlows : commandDefaults();
-    state.commandServers = Array.isArray(savedServers) ? savedServers : [];
-    state.commandFavorites = Array.isArray(savedFavorites) ? savedFavorites.filter((item) => item && Array.isArray(item.flows)).slice(0, 50) : [];
-    state.commandGroups = Array.isArray(savedGroups) ? savedGroups.filter((group) => group && Array.isArray(group.flows)) : [];
-  } catch {
-    state.commandFlows = commandDefaults();
-    state.commandServers = [];
-    state.commandFavorites = [];
-    state.commandGroups = [];
-  }
   try { state.commandGroupsOpen = localStorage.getItem(commandGroupsOpenStorageKey) === 'true'; } catch { state.commandGroupsOpen = false; }
+  // The data itself arrives from loadCommandData(); until then the page shows
+  // nothing rather than a stale copy.
+  state.commandStorage = '';
+  state.commandFlows = []; state.commandGroups = []; state.commandServers = []; state.commandFavorites = [];
+  state.activeCommandFlowId = '';
+}
+
+// ---- Where flows live ----
+// Like nodes and AI providers, the command workspace (flows, groups, the
+// server library, favourites) has exactly one home per caller:
+//   - 'file': the page is opened on the machine running the service, so the
+//     data is read from and written to data/commands.json and nothing else.
+//   - 'browser': a visitor from another machine (or no Go server at all), so
+//     the data stays in this browser's localStorage.
+// Per-run fields (line status, errors, progress, cwd) are never stored.
+function saveCommandFlows() {
+  if (state.commandStorage === 'file') return scheduleCommandFileSave();
+  if (state.commandStorage !== 'browser') return; // still loading
+  try {
+    localStorage.setItem(commandStorageKey, JSON.stringify(state.commandFlows));
+    localStorage.setItem(commandServerStorageKey, JSON.stringify(state.commandServers || []));
+    localStorage.setItem(commandFavoritesStorageKey, JSON.stringify(state.commandFavorites || []));
+    localStorage.setItem(commandGroupsStorageKey, JSON.stringify(state.commandGroups || []));
+  } catch {}
+}
+function readBrowserCommandData() {
+  const read = (key) => { try { const value = JSON.parse(localStorage.getItem(key) || 'null'); return Array.isArray(value) ? value : []; } catch { return []; } };
+  return { flows: read(commandStorageKey), groups: read(commandGroupsStorageKey), servers: read(commandServerStorageKey), favorites: read(commandFavoritesStorageKey) };
+}
+function clearBrowserCommandData() {
+  try { [commandStorageKey, commandGroupsStorageKey, commandServerStorageKey, commandFavoritesStorageKey].forEach((key) => localStorage.removeItem(key)); } catch {}
+}
+function commandFileSnapshot() {
+  const cleanLine = ({ status, error, errorCode, uploadProgress, ...line }) => line;
+  const cleanFlow = ({ runCwd, ...flow }) => ({ ...flow, lines: (flow.lines || []).map(cleanLine) });
+  return {
+    flows: (state.commandFlows || []).map(cleanFlow),
+    groups: (state.commandGroups || []).map((group) => ({ ...group, flows: (group.flows || []).map(cleanFlow) })),
+    servers: state.commandServers || [],
+    favorites: state.commandFavorites || []
+  };
+}
+function scheduleCommandFileSave() {
+  clearTimeout(state.commandFileSaveTimer);
+  state.commandFileSaveTimer = setTimeout(saveCommandFile, 400);
+}
+async function saveCommandFile() {
+  try {
+    const response = await fetch('/api/commands/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(commandFileSnapshot()) });
+    if (!response.ok) throw new Error(apiErrorMessage(await response.json().catch(() => ({})), `HTTP ${response.status}`));
+    state.commandFileError = '';
+    return true;
+  } catch (error) {
+    // Report once per failure streak instead of on every keystroke.
+    if (!state.commandFileError) showToast(t('commands.toast.fileSaveFailed', { error: error.message }));
+    state.commandFileError = error.message;
+    return false;
+  }
+}
+function applyCommandData(data) {
+  const idle = (flow) => ({ ...flow, lines: (Array.isArray(flow.lines) && flow.lines.length ? flow.lines : [{ text: '' }]).map((line) => ({ ...line, status: 'idle' })) });
+  const flows = (data.flows || []).filter((flow) => flow && Array.isArray(flow.lines)).map(idle);
+  state.commandFlows = flows.length ? flows : commandDefaults();
+  state.commandGroups = (data.groups || []).filter((group) => group && Array.isArray(group.flows)).map((group) => ({ ...group, flows: group.flows.filter((flow) => flow && Array.isArray(flow.lines)).map(idle) }));
+  state.commandServers = (data.servers || []).filter((server) => server && server.id);
+  state.commandFavorites = (data.favorites || []).filter((item) => item && Array.isArray(item.flows)).slice(0, 50);
+  // Very old flows carried their own host instead of a server-library entry.
   state.commandFlows.forEach((flow) => {
     if (!flow.serverId && flow.host) {
       const server = { id: `server-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: flow.host, host: flow.host, port: flow.port || '22', user: flow.user || '', auth: flow.auth || 'key', secret: flow.secret || '' };
@@ -3080,17 +3132,31 @@ function loadCommandFlows() {
       flow.serverId = server.id;
     }
   });
-  state.activeCommandFlowId = state.commandFlows[0].id;
-  saveCommandFlows();
+  if (!findCommandFlow(state.activeCommandFlowId)) state.activeCommandFlowId = state.commandFlows[0].id;
 }
-
-function saveCommandFlows() {
+async function loadCommandData() {
+  let payload = null;
   try {
-    localStorage.setItem(commandStorageKey, JSON.stringify(state.commandFlows));
-    localStorage.setItem(commandServerStorageKey, JSON.stringify(state.commandServers || []));
-    localStorage.setItem(commandFavoritesStorageKey, JSON.stringify(state.commandFavorites || []));
-    localStorage.setItem(commandGroupsStorageKey, JSON.stringify(state.commandGroups || []));
-  } catch {}
+    const response = await fetch('/api/commands/state');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    payload = await response.json();
+  } catch {
+    payload = { storage: 'browser' }; // no Go server (static preview)
+  }
+  if (payload.storage === 'browser') {
+    state.commandStorage = 'browser';
+    applyCommandData(readBrowserCommandData());
+  } else if (payload.exists) {
+    state.commandStorage = 'file';
+    applyCommandData(payload.commands || {});
+  } else {
+    // First run with commands.json: move what this browser still holds into
+    // the file once, then drop the old localStorage copy.
+    state.commandStorage = 'file';
+    applyCommandData(readBrowserCommandData());
+    if (await saveCommandFile()) clearBrowserCommandData();
+  }
+  renderCommandServers(); renderCommandFlows(); renderCommandEditor();
 }
 
 function commandFavoriteSnapshot() {
@@ -3891,6 +3957,7 @@ function bindCommandGroups() {
 
 function bindCommandEvents() {
   loadCommandFlows(); bindCommandFileShelf(); bindCommandGroups(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
+  loadCommandData();
   $('#command-flow-name')?.addEventListener('input', (event) => { const flow = activeCommandFlow(); flow.name = event.target.value; saveCommandFlows(); $('#commands-editor-title').textContent = flow.name || t('commands.editor'); renderCommandFlows(); });
   $('#commands-add-server')?.addEventListener('click', () => { state.commandServers.push({ id: `server-${Date.now()}`, name: t('commands.newServerName', { index: state.commandServers.length + 1 }), host: '', port: '22', user: '', auth: 'key', secret: '', connectionStatus: 'untested', connectionError: '' }); saveCommandFlows(); renderCommandServers(); });
   $('#commands-add-flow')?.addEventListener('click', () => { const flow = { id: `flow-${Date.now()}`, name: t('commands.newFlowName', { index: state.commandFlows.length + 1 }), serverId: '', lines: [{ text: '', status: 'idle' }] }; state.commandFlows.push(flow); state.activeCommandFlowId = flow.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });

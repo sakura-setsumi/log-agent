@@ -555,6 +555,7 @@ const i18n = {
     'commands.toast.flowDuplicated': 'Flow duplicated; the server binding was kept',
     'commands.toast.keepOneFlow': 'Keep at least one flow',
     'commands.copyFlow': 'Duplicate flow',
+    'commands.toast.fileSaveFailed': 'Could not save flows to commands.json: {error}',
     'commands.toast.flowCopied': 'Copied "{name}", press Ctrl+V to paste',
     'commands.toast.flowPasted': 'Pasted "{name}"',
     'commands.groups.title': 'Flow groups',
@@ -632,6 +633,10 @@ const i18n = {
     'api.history_page_failed': 'Could not load older logs: {detail}',
     'api.browser_storage_only': 'This page was not opened on the host machine, so node config stays in this browser',
     'api.internal_error': 'Something went wrong: {detail}',
+    'api.commands_invalid': 'The command data is invalid: {detail}',
+    'api.commands_local_only': 'commands.json can only be written from the machine running the service',
+    'api.commands_read_failed': 'Could not read commands.json: {detail}',
+    'api.commands_write_failed': 'Could not write commands.json: {detail}',
     'commands.outputTruncated': '[output truncated]'
   },
 
@@ -1180,6 +1185,7 @@ const i18n = {
     'commands.toast.flowDuplicated': '指令集已复制，服务器绑定已保留',
     'commands.toast.keepOneFlow': '至少保留一组指令集',
     'commands.copyFlow': '复制指令集',
+    'commands.toast.fileSaveFailed': '指令集保存到 commands.json 失败：{error}',
     'commands.toast.flowCopied': '已复制「{name}」，按 Ctrl+V 粘贴',
     'commands.toast.flowPasted': '已粘贴「{name}」',
     'commands.groups.title': '指令集组',
@@ -1257,6 +1263,10 @@ const i18n = {
     'api.history_page_failed': '加载更早日志失败: {detail}',
     'api.browser_storage_only': '该页面未在本机打开，节点配置保存在浏览器本地',
     'api.internal_error': '执行出错：{detail}',
+    'api.commands_invalid': '指令数据格式不正确：{detail}',
+    'api.commands_local_only': '只有在运行服务的本机上才能写入 commands.json',
+    'api.commands_read_failed': '读取 commands.json 失败：{detail}',
+    'api.commands_write_failed': '写入 commands.json 失败：{detail}',
     'commands.outputTruncated': '[输出过长，已截断]'
   }
 };

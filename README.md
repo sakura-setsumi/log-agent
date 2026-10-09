@@ -42,13 +42,14 @@ The latest Windows amd64 executable is available in the [Releases](https://githu
 
 ## Configuration
 
-The application stores node connections and AI providers as JSON files in a `data` directory beside the executable:
+The application stores node connections, AI providers and server-command flows as JSON files in a `data` directory beside the executable:
 
 ```text
 dozzle-ops.exe
 data/
 ├─ nodes.json
-└─ models.json
+├─ models.json
+└─ commands.json
 ```
 
 When the dashboard is opened through localhost, this local directory is used. When it is opened from another machine, that visitor's browser `localStorage` is used instead. This keeps remote visitors' connections and API keys isolated from the host machine.
@@ -73,7 +74,7 @@ $env:LOG_AGENT_PORT = '9099'
 .\log-agent.exe
 ```
 
-`models.json` contains API keys in plain text. Keep it outside public repositories and backups that are shared with others.
+`models.json` contains API keys in plain text, and `commands.json` (flows, flow groups, the server library and favourites) contains SSH passwords for servers that use password login. Keep both outside public repositories and backups that are shared with others.
 
 ## Development and tests
 
@@ -119,7 +120,7 @@ The backend connects to real Dozzle v10 APIs for container metadata, historical 
 ## Security notes
 
 - Dozzle endpoints and AI provider URLs are user-configured; use HTTPS and network access controls in production.
-- Do not commit `data/models.json`, exported configuration files, private keys, or administrator tokens.
+- Do not commit `data/models.json`, `data/commands.json`, exported configuration files, private keys, or administrator tokens.
 - The service does not modify Nginx or host system configuration.
 
 ## License
@@ -163,9 +164,9 @@ go run .
 
 ## 配置和安全
 
-节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_PORT`、`LOG_AGENT_MAX_STORED_LOGS` 和 `LOG_AGENT_NO_SHORTCUT` 覆盖默认设置。
+节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`，服务器指令页的指令集、指令集组、服务器库和收藏保存在 `data/commands.json`（本机访问时只读写该文件，不再使用浏览器 localStorage；其他机器访问时仍保存在各自浏览器中。旧版本留在浏览器里的指令集会在首次启动时自动迁移进该文件）。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_PORT`、`LOG_AGENT_MAX_STORED_LOGS` 和 `LOG_AGENT_NO_SHORTCUT` 覆盖默认设置。
 
-`models.json` 会以明文保存 API key，请勿提交到公开仓库，也不要共享导出的敏感配置、私钥或管理员 token。服务不会修改 Nginx 或主机系统配置。
+`models.json` 会以明文保存 API key，`commands.json` 会以明文保存使用密码登录的服务器密码，请勿提交到公开仓库，也不要共享导出的敏感配置、私钥或管理员 token。服务不会修改 Nginx 或主机系统配置。
 
 ## 开发测试
 
