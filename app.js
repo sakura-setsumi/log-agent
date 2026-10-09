@@ -3399,7 +3399,7 @@ function renderCommandFlows() {
   }).join('');
   $('#commands-flow-count').textContent = t('commands.flowCount', { count: state.commandFlows.length });
   list.querySelectorAll('.command-flow-card').forEach((card) => {
-    card.addEventListener('click', (event) => { if (event.target.closest('.flow-bind-slot, .command-flow-copy')) return; state.activeCommandFlowId = card.dataset.flowId; renderCommandFlows(); renderCommandEditor(); });
+    card.addEventListener('click', (event) => { if (event.target.closest('.flow-bind-slot, .command-flow-copy')) return; state.commandPasteGroupId = ''; state.activeCommandFlowId = card.dataset.flowId; renderCommandFlows(); renderCommandEditor(); });
     card.addEventListener('dragstart', (event) => { if (event.target.closest('.flow-bind-slot')) return; card.classList.add('dragging'); event.dataTransfer.effectAllowed = 'copyMove'; event.dataTransfer.setData('text/flow-id', card.dataset.flowId); });
     card.addEventListener('dragend', () => card.classList.remove('dragging'));
     card.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/flow-id')) { event.preventDefault(); card.classList.add('drag-over'); } });
@@ -3686,6 +3686,59 @@ function renderCommandGroups() {
   list.innerHTML = (groups.length ? groups.map(commandGroupMarkup).join('') : `<div class="command-groups-empty">${t('commands.groups.empty')}</div>`) + `<div class="command-groups-new-drop" data-group-new-drop>${t('commands.groups.dropNew')}</div>`;
 }
 function clearCommandGroupDropMarks() { $$('#command-groups-list .drop-ready').forEach((element) => element.classList.remove('drop-ready')); }
+// ---- Ctrl+C / Ctrl+V on flows ----
+// Outside text fields, copy puts the active flow on the system clipboard as
+// tagged JSON, and paste drops a copy after the active flow -- into the group
+// last clicked, otherwise into the main list. Text fields keep native copy/paste.
+const commandFlowClipboardType = 'log-agent-command-flow';
+function commandClipboardIdle(event) {
+  if ($('#commands-view')?.classList.contains('hidden') || document.querySelector('.modal-backdrop:not(.hidden)')) return false;
+  return !event.target.closest?.('input, textarea, select, [contenteditable="true"]');
+}
+function pasteCommandFlow(source) {
+  const group = commandGroup(state.commandPasteGroupId);
+  const container = group ? group.flows : state.commandFlows;
+  const copy = cloneCommandFlow({ name: source.name || '', serverId: commandServer(source.serverId) ? source.serverId : '', lines: source.lines.length ? source.lines : [{ text: '', status: 'idle' }] },
+    t('commands.flowCopySuffix', { name: source.name || t('commands.flowFallbackName') }));
+  const at = container.findIndex((flow) => flow.id === state.activeCommandFlowId);
+  container.splice(at >= 0 ? at + 1 : container.length, 0, copy);
+  if (group) group.collapsed = false;
+  state.activeCommandFlowId = copy.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor();
+  showToast(t('commands.toast.flowPasted', { name: copy.name }));
+}
+// Ctrl+C is handled on keydown (a copy event does not fire everywhere without a
+// selection). The flow is kept in memory and also written to the system
+// clipboard so another window can paste it. Ctrl+V goes through the paste event;
+// if none arrives (no system clipboard access) the in-memory copy is used.
+function bindCommandFlowClipboard() {
+  document.addEventListener('keydown', (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || !commandClipboardIdle(event)) return;
+    const key = event.key.toLowerCase();
+    if (key === 'c') {
+      if (String(window.getSelection?.() || '')) return;
+      const flow = activeCommandFlow(); if (!flow) return;
+      event.preventDefault();
+      const lines = flow.lines.map((line) => ({ type: line.type || 'command', text: line.text || '', fileId: line.fileId || '', fileName: (state.commandFiles || []).find((file) => file.id === line.fileId)?.name || line.fileName || '', destination: line.destination || '' }));
+      state.commandFlowClipboard = { name: flow.name || '', serverId: flow.serverId || '', lines };
+      navigator.clipboard?.writeText(JSON.stringify({ type: commandFlowClipboardType, flow: state.commandFlowClipboard })).catch(() => {});
+      showToast(t('commands.toast.flowCopied', { name: flow.name || t('commands.unnamedFlow') }));
+    } else if (key === 'v' && state.commandFlowClipboard) {
+      state.commandPastePending = true;
+      setTimeout(() => { if (!state.commandPastePending) return; state.commandPastePending = false; pasteCommandFlow(JSON.parse(JSON.stringify(state.commandFlowClipboard))); }, 80);
+    }
+  });
+  // Any paste (files included) means the browser delivered the clipboard itself.
+  document.addEventListener('paste', () => { state.commandPastePending = false; }, true);
+  document.addEventListener('paste', (event) => {
+    if (!commandClipboardIdle(event) || event.clipboardData?.files?.length) return;
+    let payload = null;
+    try { payload = JSON.parse(event.clipboardData.getData('text/plain')); } catch { return; }
+    if (payload?.type !== commandFlowClipboardType || !Array.isArray(payload.flow?.lines)) return;
+    event.preventDefault();
+    pasteCommandFlow(payload.flow);
+  });
+}
+
 function bindCommandGroups() {
   const list = $('#command-groups-list');
   const fileInput = $('#command-group-file-input');
@@ -3699,6 +3752,7 @@ function bindCommandGroups() {
   list.addEventListener('click', (event) => {
     const section = event.target.closest('[data-group-id]'); if (!section) return;
     const group = commandGroup(section.dataset.groupId); if (!group) return;
+    state.commandPasteGroupId = group.id;
     const member = event.target.closest('[data-member-flow]');
     if (event.target.closest('[data-toggle-group]')) { group.collapsed = !group.collapsed; saveCommandFlows(); renderCommandGroups(); }
     else if (event.target.closest('[data-run-group]')) runCommandGroup(group.id);
@@ -3810,6 +3864,7 @@ function bindCommandEvents() {
     const index = flow.lines.findIndex((line) => line.status === 'error'); runCommandFlow(Math.max(0, index), flow);
   });
   $('#commands-run-current')?.addEventListener('click', () => { const flow = activeCommandFlow(); const index = flow.lines.findIndex((line) => line.status !== 'success'); runCommandFlow(index >= 0 ? index : 0, flow); });
+  bindCommandFlowClipboard();
   $('#commands-import-button')?.addEventListener('click', () => $('#commands-file-input').click());
   $('#commands-file-input')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const flow = activeCommandFlow(); const text = await file.text(); flow.lines = text.split(/\r?\n/).filter((line) => line.trim()).map((line) => ({ text: line, status: 'idle' })); if (!flow.lines.length) flow.lines = [{ text: '', status: 'idle' }]; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); showToast(t('commands.toast.linesImported', { count: flow.lines.length })); event.target.value = ''; });
 }
