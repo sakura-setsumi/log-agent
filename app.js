@@ -3651,13 +3651,18 @@ function commandFlowStatus(flow) {
   return flow.lines.length && flow.lines.every((line) => line.status === 'success') ? 'ok' : '';
 }
 const commandCopyIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" /></svg>';
+// Each member keeps its own server, so one group can fan out across several machines.
+function commandGroupMemberServerSelect(flow, server) {
+  const options = (state.commandServers || []).map((item) => `<option value="${escapeHtml(item.id)}"${item.id === server?.id ? ' selected' : ''}>${escapeHtml(item.name || item.host || t('commands.unnamedServer'))}</option>`).join('');
+  return `<select class="command-group-member-server" data-member-server title="${t('commands.groups.memberServer')}" aria-label="${t('commands.groups.memberServer')}" ${state.commandRunning ? 'disabled' : ''}><option value=""${server ? '' : ' selected'}>${t('commands.groups.noServer')}</option>${options}</select>`;
+}
 function commandGroupMarkup(group) {
   const lineCount = group.flows.reduce((total, flow) => total + flow.lines.length, 0);
   const files = commandGroupFileRefs(group);
   const running = state.commandRunningGroupId === group.id;
   const members = group.flows.length ? group.flows.map((flow, index) => {
     const server = commandServer(flow.serverId);
-    return `<div class="command-group-member${flow.id === state.activeCommandFlowId ? ' active' : ''}" draggable="true" data-member-flow="${escapeHtml(flow.id)}"><span class="command-group-member-index">${String(index + 1).padStart(2, '0')}</span><span class="command-group-member-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><small class="${server ? 'bound' : ''}">${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))} · ${t('commands.lineCount', { count: flow.lines.length })}</small></span><button class="command-group-icon-button" type="button" data-copy-member title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}">${commandCopyIcon}</button><button class="command-group-icon-button danger" type="button" data-remove-member title="${t('commands.groups.removeMember')}" aria-label="${t('commands.groups.removeMember')}">×</button><i class="command-flow-status ${commandFlowStatus(flow)}"></i></div>`;
+    return `<div class="command-group-member${flow.id === state.activeCommandFlowId ? ' active' : ''}" draggable="true" data-member-flow="${escapeHtml(flow.id)}"><span class="command-group-member-index">${String(index + 1).padStart(2, '0')}</span><span class="command-group-member-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><small class="${server ? 'bound' : ''}">${commandGroupMemberServerSelect(flow, server)} · ${t('commands.lineCount', { count: flow.lines.length })}</small></span><button class="command-group-icon-button" type="button" data-copy-member title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}">${commandCopyIcon}</button><button class="command-group-icon-button danger" type="button" data-remove-member title="${t('commands.groups.removeMember')}" aria-label="${t('commands.groups.removeMember')}">×</button><i class="command-flow-status ${commandFlowStatus(flow)}"></i></div>`;
   }).join('') : `<div class="command-group-member-empty">${t('commands.groups.memberEmpty')}</div>`;
   const fileChips = files.map((file) => `<div class="command-group-file${file.missing ? ' missing' : ''}" data-group-file="${escapeHtml(file.id)}" title="${escapeHtml(file.missing ? t('commands.groups.fileMissing') : t('commands.groups.replaceHint'))}"><span class="command-group-file-ext">${escapeHtml((file.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span><span class="command-group-file-name">${escapeHtml(file.name)}</span><button type="button" data-replace-group-file>${t('commands.groups.replace')}</button></div>`).join('');
   return `<section class="command-group${group.collapsed ? ' collapsed' : ''}${running ? ' running' : ''}" data-group-id="${escapeHtml(group.id)}">
@@ -3748,12 +3753,21 @@ function bindCommandGroups() {
   // Dragging a flow onto the folded rail springs the drawer open.
   $('#command-groups-open')?.addEventListener('dragenter', (event) => { if (event.dataTransfer.types.includes('text/flow-id')) setCommandGroupsOpen(true); });
   $('#command-groups-add')?.addEventListener('click', () => { const group = createCommandGroup(); saveCommandFlows(); renderCommandGroups(); showToast(t('commands.groups.toast.created', { name: group.name })); list.querySelector(`[data-group-id="${CSS.escape(group.id)}"] [data-group-name]`)?.select(); });
+  list.addEventListener('change', (event) => {
+    const select = event.target.closest('[data-member-server]'); if (!select) return;
+    const flowId = select.closest('[data-member-flow]').dataset.memberFlow;
+    if (select.value) return bindServerToFlow(flowId, select.value);
+    const flow = findCommandFlow(flowId); if (!flow) return;
+    flow.serverId = ''; saveCommandFlows(); renderCommandFlows();
+    if (flow.id === state.activeCommandFlowId) renderCommandEditor();
+  });
   list.addEventListener('input', (event) => { const input = event.target.closest('[data-group-name]'); if (!input) return; commandGroup(input.closest('[data-group-id]').dataset.groupId).name = input.value; saveCommandFlows(); });
   list.addEventListener('click', (event) => {
     const section = event.target.closest('[data-group-id]'); if (!section) return;
     const group = commandGroup(section.dataset.groupId); if (!group) return;
     state.commandPasteGroupId = group.id;
     const member = event.target.closest('[data-member-flow]');
+    if (event.target.closest('[data-member-server]')) return;
     if (event.target.closest('[data-toggle-group]')) { group.collapsed = !group.collapsed; saveCommandFlows(); renderCommandGroups(); }
     else if (event.target.closest('[data-run-group]')) runCommandGroup(group.id);
     else if (event.target.closest('[data-delete-group]')) {
