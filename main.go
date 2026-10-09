@@ -347,8 +347,24 @@ func main() {
 	}
 	s := newServer()
 	address := listenAddress()
-	log.Printf("Log Agent is running at http://localhost:%s", strings.TrimPrefix(address, ":"))
-	log.Fatal(http.ListenAndServe(address, newHTTPHandler(s)))
+	dashboard := "http://localhost:" + strings.TrimPrefix(address, ":")
+	go ensureDesktopShortcut()
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		// Double-clicking the shortcut while an instance is already running
+		// should still bring up the dashboard rather than flash an error.
+		if wantsBrowser(os.Args[1:]) {
+			_ = openBrowser(dashboard)
+		}
+		log.Fatalf("failed to listen on %s: %v", address, err)
+	}
+	log.Printf("Log Agent is running at %s", dashboard)
+	if wantsBrowser(os.Args[1:]) {
+		if err := openBrowser(dashboard); err != nil {
+			log.Printf("could not open the browser: %v", err)
+		}
+	}
+	log.Fatal(http.Serve(listener, newHTTPHandler(s)))
 }
 
 // listenAddress resolves the listen address. PORT (or LOG_AGENT_PORT) lets a
