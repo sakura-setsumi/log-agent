@@ -9,7 +9,7 @@ import (
 
 const desktopShortcutSupported = false
 
-func writeDesktopShortcut(string, bool) (bool, error) { return false, nil }
+func writeDesktopShortcut(string, bool) (string, string, error) { return "", "", nil }
 
 func openBrowser(url string) error {
 	if runtime.GOOS == "darwin" {
