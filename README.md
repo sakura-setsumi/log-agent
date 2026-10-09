@@ -36,6 +36,8 @@ For a stable installation, build and run the executable instead of `go run .`:
 
 The service listens on `:8099` by default. Set `LOG_AGENT_PORT` or `PORT` to use another port.
 
+On Windows the first start creates a desktop shortcut named **日志中枢**. It launches the executable with `--open`, which also opens the dashboard in the browser (or just opens the browser if an instance is already running). Moving the executable repoints the shortcut on its next start; a deleted shortcut is not recreated. Set `LOG_AGENT_NO_SHORTCUT=1` to skip it.
+
 The latest Windows amd64 executable is available in the [Releases](https://github.com/sakura-setsumi/log-agent/releases) page.
 
 ## Configuration
@@ -61,6 +63,7 @@ Useful environment variables:
 | `LOG_AGENT_ENVIRONMENT` | Set the displayed runtime environment. |
 | `LOG_AGENT_PORT` / `PORT` | Change the listening port. |
 | `LOG_AGENT_MAX_STORED_LOGS` | Set the global in-memory cache limit (1–1,000,000). |
+| `LOG_AGENT_NO_SHORTCUT` | Set to `1` to skip creating the Windows desktop shortcut. |
 
 Example:
 
@@ -149,11 +152,11 @@ go run .
 .\dist\dozzle-ops.exe
 ```
 
-默认监听 `:8099`，可通过 `LOG_AGENT_PORT` 或 `PORT` 修改端口。Windows amd64 最新可执行文件位于 [Releases](https://github.com/sakura-setsumi/log-agent/releases)。
+默认监听 `:8099`，可通过 `LOG_AGENT_PORT` 或 `PORT` 修改端口。Windows 下首次启动会在桌面创建名为「日志中枢」的快捷方式，双击即可启动并自动在浏览器打开页面；程序已在运行时双击只会打开浏览器。移动 exe 后再启动一次会更新快捷方式；手动删除后不会再自动创建。设置 `LOG_AGENT_NO_SHORTCUT=1` 可关闭此功能。Windows amd64 最新可执行文件位于 [Releases](https://github.com/sakura-setsumi/log-agent/releases)。
 
 ## 配置和安全
 
-节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_PORT` 和 `LOG_AGENT_MAX_STORED_LOGS` 覆盖默认设置。
+节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_PORT`、`LOG_AGENT_MAX_STORED_LOGS` 和 `LOG_AGENT_NO_SHORTCUT` 覆盖默认设置。
 
 `models.json` 会以明文保存 API key，请勿提交到公开仓库，也不要共享导出的敏感配置、私钥或管理员 token。服务不会修改 Nginx 或主机系统配置。
 
