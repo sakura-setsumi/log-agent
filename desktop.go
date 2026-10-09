@@ -83,3 +83,24 @@ func encodePowerShellCommand(script string) string {
 	}
 	return base64.StdEncoding.EncodeToString(raw)
 }
+
+// parseDesktopShortcutOutput finds the script's "<status>|<base64 path>" line,
+// from the end, ignoring anything else PowerShell printed around it.
+func parseDesktopShortcutOutput(output string) (string, string, bool) {
+	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		status, path, ok := strings.Cut(strings.TrimSpace(strings.TrimPrefix(lines[i], "\ufeff")), "|")
+		if !ok {
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(path)
+		if err != nil {
+			continue
+		}
+		switch status {
+		case "created", "updated", "kept", "removed":
+			return status, string(decoded), true
+		}
+	}
+	return "", "", false
+}
