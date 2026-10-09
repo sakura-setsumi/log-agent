@@ -97,6 +97,13 @@ Build quickly without tests:
 .\scripts\build.ps1 -SkipTests
 ```
 
+The executable's icon and version info come from `app-icon.ico`, compiled into the committed `rsrc_windows_*.syso` files that `go build` links automatically. After changing the icon, regenerate them:
+
+```powershell
+go install github.com/tc-hib/go-winres@latest
+go-winres simply --icon app-icon.ico --arch amd64,386,arm64 --manifest none --product-name "日志中枢 Log Agent" --file-description "日志中枢 Log Agent" --product-version 1.0.0 --file-version 1.0.0 --original-filename dozzle-ops.exe
+```
+
 Build output is written to `dist/`; local binaries and caches are intentionally ignored by Git.
 
 ## Architecture
