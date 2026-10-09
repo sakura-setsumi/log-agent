@@ -3602,9 +3602,9 @@ function requestCommandPause() {
 
 // In parallel mode every flow starts at once; otherwise they run in order and
 // the first failure or pause stops the rest.
-async function runCommandFlowSequence(flows) {
+async function runCommandFlowSequence(flows, parallel = state.commandParallel) {
   const busy = flows.filter((flow) => isCommandFlowRunning(flow.id));
-  if (state.commandParallel) {
+  if (parallel) {
     const idle = flows.filter((flow) => !isCommandFlowRunning(flow.id));
     if (!idle.length) { showToast(t('commands.groups.toast.busy')); return false; }
     const results = await Promise.all(idle.map((flow) => runCommandFlow(0, flow)));
@@ -3674,14 +3674,14 @@ function replaceCommandGroupFile(groupId, oldId, item) {
   if (group.flows.some((flow) => flow.id === state.activeCommandFlowId)) renderCommandEditor();
   showToast(t('commands.groups.toast.fileReplaced', { old: oldName, name: item.name, count }));
 }
-async function runCommandGroup(groupId) {
+async function runCommandGroup(groupId, parallel) {
   const group = commandGroup(groupId);
   if (!group) return;
   if (state.commandRunningGroups.has(group.id)) return showToast(t('commands.groups.toast.busy'));
   if (!group.flows.length) return showToast(t('commands.groups.toast.empty', { name: group.name }));
   if (commandGroupFileRefs(group).some((ref) => ref.missing)) { group.collapsed = false; renderCommandGroups(); return showToast(t('commands.groups.toast.missingFiles', { name: group.name })); }
   state.commandRunningGroups.add(group.id); renderCommandGroups();
-  const ok = await runCommandFlowSequence(group.flows);
+  const ok = await runCommandFlowSequence(group.flows, parallel);
   state.commandRunningGroups.delete(group.id); renderCommandGroups();
   if (!ok) return;
   if (commandRunCount()) return showToast(t('commands.groups.toast.done', { name: group.name }));
@@ -3709,7 +3709,8 @@ function commandGroupMarkup(group) {
   }).join('') : `<div class="command-group-member-empty">${t('commands.groups.memberEmpty')}</div>`;
   const fileChips = files.map((file) => `<div class="command-group-file${file.missing ? ' missing' : ''}" data-group-file="${escapeHtml(file.id)}" title="${escapeHtml(file.missing ? t('commands.groups.fileMissing') : t('commands.groups.replaceHint'))}"><span class="command-group-file-ext">${escapeHtml((file.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span><span class="command-group-file-name">${escapeHtml(file.name)}</span><button type="button" data-replace-group-file>${t('commands.groups.replace')}</button></div>`).join('');
   return `<section class="command-group${group.collapsed ? ' collapsed' : ''}${running ? ' running' : ''}" data-group-id="${escapeHtml(group.id)}">
-    <header class="command-group-head"><button class="command-group-caret" type="button" data-toggle-group aria-expanded="${!group.collapsed}" title="${t(group.collapsed ? 'commands.groups.expand' : 'commands.groups.collapse')}"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg></button><input class="command-group-name" data-group-name value="${escapeHtml(group.name || '')}" placeholder="${t('commands.groups.namePlaceholder')}" /><button class="command-group-run" type="button" data-run-group title="${t('commands.groups.run')}" aria-label="${t('commands.groups.run')}" ${running ? 'disabled' : ''}>▶</button><button class="command-group-icon-button danger" type="button" data-delete-group title="${t('commands.groups.delete')}" aria-label="${t('commands.groups.delete')}">×</button></header>
+    <header class="command-group-head"><button class="command-group-caret" type="button" data-toggle-group aria-expanded="${!group.collapsed}" title="${t(group.collapsed ? 'commands.groups.expand' : 'commands.groups.collapse')}"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg></button><input class="command-group-name" data-group-name value="${escapeHtml(group.name || '')}" placeholder="${t('commands.groups.namePlaceholder')}" /><button class="command-group-icon-button danger" type="button" data-delete-group title="${t('commands.groups.delete')}" aria-label="${t('commands.groups.delete')}">×</button></header>
+    <div class="command-group-actions"><button class="command-group-run" type="button" data-run-group="sequential" title="${t('commands.groups.runSequentialHint')}" ${running ? 'disabled' : ''}><span aria-hidden="true">▶</span>${t('commands.groups.runSequential')}</button><button class="command-group-run parallel" type="button" data-run-group="parallel" title="${t('commands.groups.runParallelHint')}" ${running ? 'disabled' : ''}><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 3.5h8M7.5 1.5l2 2-2 2M1.5 8.5h8M7.5 6.5l2 2-2 2" /></svg>${t('commands.groups.runParallel')}</button></div>
     <small class="command-group-summary">${t('commands.groups.summary', { flows: group.flows.length, lines: lineCount })}${files.some((file) => file.missing) ? ' · <em>!</em>' : ''}</small>
     <div class="command-group-body"><div class="command-group-members">${members}</div><div class="command-group-files"><span class="command-group-files-label">${t('commands.groups.files')}</span>${fileChips || `<span class="command-group-files-empty">${t('commands.groups.noFiles')}</span>`}</div></div>
   </section>`;
@@ -3812,7 +3813,7 @@ function bindCommandGroups() {
     const member = event.target.closest('[data-member-flow]');
     if (event.target.closest('[data-member-server]')) return;
     if (event.target.closest('[data-toggle-group]')) { group.collapsed = !group.collapsed; saveCommandFlows(); renderCommandGroups(); }
-    else if (event.target.closest('[data-run-group]')) runCommandGroup(group.id);
+    else if (event.target.closest('[data-run-group]')) runCommandGroup(group.id, event.target.closest('[data-run-group]').dataset.runGroup === 'parallel');
     else if (event.target.closest('[data-delete-group]')) {
       if (group.flows.length && !window.confirm(t('commands.groups.confirmDelete', { name: group.name, count: group.flows.length }))) return;
       if (state.commandRunningGroups.has(group.id) || group.flows.some((flow) => isCommandFlowRunning(flow.id))) return showToast(t('commands.groups.toast.busy'));
