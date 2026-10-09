@@ -790,6 +790,13 @@ html[data-theme="dark"] .command-file-token { color:#ffd69c; background:rgba(216
 .command-board-actions .compact-button, .command-editor-actions .compact-button { white-space:nowrap; flex:0 0 auto; }
 .command-board-actions .command-board-utility { height:30px; border-color:var(--line); color:var(--text); background:#fff; white-space:nowrap; }
 .command-board-actions .command-board-utility:hover { border-color:var(--orange); color:#8b4d00; background:#fffaf2; }
+.command-parallel-toggle { display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 10px; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--muted); font-size:12px; white-space:nowrap; cursor:pointer; }
+.command-parallel-toggle i { position:relative; width:22px; height:12px; border-radius:6px; background:var(--line); transition:background .15s; }
+.command-parallel-toggle i::after { content:''; position:absolute; top:2px; left:2px; width:8px; height:8px; border-radius:50%; background:#fff; transition:transform .15s; }
+.command-parallel-toggle.active { border-color:var(--teal); color:var(--text); }
+.command-parallel-toggle.active i { background:var(--teal); }
+.command-parallel-toggle.active i::after { transform:translateX(10px); }
+.command-parallel-toggle:hover { border-color:var(--orange); }
 .command-board-actions #commands-add-flow { height:30px; border-color:var(--orange); color:#8b4d00; background:#fff; }
 .command-board-actions #commands-add-flow:hover { border-color:#c97400; color:#6f3d00; background:#fffaf2; }
 .command-favorite-button { width:30px; height:30px; display:grid; place-items:center; flex:0 0 30px; padding:0; border:1px solid var(--line); border-radius:6px; color:var(--orange); background:var(--surface-soft); line-height:1; }
@@ -828,7 +835,7 @@ html[data-theme="dark"] .command-file-token { color:#ffd69c; background:rgba(216
 .command-groups-rail-icon { color:var(--orange); font-size:16px; line-height:1; }
 .command-groups-rail-label { writing-mode:vertical-rl; font-size:12px; font-weight:650; letter-spacing:.12em; }
 .command-groups-rail b { min-width:18px; height:18px; display:grid; place-items:center; padding:0 4px; border-radius:9px; color:#fff; background:var(--orange); font-size:10px; }
-.command-groups-panel { display:none; width:236px; min-height:0; flex-direction:column; }
+.command-groups-panel { display:none; width:300px; min-height:0; flex-direction:column; }
 .commands-board.groups-open .command-groups-rail { display:none; }
 .commands-board.groups-open .command-groups-panel { display:flex; }
 .command-groups-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; padding:20px 12px 12px 14px; }
@@ -844,14 +851,19 @@ html[data-theme="dark"] .command-file-token { color:#ffd69c; background:rgba(216
 .command-group { min-width:0; padding:8px; border:1px solid var(--line); border-radius:7px; background:var(--surface); }
 .command-group.drop-ready { border-color:var(--orange); box-shadow:0 0 0 2px var(--orange-soft); }
 .command-group.running { border-color:var(--teal); }
-.command-group-head { display:grid; grid-template-columns:20px minmax(0,1fr) 24px 22px; gap:4px; align-items:center; }
+.command-group-head { display:grid; grid-template-columns:20px minmax(0,1fr) 22px; gap:4px; align-items:center; }
 .command-group-caret { width:20px; height:20px; display:grid; place-items:center; padding:0; border:0; border-radius:4px; color:var(--muted-2); background:transparent; }
 .command-group-caret svg { width:12px; height:12px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; transform:rotate(90deg); transition:transform .15s ease; }
 .command-group.collapsed .command-group-caret svg { transform:none; }
 .command-group-caret:hover { color:var(--orange); }
 .command-group-name { min-width:0; height:24px; padding:0 4px; border:1px solid transparent; border-radius:4px; color:var(--text); background:transparent; font-size:13px; font-weight:650; outline:0; }
 .command-group-name:hover { border-color:var(--line); }.command-group-name:focus { border-color:var(--orange); background:var(--surface-soft); }
-.command-group-run { width:24px; height:24px; padding:0; border:1px solid var(--orange); border-radius:5px; color:var(--orange); background:transparent; font-size:9px; }
+.command-group-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:6px 0 2px; }
+.command-group-run { display:inline-flex; align-items:center; justify-content:center; gap:5px; height:26px; padding:0 8px; border:1px solid var(--orange); border-radius:5px; color:var(--orange); background:transparent; font-size:12px; white-space:nowrap; cursor:pointer; }
+.command-group-run svg { width:12px; height:12px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+.command-group-run span { font-size:10px; }
+.command-group-run.parallel { border-color:var(--teal); color:var(--teal); }
+.command-group-run.parallel:hover:not(:disabled) { color:#fff; background:var(--teal); }
 .command-group-run:hover:not(:disabled) { color:#fff; background:var(--orange); }.command-group-run:disabled { opacity:.45; cursor:not-allowed; }
 .command-group-icon-button { width:22px; height:22px; display:grid; place-items:center; padding:0; border:0; border-radius:4px; color:var(--muted-2); background:transparent; font-size:15px; line-height:1; }
 .command-group-icon-button svg { width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:1.4; }
@@ -891,7 +903,7 @@ html[data-theme="dark"] .command-file-token { color:#ffd69c; background:rgba(216
 .command-flow-copy svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.4; }
 .command-flow-copy:hover { color:var(--orange); background:var(--orange-soft); }
 @media (min-width:1181px) {
-  .commands-columns.groups-open { grid-template-columns:minmax(0,23fr) minmax(0,45fr) minmax(0,32fr); }
+  .commands-columns.groups-open { grid-template-columns:minmax(0,23fr) minmax(0,49fr) minmax(0,28fr); }
 }
 /* With the drawer open the list can get narrow: the binding slot then drops to
    its own row under the flow name instead of squeezing the name to nothing. */
@@ -901,7 +913,7 @@ html[data-theme="dark"] .command-file-token { color:#ffd69c; background:rgba(216
   .command-flow-card .flow-direction-arrow { display:none; }
   .command-flow-card .flow-bind-slot { order:5; flex:1 1 100%; width:auto; margin-left:20px; }
   .panel-heading { flex-wrap:wrap; align-items:flex-start; }
-  .command-board-actions { flex-wrap:wrap; justify-content:flex-start; }
+  .command-board-actions { flex:1 1 100%; flex-wrap:wrap; justify-content:flex-start; }
 }
 @media (max-width:680px) {
   .commands-board { flex-direction:column; }

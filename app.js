@@ -3041,6 +3041,7 @@ const commandServerStorageKey = 'log-agent-command-servers';
 const commandFavoritesStorageKey = 'log-agent-command-favorites';
 const commandGroupsStorageKey = 'log-agent-command-groups';
 const commandGroupsOpenStorageKey = 'log-agent-command-groups-open';
+const commandParallelStorageKey = 'log-agent-command-parallel';
 
 function commandDefaults() {
   return [{ id: `flow-${Date.now()}`, name: t('commands.defaultFlowName'), serverId: '', lines: [
@@ -3052,6 +3053,9 @@ function commandDefaults() {
 
 function loadCommandFlows() {
   state.commandServerKeys = state.commandServerKeys || {};
+  state.commandRuns = state.commandRuns || new Map();
+  state.commandRunningGroups = state.commandRunningGroups || new Set();
+  try { state.commandParallel = localStorage.getItem(commandParallelStorageKey) !== 'false'; } catch { state.commandParallel = true; }
   state.expandedCommandServers = state.expandedCommandServers || new Set();
   try {
     const savedFlows = JSON.parse(localStorage.getItem(commandStorageKey) || 'null');
@@ -3194,6 +3198,7 @@ function commandServer(id) { return (state.commandServers || []).find((server) =
 function bindServerToFlow(flowId, serverId) {
   const flow = findCommandFlow(flowId);
   if (!flow || !commandServer(serverId)) return;
+  if (isCommandFlowRunning(flow.id)) return showToast(t('commands.toast.flowBusy', { name: flow.name || t('commands.unnamedFlow') }));
   flow.serverId = serverId;
   flow.lines.forEach((line) => { if (line.status !== 'idle') line.status = 'idle'; });
   saveCommandFlows();
@@ -3394,8 +3399,7 @@ function renderCommandFlows() {
   if (!list) return;
   list.innerHTML = state.commandFlows.map((flow) => {
     const server = commandServer(flow.serverId);
-    const done = flow.lines.length && flow.lines.every((line) => line.status === 'success');
-    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><span>${t('commands.lineCount', { count: flow.lines.length })}</span></div><button class="command-flow-copy" type="button" data-copy-flow="${escapeHtml(flow.id)}" title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" /></svg></button><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))}</span></button><i class="command-flow-status ${done ? 'ok' : ''}"></i></div>`;
+    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><span>${t('commands.lineCount', { count: flow.lines.length })}</span></div><button class="command-flow-copy" type="button" data-copy-flow="${escapeHtml(flow.id)}" title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" /></svg></button><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))}</span></button><i class="command-flow-status ${commandFlowStatus(flow)}"></i></div>`;
   }).join('');
   $('#commands-flow-count').textContent = t('commands.flowCount', { count: state.commandFlows.length });
   list.querySelectorAll('.command-flow-card').forEach((card) => {
@@ -3467,7 +3471,7 @@ function renderCommandEditor() {
   const clearLineDropMarks = () => lines.querySelectorAll('.drop-before, .drop-after').forEach((row) => row.classList.remove('drop-before', 'drop-after'));
   lines.querySelectorAll('.command-line-index').forEach((handle) => {
     const row = handle.closest('.command-line');
-    handle.addEventListener('dragstart', (event) => { if (state.commandRunning) { event.preventDefault(); return; } event.dataTransfer.setData('text/command-line-index', row.dataset.index); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setDragImage(row, 16, 16); row.classList.add('dragging'); });
+    handle.addEventListener('dragstart', (event) => { if (isCommandFlowRunning(flow.id)) { event.preventDefault(); return; } event.dataTransfer.setData('text/command-line-index', row.dataset.index); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setDragImage(row, 16, 16); row.classList.add('dragging'); });
     handle.addEventListener('dragend', () => { row.classList.remove('dragging'); clearLineDropMarks(); });
   });
   lines.querySelectorAll('.command-line').forEach((row) => {
@@ -3490,31 +3494,33 @@ function renderCommandEditor() {
   if (firstError >= 0) $('#command-error-text').textContent = flow.lines[firstError].error || t('commands.serverReturnedError');
   const blockedByPolicy = firstError >= 0 && COMMAND_POLICY_ERRORS.has(flow.lines[firstError].errorCode) && !commandServer(flow.serverId)?.unrestricted;
   $('#command-error-unrestrict')?.classList.toggle('hidden', !blockedByPolicy);
+  syncCommandRunControls();
 }
-function updateCommandUploadProgress(line, item, index, progress, status = 'uploading') { line.uploadProgress = progress; item.uploadProgress = progress; item.uploadStatus = status; const commandLine = document.querySelector(`.command-line[data-index="${index}"]`); if (commandLine) { const bar = commandLine.querySelector('.command-line-upload-progress i'); const label = commandLine.querySelector('.command-line-upload-progress span'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? t('commands.uploadDone') : status === 'error' ? t('commands.uploadFailed') : `${progress}%`; } const card = document.querySelector(`[data-command-file-id="${CSS.escape(item.id)}"]`); if (card) { card.classList.remove('upload-idle', 'upload-uploading', 'upload-success', 'upload-error'); card.classList.add(`upload-${status}`); const bar = card.querySelector('.command-file-progress i'); const label = card.querySelector('.command-file-progress-label'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? t('commands.uploaded') : status === 'error' ? t('commands.uploadFailed') : `${progress}%`; } }
-async function uploadCommandFile(server, line, item, index, cwd = '') { const body = new FormData(); body.append('host', server.host || ''); body.append('port', server.port || '22'); body.append('user', server.user || ''); body.append('auth', server.auth || 'key'); body.append('secret', server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || '')); body.append('fingerprint', server.hostFingerprint || ''); body.append('destination', line.destination || cwd || defaultCommandUploadDestination({ serverId: server.id })); body.append('cwd', cwd); body.append('unrestricted', server.unrestricted ? 'true' : 'false'); body.append('kind', item.folder ? 'directory' : 'file'); body.append('file', item.file, item.name); return new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); updateCommandUploadProgress(line, item, index, 0); xhr.open('POST', '/api/commands/upload'); xhr.upload.addEventListener('progress', (event) => { if (event.lengthComputable) updateCommandUploadProgress(line, item, index, Math.min(99, Math.round((event.loaded / event.total) * 100))); }); xhr.addEventListener('load', () => { let payload = {}; try { payload = JSON.parse(xhr.responseText || '{}'); } catch {} if (xhr.status >= 200 && xhr.status < 300) { updateCommandUploadProgress(line, item, index, 100, 'success'); resolve(payload); } else { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(Object.assign(new Error(apiErrorMessage(payload, t('commands.toast.uploadFailedFile', { name: item.name }))), { code: payload.error || '' })); } }); xhr.addEventListener('loadend', () => { if (state.commandUploadXhr === xhr) state.commandUploadXhr = null; }); xhr.addEventListener('abort', () => { updateCommandUploadProgress(line, item, index, 0, 'idle'); reject(Object.assign(new Error(t('commands.status.pausing')), { code: 'paused' })); }); state.commandUploadXhr = xhr; xhr.addEventListener('error', () => { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(t('commands.toast.uploadFailedFile', { name: item.name }))); }); xhr.send(body); }); }
-async function uploadCommandFiles(server, line, index, cwd = '') {
+function updateCommandUploadProgress(line, item, index, progress, status = 'uploading') { line.uploadProgress = progress; item.uploadProgress = progress; item.uploadStatus = status; const commandLine = activeCommandFlow()?.lines[index] === line ? document.querySelector(`#command-lines .command-line[data-index="${index}"]`) : null; if (commandLine) { const bar = commandLine.querySelector('.command-line-upload-progress i'); const label = commandLine.querySelector('.command-line-upload-progress span'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? t('commands.uploadDone') : status === 'error' ? t('commands.uploadFailed') : `${progress}%`; } const card = document.querySelector(`[data-command-file-id="${CSS.escape(item.id)}"]`); if (card) { card.classList.remove('upload-idle', 'upload-uploading', 'upload-success', 'upload-error'); card.classList.add(`upload-${status}`); const bar = card.querySelector('.command-file-progress i'); const label = card.querySelector('.command-file-progress-label'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? t('commands.uploaded') : status === 'error' ? t('commands.uploadFailed') : `${progress}%`; } }
+async function uploadCommandFile(server, line, item, index, cwd = '', run = null) { const body = new FormData(); body.append('host', server.host || ''); body.append('port', server.port || '22'); body.append('user', server.user || ''); body.append('auth', server.auth || 'key'); body.append('secret', server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || '')); body.append('fingerprint', server.hostFingerprint || ''); body.append('destination', line.destination || cwd || defaultCommandUploadDestination({ serverId: server.id })); body.append('cwd', cwd); body.append('unrestricted', server.unrestricted ? 'true' : 'false'); body.append('kind', item.folder ? 'directory' : 'file'); body.append('file', item.file, item.name); return new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); updateCommandUploadProgress(line, item, index, 0); xhr.open('POST', '/api/commands/upload'); xhr.upload.addEventListener('progress', (event) => { if (event.lengthComputable) updateCommandUploadProgress(line, item, index, Math.min(99, Math.round((event.loaded / event.total) * 100))); }); xhr.addEventListener('load', () => { let payload = {}; try { payload = JSON.parse(xhr.responseText || '{}'); } catch {} if (xhr.status >= 200 && xhr.status < 300) { updateCommandUploadProgress(line, item, index, 100, 'success'); resolve(payload); } else { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(Object.assign(new Error(apiErrorMessage(payload, t('commands.toast.uploadFailedFile', { name: item.name }))), { code: payload.error || '' })); } }); xhr.addEventListener('loadend', () => run?.uploads.delete(xhr)); xhr.addEventListener('abort', () => { updateCommandUploadProgress(line, item, index, 0, 'idle'); reject(Object.assign(new Error(t('commands.status.pausing')), { code: 'paused' })); }); run?.uploads.add(xhr); xhr.addEventListener('error', () => { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(t('commands.toast.uploadFailedFile', { name: item.name }))); }); xhr.send(body); }); }
+async function uploadCommandFiles(server, line, index, cwd = '', run = null) {
   const ids = line.type === 'upload' ? [line.fileId] : [...String(line.text || '').matchAll(/\[\[file:([^\]]+)\]\]/g)].map((match) => match[1]);
   const files = ids.map((id) => (state.commandFiles || []).find((item) => item.id === id)).filter((item) => item?.file);
   if (line.type === 'upload' && !files.length) throw new Error(t('commands.toast.uploadFileRemoved'));
   if (!files.length || !goServerConnected) return 0;
   for (const item of files) {
-    await uploadCommandFile(server, line, item, index, cwd);
+    await uploadCommandFile(server, line, item, index, cwd, run);
   }
   return files.length;
 }
 // Errors the allowlist raises; an unrestricted server would have run the line.
 const COMMAND_POLICY_ERRORS = new Set(['forbidden_syntax', 'command_not_allowed', 'path_outside_home', 'missing_path', 'invalid_cd', 'destination_outside_home']);
 function commandTextForExecution(text) { return String(text || '').replace(/\[\[file:([^\]]+)\]\]/g, (_, id) => (state.commandFiles || []).find((item) => item.id === id)?.name || id); }
-async function executeCommandLine(flow, line, index) {
+async function executeCommandLine(flow, line, index, run = null) {
   const server = commandServer(flow.serverId);
   if (line.type === 'upload') line.uploadProgress = 0;
-  line.status = 'running'; renderCommandEditor();
-  $('#commands-run-status').textContent = t('commands.status.runningLine', { index: index + 1 });
+  line.status = 'running'; renderCommandFlows();
+  if (flow.id === state.activeCommandFlowId) renderCommandEditor();
+  setCommandRunningStatus(flow, index);
   await new Promise((resolve) => setTimeout(resolve, 380));
   try {
     if (!server) throw new Error(t('commands.error.noServerBound'));
-    const uploadedFiles = await uploadCommandFiles(server, line, index, flow.runCwd || '');
+    const uploadedFiles = await uploadCommandFiles(server, line, index, flow.runCwd || '', run);
     const executableText = commandTextForExecution(line.text);
     if (line.type === 'upload' || (uploadedFiles && /^\s*scp\s+/i.test(executableText))) { line.status = 'success'; line.error = ''; return true; }
     if (goServerConnected) {
@@ -3530,50 +3536,81 @@ async function executeCommandLine(flow, line, index) {
   }
 }
 
+// Every running flow keeps its own pause flag and live uploads, so any number
+// of flows -- on different servers or the same one -- can run side by side.
+function commandRun(flowId) { return state.commandRuns?.get(flowId); }
+function isCommandFlowRunning(flowId) { return !!commandRun(flowId); }
+function commandRunCount() { return state.commandRuns?.size || 0; }
+function setCommandRunningStatus(flow, index) {
+  const count = commandRunCount();
+  $('#commands-run-status').textContent = count > 1 ? t('commands.status.runningFlows', { count }) : t('commands.status.runningLine', { index: index + 1 });
+}
+function syncCommandRunControls() {
+  const flow = activeCommandFlow();
+  const runButton = $('#commands-run-current'); if (runButton) runButton.disabled = !!flow && isCommandFlowRunning(flow.id);
+  const runs = [...(state.commandRuns?.values() || [])];
+  setCommandPauseButton(!runs.length ? 'hidden' : runs.every((run) => run.pauseRequested) ? 'pausing' : 'running', runs.length);
+}
+
 async function runCommandFlow(startAt = 0, flow = activeCommandFlow()) {
-  if (!flow || state.commandRunning) return false;
-  state.commandRunning = true; $('#commands-run-all').disabled = true; $('#commands-run-current').disabled = true;
+  if (!flow) return false;
+  if (isCommandFlowRunning(flow.id)) { showToast(t('commands.toast.flowBusy', { name: flow.name || t('commands.unnamedFlow') })); return false; }
+  const run = { pauseRequested: false, uploads: new Set() };
+  state.commandRuns.set(flow.id, run); syncCommandRunControls();
   const firstError = flow.lines.findIndex((line) => line.status === 'error');
   const firstPending = flow.lines.findIndex((line) => line.status !== 'success');
   const begin = startAt > 0 ? startAt : (firstError >= 0 ? firstError : Math.max(0, firstPending));
   if (begin === 0) delete flow.runCwd;
   let failed = -1; let paused = -1;
-  state.commandPauseRequested = false; setCommandPauseButton('running');
   for (let i = begin; i < flow.lines.length; i += 1) {
     if (flow.lines[i].type !== 'upload' && !String(flow.lines[i].text || '').trim()) continue;
     // A pause takes effect between lines; only an upload can be cut short.
-    if (state.commandPauseRequested) { paused = i; break; }
-    const ok = await executeCommandLine(flow, flow.lines[i], i); saveCommandFlows(); renderCommandFlows();
+    if (run.pauseRequested) { paused = i; break; }
+    const ok = await executeCommandLine(flow, flow.lines[i], i, run); saveCommandFlows(); renderCommandFlows();
     if (!ok) { if (flow.lines[i].status === 'error') failed = i; else paused = i; break; }
   }
-  state.commandRunning = false; state.commandPauseRequested = false; setCommandPauseButton('hidden');
-  $('#commands-run-all').disabled = false; $('#commands-run-current').disabled = false; renderCommandEditor();
+  state.commandRuns.delete(flow.id); syncCommandRunControls(); renderCommandFlows();
+  if (flow.id === state.activeCommandFlowId) renderCommandEditor();
+  const name = flow.name || t('commands.unnamedFlow');
+  const others = commandRunCount();
   if (paused >= 0) {
-    $('#commands-run-status').textContent = t('commands.status.paused', { index: paused + 1 });
-    showToast(t('commands.toast.paused', { index: paused + 1 }));
+    $('#commands-run-status').textContent = others ? t('commands.status.runningFlows', { count: others }) : t('commands.status.paused', { index: paused + 1 });
+    showToast(t('commands.toast.paused', { name, index: paused + 1 }));
     return false;
   }
-  $('#commands-run-status').textContent = failed >= 0 ? t('commands.status.lineFailed', { index: failed + 1 }) : t('commands.status.flowDone');
-  if (failed >= 0) showToast(t('commands.toast.flowFailedEditable'));
+  $('#commands-run-status').textContent = others ? t('commands.status.runningFlows', { count: others }) : failed >= 0 ? t('commands.status.lineFailed', { index: failed + 1 }) : t('commands.status.flowDone');
+  if (failed >= 0) showToast(t('commands.toast.flowFailedEditable', { name }));
   return failed < 0;
 }
 
-function setCommandPauseButton(mode) {
+function setCommandPauseButton(mode, count = 1) {
   const button = $('#commands-pause'); if (!button) return;
   button.classList.toggle('hidden', mode === 'hidden');
   button.disabled = mode === 'pausing';
-  $('#commands-pause-label').textContent = t(mode === 'pausing' ? 'commands.pausing' : 'commands.pause');
+  $('#commands-pause-label').textContent = t(mode === 'pausing' ? 'commands.pausing' : count > 1 ? 'commands.pauseAll' : 'commands.pause', { count });
 }
 
+// Pause stops every running flow after its current line; uploads are aborted
+// at once and the server discards the partial file.
 function requestCommandPause() {
-  if (!state.commandRunning || state.commandPauseRequested) return;
-  state.commandPauseRequested = true; setCommandPauseButton('pausing');
+  const runs = [...state.commandRuns.values()].filter((run) => !run.pauseRequested);
+  if (!runs.length) return;
+  runs.forEach((run) => { run.pauseRequested = true; run.uploads.forEach((xhr) => xhr.abort()); });
+  syncCommandRunControls();
   $('#commands-run-status').textContent = t('commands.status.pausing');
-  // Uploads are aborted at once; the server discards the partial file.
-  state.commandUploadXhr?.abort();
 }
 
-async function runCommandFlowSequence(flows) {
+// In parallel mode every flow starts at once; otherwise they run in order and
+// the first failure or pause stops the rest.
+async function runCommandFlowSequence(flows, parallel = state.commandParallel) {
+  const busy = flows.filter((flow) => isCommandFlowRunning(flow.id));
+  if (parallel) {
+    const idle = flows.filter((flow) => !isCommandFlowRunning(flow.id));
+    if (!idle.length) { showToast(t('commands.groups.toast.busy')); return false; }
+    const results = await Promise.all(idle.map((flow) => runCommandFlow(0, flow)));
+    return !busy.length && results.every(Boolean);
+  }
+  if (busy.length) { showToast(t('commands.toast.flowBusy', { name: busy[0].name || t('commands.unnamedFlow') })); return false; }
   for (const flow of flows) {
     state.activeCommandFlowId = flow.id; renderCommandFlows(); renderCommandEditor();
     const ok = await runCommandFlow(0, flow); if (!ok) return false;
@@ -3582,9 +3619,14 @@ async function runCommandFlowSequence(flows) {
 }
 
 async function runAllCommandFlows() {
-  if (state.commandRunning) return;
   if (!await runCommandFlowSequence(state.commandFlows)) return;
-  $('#commands-run-status').textContent = t('commands.status.allDone'); showToast(t('commands.toast.allDone'));
+  if (!commandRunCount()) $('#commands-run-status').textContent = t('commands.status.allDone');
+  showToast(t(state.commandParallel ? 'commands.toast.allDoneParallel' : 'commands.toast.allDone'));
+}
+function syncCommandParallelToggle() {
+  const button = $('#commands-parallel'); if (!button) return;
+  button.setAttribute('aria-pressed', String(!!state.commandParallel));
+  button.classList.toggle('active', !!state.commandParallel);
 }
 
 // ---- Flow groups ----
@@ -3632,16 +3674,17 @@ function replaceCommandGroupFile(groupId, oldId, item) {
   if (group.flows.some((flow) => flow.id === state.activeCommandFlowId)) renderCommandEditor();
   showToast(t('commands.groups.toast.fileReplaced', { old: oldName, name: item.name, count }));
 }
-async function runCommandGroup(groupId) {
+async function runCommandGroup(groupId, parallel) {
   const group = commandGroup(groupId);
   if (!group) return;
-  if (state.commandRunning) return showToast(t('commands.groups.toast.busy'));
+  if (state.commandRunningGroups.has(group.id)) return showToast(t('commands.groups.toast.busy'));
   if (!group.flows.length) return showToast(t('commands.groups.toast.empty', { name: group.name }));
   if (commandGroupFileRefs(group).some((ref) => ref.missing)) { group.collapsed = false; renderCommandGroups(); return showToast(t('commands.groups.toast.missingFiles', { name: group.name })); }
-  state.commandRunningGroupId = group.id; renderCommandGroups();
-  const ok = await runCommandFlowSequence(group.flows);
-  state.commandRunningGroupId = ''; renderCommandGroups();
+  state.commandRunningGroups.add(group.id); renderCommandGroups();
+  const ok = await runCommandFlowSequence(group.flows, parallel);
+  state.commandRunningGroups.delete(group.id); renderCommandGroups();
   if (!ok) return;
+  if (commandRunCount()) return showToast(t('commands.groups.toast.done', { name: group.name }));
   $('#commands-run-status').textContent = t('commands.groups.status.done', { name: group.name });
   showToast(t('commands.groups.toast.done', { name: group.name }));
 }
@@ -3654,19 +3697,20 @@ const commandCopyIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.
 // Each member keeps its own server, so one group can fan out across several machines.
 function commandGroupMemberServerSelect(flow, server) {
   const options = (state.commandServers || []).map((item) => `<option value="${escapeHtml(item.id)}"${item.id === server?.id ? ' selected' : ''}>${escapeHtml(item.name || item.host || t('commands.unnamedServer'))}</option>`).join('');
-  return `<select class="command-group-member-server" data-member-server title="${t('commands.groups.memberServer')}" aria-label="${t('commands.groups.memberServer')}" ${state.commandRunning ? 'disabled' : ''}><option value=""${server ? '' : ' selected'}>${t('commands.groups.noServer')}</option>${options}</select>`;
+  return `<select class="command-group-member-server" data-member-server title="${t('commands.groups.memberServer')}" aria-label="${t('commands.groups.memberServer')}" ${isCommandFlowRunning(flow.id) ? 'disabled' : ''}><option value=""${server ? '' : ' selected'}>${t('commands.groups.noServer')}</option>${options}</select>`;
 }
 function commandGroupMarkup(group) {
   const lineCount = group.flows.reduce((total, flow) => total + flow.lines.length, 0);
   const files = commandGroupFileRefs(group);
-  const running = state.commandRunningGroupId === group.id;
+  const running = state.commandRunningGroups?.has(group.id);
   const members = group.flows.length ? group.flows.map((flow, index) => {
     const server = commandServer(flow.serverId);
     return `<div class="command-group-member${flow.id === state.activeCommandFlowId ? ' active' : ''}" draggable="true" data-member-flow="${escapeHtml(flow.id)}"><span class="command-group-member-index">${String(index + 1).padStart(2, '0')}</span><span class="command-group-member-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><small class="${server ? 'bound' : ''}">${commandGroupMemberServerSelect(flow, server)} · ${t('commands.lineCount', { count: flow.lines.length })}</small></span><button class="command-group-icon-button" type="button" data-copy-member title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}">${commandCopyIcon}</button><button class="command-group-icon-button danger" type="button" data-remove-member title="${t('commands.groups.removeMember')}" aria-label="${t('commands.groups.removeMember')}">×</button><i class="command-flow-status ${commandFlowStatus(flow)}"></i></div>`;
   }).join('') : `<div class="command-group-member-empty">${t('commands.groups.memberEmpty')}</div>`;
   const fileChips = files.map((file) => `<div class="command-group-file${file.missing ? ' missing' : ''}" data-group-file="${escapeHtml(file.id)}" title="${escapeHtml(file.missing ? t('commands.groups.fileMissing') : t('commands.groups.replaceHint'))}"><span class="command-group-file-ext">${escapeHtml((file.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span><span class="command-group-file-name">${escapeHtml(file.name)}</span><button type="button" data-replace-group-file>${t('commands.groups.replace')}</button></div>`).join('');
   return `<section class="command-group${group.collapsed ? ' collapsed' : ''}${running ? ' running' : ''}" data-group-id="${escapeHtml(group.id)}">
-    <header class="command-group-head"><button class="command-group-caret" type="button" data-toggle-group aria-expanded="${!group.collapsed}" title="${t(group.collapsed ? 'commands.groups.expand' : 'commands.groups.collapse')}"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg></button><input class="command-group-name" data-group-name value="${escapeHtml(group.name || '')}" placeholder="${t('commands.groups.namePlaceholder')}" /><button class="command-group-run" type="button" data-run-group title="${t('commands.groups.run')}" aria-label="${t('commands.groups.run')}" ${state.commandRunning ? 'disabled' : ''}>▶</button><button class="command-group-icon-button danger" type="button" data-delete-group title="${t('commands.groups.delete')}" aria-label="${t('commands.groups.delete')}">×</button></header>
+    <header class="command-group-head"><button class="command-group-caret" type="button" data-toggle-group aria-expanded="${!group.collapsed}" title="${t(group.collapsed ? 'commands.groups.expand' : 'commands.groups.collapse')}"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg></button><input class="command-group-name" data-group-name value="${escapeHtml(group.name || '')}" placeholder="${t('commands.groups.namePlaceholder')}" /><button class="command-group-icon-button danger" type="button" data-delete-group title="${t('commands.groups.delete')}" aria-label="${t('commands.groups.delete')}">×</button></header>
+    <div class="command-group-actions"><button class="command-group-run" type="button" data-run-group="sequential" title="${t('commands.groups.runSequentialHint')}" ${running ? 'disabled' : ''}><span aria-hidden="true">▶</span>${t('commands.groups.runSequential')}</button><button class="command-group-run parallel" type="button" data-run-group="parallel" title="${t('commands.groups.runParallelHint')}" ${running ? 'disabled' : ''}><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 3.5h8M7.5 1.5l2 2-2 2M1.5 8.5h8M7.5 6.5l2 2-2 2" /></svg>${t('commands.groups.runParallel')}</button></div>
     <small class="command-group-summary">${t('commands.groups.summary', { flows: group.flows.length, lines: lineCount })}${files.some((file) => file.missing) ? ' · <em>!</em>' : ''}</small>
     <div class="command-group-body"><div class="command-group-members">${members}</div><div class="command-group-files"><span class="command-group-files-label">${t('commands.groups.files')}</span>${fileChips || `<span class="command-group-files-empty">${t('commands.groups.noFiles')}</span>`}</div></div>
   </section>`;
@@ -3769,10 +3813,10 @@ function bindCommandGroups() {
     const member = event.target.closest('[data-member-flow]');
     if (event.target.closest('[data-member-server]')) return;
     if (event.target.closest('[data-toggle-group]')) { group.collapsed = !group.collapsed; saveCommandFlows(); renderCommandGroups(); }
-    else if (event.target.closest('[data-run-group]')) runCommandGroup(group.id);
+    else if (event.target.closest('[data-run-group]')) runCommandGroup(group.id, event.target.closest('[data-run-group]').dataset.runGroup === 'parallel');
     else if (event.target.closest('[data-delete-group]')) {
       if (group.flows.length && !window.confirm(t('commands.groups.confirmDelete', { name: group.name, count: group.flows.length }))) return;
-      if (state.commandRunningGroupId === group.id) return showToast(t('commands.groups.toast.busy'));
+      if (state.commandRunningGroups.has(group.id) || group.flows.some((flow) => isCommandFlowRunning(flow.id))) return showToast(t('commands.groups.toast.busy'));
       state.commandGroups = state.commandGroups.filter((item) => item.id !== group.id);
       if (!findCommandFlow(state.activeCommandFlowId)) state.activeCommandFlowId = state.commandFlows[0].id;
       saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); showToast(t('commands.groups.toast.deleted', { name: group.name }));
@@ -3781,7 +3825,7 @@ function bindCommandGroups() {
       fileInput?.click();
     } else if (member && event.target.closest('[data-copy-member]')) duplicateCommandFlow(member.dataset.memberFlow);
     else if (member && event.target.closest('[data-remove-member]')) {
-      if (state.commandRunningGroupId === group.id) return showToast(t('commands.groups.toast.busy'));
+      if (state.commandRunningGroups.has(group.id) || isCommandFlowRunning(member.dataset.memberFlow)) return showToast(t('commands.groups.toast.busy'));
       group.flows = group.flows.filter((flow) => flow.id !== member.dataset.memberFlow);
       if (!findCommandFlow(state.activeCommandFlowId)) state.activeCommandFlowId = state.commandFlows[0].id;
       saveCommandFlows(); renderCommandFlows(); renderCommandEditor();
@@ -3853,6 +3897,7 @@ function bindCommandEvents() {
   $('#commands-duplicate')?.addEventListener('click', () => duplicateCommandFlow(activeCommandFlow()?.id));
   $('#commands-delete')?.addEventListener('click', () => {
     const container = commandFlowContainer(state.activeCommandFlowId); if (!container) return;
+    if (isCommandFlowRunning(state.activeCommandFlowId)) return showToast(t('commands.groups.toast.busy'));
     // The main list keeps at least one flow; a group may be emptied.
     if (container === state.commandFlows && state.commandFlows.length <= 1) return showToast(t('commands.toast.keepOneFlow'));
     const index = container.findIndex((flow) => flow.id === state.activeCommandFlowId); container.splice(index, 1);
@@ -3871,9 +3916,11 @@ function bindCommandEvents() {
   });
   $('#commands-add-line')?.addEventListener('click', () => { activeCommandFlow().lines.push({ text: '', status: 'idle' }); saveCommandFlows(); renderCommandEditor(); });
   $('#commands-run-all')?.addEventListener('click', runAllCommandFlows);
+  syncCommandParallelToggle();
+  $('#commands-parallel')?.addEventListener('click', () => { state.commandParallel = !state.commandParallel; try { localStorage.setItem(commandParallelStorageKey, String(state.commandParallel)); } catch {} syncCommandParallelToggle(); showToast(t(state.commandParallel ? 'commands.toast.parallelOn' : 'commands.toast.parallelOff')); });
   $('#commands-pause')?.addEventListener('click', requestCommandPause);
   $('#command-error-unrestrict')?.addEventListener('click', () => {
-    const flow = activeCommandFlow(); const server = commandServer(flow?.serverId); if (!server || state.commandRunning) return;
+    const flow = activeCommandFlow(); const server = commandServer(flow?.serverId); if (!server || isCommandFlowRunning(flow.id)) return;
     server.unrestricted = true; saveCommandFlows(); renderCommandServers(); showToast(t('commands.toast.unrestricted', { name: server.name || server.host || '' }));
     const index = flow.lines.findIndex((line) => line.status === 'error'); runCommandFlow(Math.max(0, index), flow);
   });
