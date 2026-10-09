@@ -1,12 +1,16 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/gif"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,15 +41,151 @@ func TestCommandConnectionTest(t *testing.T) {
 func TestValidateRemoteCommandPolicy(t *testing.T) {
 	allowed := []string{`mv "images (1).jpg" image.jpg`, `rm -f old.log`, `docker stop api`, `systemctl stop log-agent.service`, `sudo -n systemctl stop log-agent.service`, `df -h`}
 	for _, command := range allowed {
-		if err := validateRemoteCommand(command, "opc"); err != nil {
+		if err := validateRemoteCommand(command, "opc", ""); err != nil {
 			t.Errorf("expected command to be allowed %q: %v", command, err)
 		}
 	}
 	rejected := []string{`mv file /etc/app.conf`, `sh -c "rm file"`, `echo value > /etc/app.conf`, `rm file; systemctl stop sshd`}
 	for _, command := range rejected {
-		if err := validateRemoteCommand(command, "opc"); err == nil {
+		if err := validateRemoteCommand(command, "opc", ""); err == nil {
 			t.Errorf("expected command to be rejected: %q", command)
 		}
+	}
+	if err := validateRemoteCommand(`mv ly-api.jar ly-api.jar.bak`, "root", "/home/stack/java-app"); err != nil {
+		t.Errorf("expected relative path inside cd directory to be allowed: %v", err)
+	}
+	if err := validateRemoteCommand(`rm /etc/passwd`, "root", "/home/stack/java-app"); err == nil {
+		t.Error("expected path outside home and cd directory to be rejected")
+	}
+}
+
+func TestCommandFileUploadAllowsCdDirectory(t *testing.T) {
+	upload := func(destination, cwd string) *httptest.ResponseRecorder {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		fields := map[string]string{"host": "127.0.0.1", "port": "1", "user": "root", "auth": "password", "secret": "x", "fingerprint": "SHA256:test", "destination": destination, "cwd": cwd}
+		for key, value := range fields {
+			_ = writer.WriteField(key, value)
+		}
+		part, _ := writer.CreateFormFile("file", "ly-api.jar")
+		_, _ = part.Write([]byte("jar"))
+		_ = writer.Close()
+		request := httptest.NewRequest(http.MethodPost, "/api/commands/upload", &body)
+		request.Header.Set("Content-Type", writer.FormDataContentType())
+		response := httptest.NewRecorder()
+		(&server{}).handleCommandFileUpload(response, request)
+		return response
+	}
+	// Passing validation means the handler goes on to dial SSH, which fails here.
+	if response := upload("/home/stack/java-app/", "/home/stack/java-app"); response.Code != http.StatusBadGateway {
+		t.Fatalf("expected cd directory to pass validation, got %d: %s", response.Code, response.Body.String())
+	}
+	if response := upload("/etc", "/home/stack/java-app"); response.Code != http.StatusBadRequest {
+		t.Fatalf("expected destination outside home and cd directory to be rejected, got %d", response.Code)
+	}
+	if response := upload("/home/stack/java-app/", ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("expected destination outside home to be rejected without cd, got %d", response.Code)
+	}
+}
+
+func TestSanitizeCommandUploadArchive(t *testing.T) {
+	pack := func(headers ...*tar.Header) *bytes.Buffer {
+		var buffer bytes.Buffer
+		writer := tar.NewWriter(&buffer)
+		for _, header := range headers {
+			_ = writer.WriteHeader(header)
+			_, _ = writer.Write(bytes.Repeat([]byte("x"), int(header.Size)))
+		}
+		_ = writer.Close()
+		return &buffer
+	}
+	var out bytes.Buffer
+	valid := pack(&tar.Header{Name: "static/", Typeflag: tar.TypeDir, Mode: 0o700}, &tar.Header{Name: "static/中文.js", Typeflag: tar.TypeReg, Size: 3, Mode: 0o777})
+	if err := sanitizeCommandUploadArchive(&out, valid); err != nil {
+		t.Fatalf("expected a plain folder to pass: %v", err)
+	}
+	reader := tar.NewReader(&out)
+	var names []string
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Typeflag == tar.TypeReg && header.Mode != 0o644 || header.Typeflag == tar.TypeDir && header.Mode != 0o755 {
+			t.Errorf("expected normalised mode for %s, got %o", header.Name, header.Mode)
+		}
+		names = append(names, header.Name)
+	}
+	if strings.Join(names, ",") != "static/,static/中文.js" {
+		t.Fatalf("unexpected entries %v", names)
+	}
+	rejected := []*tar.Header{
+		{Name: "../escape.sh", Typeflag: tar.TypeReg},
+		{Name: "a/../../escape.sh", Typeflag: tar.TypeReg},
+		{Name: "/etc/passwd", Typeflag: tar.TypeReg},
+		{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "/etc"},
+	}
+	for _, header := range rejected {
+		if err := sanitizeCommandUploadArchive(io.Discard, pack(header)); !errors.Is(err, errInvalidUploadArchive) {
+			t.Errorf("expected %q to be rejected, got %v", header.Name, err)
+		}
+	}
+}
+
+func TestCommandExecuteHandlerUnrestricted(t *testing.T) {
+	originalRun := commandExecutionRun
+	defer func() { commandExecutionRun = originalRun }()
+	var received string
+	commandExecutionRun = func(request commandExecutionRequest) (string, error) { received = request.Command; return "", nil }
+	command := `for P in $(ps -ef | grep -v grep | grep "java -jar ly-api.jar" | awk '{print $2}'); do kill $P; done`
+	execute := func(unrestricted bool) int {
+		body, _ := json.Marshal(commandExecutionRequest{Host: "127.0.0.1", User: "root", Auth: "key", Secret: "k", Fingerprint: "SHA256:test", Command: command, Cwd: "/home/stack/java-app", Unrestricted: unrestricted})
+		response := httptest.NewRecorder()
+		(&server{}).handleCommandExecute(response, httptest.NewRequest(http.MethodPost, "/api/commands/execute", bytes.NewReader(body)))
+		return response.Code
+	}
+	if code := execute(false); code != http.StatusForbidden {
+		t.Fatalf("expected restricted server to reject shell syntax, got %d", code)
+	}
+	if code := execute(true); code != http.StatusOK {
+		t.Fatalf("expected unrestricted server to run the command, got %d", code)
+	}
+	if want := "cd -- '/home/stack/java-app' || exit 1\n" + command; received != want {
+		t.Fatalf("expected the command to run verbatim inside the cd directory, got %q", received)
+	}
+}
+
+func TestCommandExecuteHandlerCd(t *testing.T) {
+	originalRun := commandExecutionRun
+	defer func() { commandExecutionRun = originalRun }()
+	var commands []string
+	commandExecutionRun = func(request commandExecutionRequest) (string, error) {
+		commands = append(commands, request.Command)
+		if strings.HasPrefix(request.Command, "cd -- '/home/stack/java-app' && pwd") {
+			return "/home/stack/java-app\n", nil
+		}
+		return "", nil
+	}
+	run := func(command, cwd string) map[string]any {
+		body, _ := json.Marshal(commandExecutionRequest{Host: "127.0.0.1", User: "root", Auth: "key", Secret: "k", Fingerprint: "SHA256:test", Command: command, Cwd: cwd})
+		response := httptest.NewRecorder()
+		(&server{}).handleCommandExecute(response, httptest.NewRequest(http.MethodPost, "/api/commands/execute", bytes.NewReader(body)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%q: expected success, got %d: %s", command, response.Code, response.Body.String())
+		}
+		var payload map[string]any
+		_ = json.Unmarshal(response.Body.Bytes(), &payload)
+		return payload
+	}
+	if payload := run(`cd /home/stack/java-app/`, ""); payload["cwd"] != "/home/stack/java-app" {
+		t.Fatalf("expected cd to report the new directory, got %#v", payload)
+	}
+	run(`mv ly-api.jar ly-api.jar.bak`, "/home/stack/java-app")
+	if got := commands[len(commands)-1]; got != "cd -- '/home/stack/java-app' || exit 1\nmv ly-api.jar ly-api.jar.bak" {
+		t.Fatalf("expected command to run inside the cd directory, got %q", got)
 	}
 }
 

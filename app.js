@@ -3039,6 +3039,8 @@ async function unbindNode(node) {
 const commandStorageKey = 'log-agent-command-flows';
 const commandServerStorageKey = 'log-agent-command-servers';
 const commandFavoritesStorageKey = 'log-agent-command-favorites';
+const commandGroupsStorageKey = 'log-agent-command-groups';
+const commandGroupsOpenStorageKey = 'log-agent-command-groups-open';
 
 function commandDefaults() {
   return [{ id: `flow-${Date.now()}`, name: t('commands.defaultFlowName'), serverId: '', lines: [
@@ -3050,18 +3052,23 @@ function commandDefaults() {
 
 function loadCommandFlows() {
   state.commandServerKeys = state.commandServerKeys || {};
+  state.expandedCommandServers = state.expandedCommandServers || new Set();
   try {
     const savedFlows = JSON.parse(localStorage.getItem(commandStorageKey) || 'null');
     const savedServers = JSON.parse(localStorage.getItem(commandServerStorageKey) || 'null');
     const savedFavorites = JSON.parse(localStorage.getItem(commandFavoritesStorageKey) || '[]');
+    const savedGroups = JSON.parse(localStorage.getItem(commandGroupsStorageKey) || '[]');
     state.commandFlows = Array.isArray(savedFlows) && savedFlows.length ? savedFlows : commandDefaults();
     state.commandServers = Array.isArray(savedServers) ? savedServers : [];
     state.commandFavorites = Array.isArray(savedFavorites) ? savedFavorites.filter((item) => item && Array.isArray(item.flows)).slice(0, 50) : [];
+    state.commandGroups = Array.isArray(savedGroups) ? savedGroups.filter((group) => group && Array.isArray(group.flows)) : [];
   } catch {
     state.commandFlows = commandDefaults();
     state.commandServers = [];
     state.commandFavorites = [];
+    state.commandGroups = [];
   }
+  try { state.commandGroupsOpen = localStorage.getItem(commandGroupsOpenStorageKey) === 'true'; } catch { state.commandGroupsOpen = false; }
   state.commandFlows.forEach((flow) => {
     if (!flow.serverId && flow.host) {
       const server = { id: `server-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: flow.host, host: flow.host, port: flow.port || '22', user: flow.user || '', auth: flow.auth || 'key', secret: flow.secret || '' };
@@ -3078,6 +3085,7 @@ function saveCommandFlows() {
     localStorage.setItem(commandStorageKey, JSON.stringify(state.commandFlows));
     localStorage.setItem(commandServerStorageKey, JSON.stringify(state.commandServers || []));
     localStorage.setItem(commandFavoritesStorageKey, JSON.stringify(state.commandFavorites || []));
+    localStorage.setItem(commandGroupsStorageKey, JSON.stringify(state.commandGroups || []));
   } catch {}
 }
 
@@ -3158,11 +3166,33 @@ function deleteCommandFavorite(favoriteId) {
   if (favorite) showToast(t('commands.toast.favoriteDeleted', { name: favorite.name }));
 }
 
-function activeCommandFlow() { return state.commandFlows.find((flow) => flow.id === state.activeCommandFlowId) || state.commandFlows[0]; }
+// Flows live in the main list and, as independent copies, inside groups; the
+// editor and the runner work on whichever one is active.
+function allCommandFlows() { return [...state.commandFlows, ...(state.commandGroups || []).flatMap((group) => group.flows)]; }
+function findCommandFlow(id) { return allCommandFlows().find((flow) => flow.id === id); }
+function commandFlowContainer(id) { if (state.commandFlows.some((flow) => flow.id === id)) return state.commandFlows; return (state.commandGroups || []).find((group) => group.flows.some((flow) => flow.id === id))?.flows || null; }
+function newCommandFlowId() { return `flow-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+function cloneCommandFlow(source, name = source.name) {
+  const copy = JSON.parse(JSON.stringify(source));
+  copy.id = newCommandFlowId(); copy.name = name; delete copy.runCwd;
+  copy.lines.forEach((line) => { line.status = 'idle'; line.uploadProgress = 0; delete line.error; delete line.errorCode; });
+  return copy;
+}
+// The copy lands right after its source, in the same list or group, and opens in the editor.
+function duplicateCommandFlow(flowId) {
+  const source = findCommandFlow(flowId); const container = commandFlowContainer(flowId);
+  if (!source || !container) return;
+  const copy = cloneCommandFlow(source, t('commands.flowCopySuffix', { name: source.name || t('commands.flowFallbackName') }));
+  container.splice(container.indexOf(source) + 1, 0, copy);
+  state.activeCommandFlowId = copy.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor();
+  showToast(t('commands.toast.flowDuplicated'));
+  requestAnimationFrame(() => { const input = $('#command-flow-name'); input?.focus(); input?.select(); });
+}
+function activeCommandFlow() { return findCommandFlow(state.activeCommandFlowId) || state.commandFlows[0]; }
 function commandServer(id) { return (state.commandServers || []).find((server) => server.id === id); }
 
 function bindServerToFlow(flowId, serverId) {
-  const flow = state.commandFlows.find((item) => item.id === flowId);
+  const flow = findCommandFlow(flowId);
   if (!flow || !commandServer(serverId)) return;
   flow.serverId = serverId;
   flow.lines.forEach((line) => { if (line.status !== 'idle') line.status = 'idle'; });
@@ -3172,16 +3202,90 @@ function bindServerToFlow(flowId, serverId) {
   showToast(t('commands.toast.bound', { name: commandServer(serverId).name || commandServer(serverId).host }));
 }
 
+// Browsers hand a dropped folder over as an empty placeholder File, so folders
+// are read through the entry API and walked recursively instead.
+function collectCommandTransferFiles(dataTransfer) {
+  const items = Array.from(dataTransfer?.items || []).filter((item) => item.kind === 'file');
+  // Entries and files must be taken synchronously, before the event ends.
+  const entries = items.map((item) => item.webkitGetAsEntry?.() || null);
+  if (!entries.some((entry) => entry?.isDirectory)) return Promise.resolve(Array.from(dataTransfer?.files || []));
+  const files = items.map((item) => item.getAsFile());
+  return Promise.all(entries.map((entry, index) => entry?.isDirectory ? readCommandFolder(entry) : files[index])).then((list) => list.filter(Boolean));
+}
+async function readCommandFolder(root) {
+  const entries = [];
+  const walk = async (directory, prefix) => {
+    const reader = directory.createReader();
+    // readEntries returns at most 100 entries per call.
+    for (;;) {
+      const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+      if (!batch.length) return;
+      for (const entry of batch) {
+        const relativePath = prefix + entry.name;
+        if (entry.isDirectory) { entries.push({ path: relativePath, directory: true }); await walk(entry, `${relativePath}/`); }
+        else entries.push({ path: relativePath, file: await new Promise((resolve, reject) => entry.file(resolve, reject)) });
+      }
+    }
+  };
+  await walk(root, '');
+  return { folder: true, name: root.name, entries };
+}
+const TAR_ENCODER = new TextEncoder();
+function tarPadding(size) { return new Uint8Array((512 - (size % 512)) % 512); }
+function tarHeader(name, size, type, mtime) {
+  const block = new Uint8Array(512);
+  const put = (text, offset, length) => block.set(TAR_ENCODER.encode(text).slice(0, length), offset);
+  const octal = (value, offset, length) => put(value.toString(8).padStart(length - 1, '0'), offset, length - 1);
+  put(name, 0, 100); octal(type === '5' ? 0o755 : 0o644, 100, 8); octal(0, 108, 8); octal(0, 116, 8); octal(size, 124, 12); octal(mtime, 136, 12);
+  block.fill(32, 148, 156); put(type, 156, 1); put('ustar\0', 257, 6); put('00', 263, 2);
+  put(`${block.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0')}\0 `, 148, 8);
+  return block;
+}
+// Long or non-ASCII paths go into a PAX record, which the server's tar reader understands.
+function tarPaxRecord(key, value) {
+  const text = ` ${key}=${value}\n`;
+  const base = TAR_ENCODER.encode(text).length;
+  let length = base + 1;
+  while (base + String(length).length !== length) length = base + String(length).length;
+  return TAR_ENCODER.encode(`${length}${text}`);
+}
+// Builds the archive as a Blob of headers plus the original File objects, so
+// file contents are streamed at upload time rather than copied into memory.
+function buildCommandFolderTar(entries) {
+  const parts = [];
+  entries.forEach((entry) => {
+    const name = entry.directory ? `${entry.path}/` : entry.path;
+    const size = entry.directory ? 0 : entry.file.size;
+    const mtime = Math.floor((entry.file?.lastModified || Date.now()) / 1000);
+    if (TAR_ENCODER.encode(name).length > 100 || /[^\x20-\x7e]/.test(name)) { const record = tarPaxRecord('path', name); parts.push(tarHeader('PaxHeader', record.length, 'x', mtime), record, tarPadding(record.length)); }
+    parts.push(tarHeader(name, size, entry.directory ? '5' : '0', mtime));
+    if (!entry.directory) parts.push(entry.file, tarPadding(size));
+  });
+  parts.push(new Uint8Array(1024));
+  return new Blob(parts, { type: 'application/x-tar' });
+}
 function addCommandFiles(fileList) {
   const files = Array.from(fileList || []).filter((file) => file && file.name);
-  if (!files.length) return;
+  if (!files.length) return [];
   state.commandFiles = state.commandFiles || [];
+  const items = [];
   files.forEach((file) => {
-    const existing = state.commandFiles.find((item) => item.name === file.name && item.size === file.size);
-    if (!existing) { const imageFile = file.type?.startsWith('image/') || /\.(?:avif|gif|jpe?g|png|webp)$/i.test(file.name); state.commandFiles.push({ id: `file-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: file.name, size: file.size, type: file.type || 'application/octet-stream', file, previewURL: imageFile ? URL.createObjectURL(file) : '', uploadProgress: 0, uploadStatus: '' }); }
+    if (file.folder) {
+      const fileCount = file.entries.filter((entry) => !entry.directory).length;
+      const size = file.entries.reduce((sum, entry) => sum + (entry.file?.size || 0), 0);
+      const existingFolder = state.commandFiles.find((item) => item.folder && item.name === file.name && item.size === size && item.fileCount === fileCount);
+      if (existingFolder) items.push(existingFolder);
+      else { state.commandFiles.push({ id: `file-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: file.name, size, fileCount, folder: true, type: 'application/x-tar', file: buildCommandFolderTar(file.entries), previewURL: '', uploadProgress: 0, uploadStatus: '' }); items.push(state.commandFiles[state.commandFiles.length - 1]); }
+      return;
+    }
+    const existing = state.commandFiles.find((item) => !item.folder && item.name === file.name && item.size === file.size);
+    if (existing) items.push(existing);
+    else { const imageFile = file.type?.startsWith('image/') || /\.(?:avif|gif|jpe?g|png|webp)$/i.test(file.name); state.commandFiles.push({ id: `file-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: file.name, size: file.size, type: file.type || 'application/octet-stream', file, previewURL: imageFile ? URL.createObjectURL(file) : '', uploadProgress: 0, uploadStatus: '' }); items.push(state.commandFiles[state.commandFiles.length - 1]); }
   });
   renderCommandFileShelf();
+  renderCommandGroups();
   showToast(t('commands.toast.filesAdded', { count: files.length }));
+  return items;
 }
 function formatFileSize(size) { if (size < 1024) return `${size} B`; if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`; return `${(size / (1024 * 1024)).toFixed(1)} MB`; }
 function renderCommandFileShelf() {
@@ -3189,10 +3293,10 @@ function renderCommandFileShelf() {
   if (!list) return;
   const files = state.commandFiles || [];
   $('#command-file-count').textContent = t('commands.fileCount', { count: files.length });
-  list.innerHTML = files.map((item) => `<article class="command-file-card upload-${escapeHtml(item.uploadStatus || 'idle')}" draggable="true" data-command-file-id="${escapeHtml(item.id)}"><div class="command-file-thumb${item.previewURL ? ' image' : ''}">${item.previewURL ? `<img src="${escapeHtml(item.previewURL)}" alt="${escapeHtml(item.name)}" />` : `<span>${escapeHtml((item.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span>`}</div><div class="command-file-copy"><strong>${escapeHtml(item.name)}</strong><small><span>${formatFileSize(item.size || 0)}</span><span class="command-file-progress-label">${item.uploadStatus === 'uploading' ? `${item.uploadProgress || 0}%` : item.uploadStatus === 'success' ? t('commands.uploaded') : item.uploadStatus === 'error' ? t('commands.uploadFailed') : ''}</span></small></div><div class="command-file-progress"><i style="width:${Math.max(0, Math.min(100, item.uploadProgress || 0))}%"></i></div><button type="button" class="command-file-remove" aria-label="${t('commands.removeFile')}">×</button></article>`).join('');
+  list.innerHTML = files.map((item) => `<article class="command-file-card upload-${escapeHtml(item.uploadStatus || 'idle')}" draggable="true" data-command-file-id="${escapeHtml(item.id)}"><div class="command-file-thumb${item.previewURL ? ' image' : ''}">${item.previewURL ? `<img src="${escapeHtml(item.previewURL)}" alt="${escapeHtml(item.name)}" />` : `<span>${item.folder ? 'DIR' : escapeHtml((item.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span>`}</div><div class="command-file-copy"><strong>${escapeHtml(item.name)}</strong><small><span>${item.folder ? `${t('commands.folderFiles', { count: item.fileCount })} · ` : ''}${formatFileSize(item.size || 0)}</span><span class="command-file-progress-label">${item.uploadStatus === 'uploading' ? `${item.uploadProgress || 0}%` : item.uploadStatus === 'success' ? t('commands.uploaded') : item.uploadStatus === 'error' ? t('commands.uploadFailed') : ''}</span></small></div><div class="command-file-progress"><i style="width:${Math.max(0, Math.min(100, item.uploadProgress || 0))}%"></i></div><button type="button" class="command-file-remove" aria-label="${t('commands.removeFile')}">×</button></article>`).join('');
   list.querySelectorAll('.command-file-card').forEach((card) => {
     card.addEventListener('dragstart', (event) => { event.dataTransfer.setData('text/command-file-id', card.dataset.commandFileId); event.dataTransfer.effectAllowed = 'copy'; });
-    card.querySelector('.command-file-remove').addEventListener('click', () => { const removed = state.commandFiles.find((item) => item.id === card.dataset.commandFileId); if (removed?.previewURL) URL.revokeObjectURL(removed.previewURL); state.commandFiles = state.commandFiles.filter((item) => item.id !== card.dataset.commandFileId); renderCommandFileShelf(); });
+    card.querySelector('.command-file-remove').addEventListener('click', () => { const removed = state.commandFiles.find((item) => item.id === card.dataset.commandFileId); if (removed?.previewURL) URL.revokeObjectURL(removed.previewURL); state.commandFiles = state.commandFiles.filter((item) => item.id !== card.dataset.commandFileId); renderCommandFileShelf(); renderCommandGroups(); });
   });
 }
 function bindCommandFileShelf() {
@@ -3204,8 +3308,8 @@ function bindCommandFileShelf() {
   input?.addEventListener('change', (event) => { addCommandFiles(event.target.files); event.target.value = ''; });
   zone?.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); zone.classList.add('drag-active'); } });
   zone?.addEventListener('dragleave', () => zone.classList.remove('drag-active'));
-  zone?.addEventListener('drop', (event) => { event.preventDefault(); zone.classList.remove('drag-active'); addCommandFiles(event.dataTransfer.files); });
-  document.addEventListener('paste', (event) => { if ($('#commands-view')?.classList.contains('hidden')) return; const files = Array.from(event.clipboardData?.files || []); if (files.length) { event.preventDefault(); addCommandFiles(files); } });
+  zone?.addEventListener('drop', (event) => { event.preventDefault(); zone.classList.remove('drag-active'); collectCommandTransferFiles(event.dataTransfer).then(addCommandFiles).catch((error) => showToast(error.message || String(error))); });
+  document.addEventListener('paste', (event) => { if ($('#commands-view')?.classList.contains('hidden')) return; if (!event.clipboardData?.files?.length) return; event.preventDefault(); collectCommandTransferFiles(event.clipboardData).then(addCommandFiles).catch((error) => showToast(error.message || String(error))); });
 }
 function renderCommandServers() {
   const list = $('#server-card-list');
@@ -3216,9 +3320,12 @@ function renderCommandServers() {
   }
   list.innerHTML = state.commandServers.map((server) => {
     const connectionStatus = ['success', 'failed'].includes(server.connectionStatus) ? server.connectionStatus : 'untested';
+    // Connected servers fold down to their heading row until expanded.
+    const collapsible = connectionStatus === 'success';
+    const collapsed = collapsible && !state.expandedCommandServers.has(server.id);
     return `
-    <article class="reusable-server-card connection-${connectionStatus}" draggable="${connectionStatus === 'success'}" data-server-id="${escapeHtml(server.id)}" title="${escapeHtml(server.connectionError || '')}">
-      <div class="reusable-server-heading"><span class="server-drag-handle">⁙</span><input data-server-field="name" value="${escapeHtml(server.name || '')}" placeholder="${t('commands.serverNamePlaceholder')}" /><button type="button" class="server-test-button" data-test-server="${escapeHtml(server.id)}">${connectionStatus === 'success' ? t('nodeStatus.connected') : connectionStatus === 'failed' ? t('commands.retry') : t('commands.testConnection')}</button><button type="button" class="server-remove-button" aria-label="${t('commands.deleteServer')}">×</button></div>
+    <article class="reusable-server-card connection-${connectionStatus}${server.unrestricted ? ' unrestricted' : ''}${collapsible ? ' collapsible' : ''}${collapsed ? ' collapsed' : ''}" draggable="${connectionStatus === 'success'}" data-server-id="${escapeHtml(server.id)}" title="${escapeHtml(server.connectionError || '')}">
+      <div class="reusable-server-heading"><span class="server-drag-handle">⁙</span><input data-server-field="name" value="${escapeHtml(server.name || '')}" placeholder="${t('commands.serverNamePlaceholder')}" /><button type="button" class="server-test-button" data-test-server="${escapeHtml(server.id)}">${connectionStatus === 'success' ? t('nodeStatus.connected') : connectionStatus === 'failed' ? t('commands.retry') : t('commands.testConnection')}</button><button type="button" class="server-expand-button" data-expand-server aria-expanded="${!collapsed}" aria-label="${t(collapsed ? 'commands.expandServer' : 'commands.collapseServer')}" title="${t(collapsed ? 'commands.expandServer' : 'commands.collapseServer')}"><svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" class="server-remove-button" aria-label="${t('commands.deleteServer')}">×</button></div>
       <div class="reusable-server-fields">
         <label>${t('commands.address')}<input data-server-field="host" value="${escapeHtml(server.host || '')}" placeholder="192.168.1.20" /></label>
         <label>${t('commands.port')}<input data-server-field="port" type="number" min="1" max="65535" value="${escapeHtml(server.port || '22')}" /></label>
@@ -3226,23 +3333,30 @@ function renderCommandServers() {
         <label>${t('commands.auth')}<select data-server-field="auth"><option value="key" ${server.auth !== 'password' ? 'selected' : ''}>SSH Key</option><option value="password" ${server.auth === 'password' ? 'selected' : ''}>${t('commands.authPassword')}</option></select></label>
       </div>
       ${server.auth === 'password' ? `<input class="reusable-server-secret" data-server-field="secret" type="password" value="${escapeHtml(server.secret || '')}" placeholder="${t('commands.loginPassword')}" />` : `<label class="server-key-picker"><span>${t('commands.chooseKeyFile')}</span><small>${escapeHtml(server.keyName || t('commands.noFileChosen'))}</small><input data-server-key-file type="file" accept=".key,.pem,.ppk,application/x-pem-file" hidden /></label>`}
+      <label class="server-unrestricted" title="${t('commands.unrestrictedHint')}"><input type="checkbox" data-server-unrestricted ${server.unrestricted ? 'checked' : ''} /><span>${t('commands.unrestricted')}</span><small>${t('commands.unrestrictedHint')}</small></label>
     </article>`;
   }).join('');
   list.querySelectorAll('.reusable-server-card').forEach((card) => {
     card.addEventListener('dragstart', (event) => { const server = commandServer(card.dataset.serverId); if (server?.connectionStatus !== 'success') { event.preventDefault(); showToast(t('commands.pickKeyFirst')); return; } const preview = document.createElement('div'); preview.className = 'server-drag-preview'; preview.innerHTML = `<span>⁙</span><strong>${escapeHtml(server.name || server.host || t('commands.unnamedServer'))}</strong>`; document.body.appendChild(preview); event.dataTransfer.setDragImage(preview, 18, 17); setTimeout(() => preview.remove(), 0); card.classList.add('dragging'); event.dataTransfer.setData('text/server-id', card.dataset.serverId); event.dataTransfer.effectAllowed = 'copy'; });
     card.addEventListener('dragend', () => card.classList.remove('dragging'));
     card.querySelectorAll('[data-server-field]').forEach((input) => {
-      const updateServer = () => { const server = commandServer(card.dataset.serverId); const field = input.dataset.serverField; server[field] = input.value; server.connectionStatus = 'untested'; server.connectionError = ''; if (field === 'host' || field === 'port') server.hostFingerprint = ''; card.classList.remove('connection-success', 'connection-failed'); card.classList.add('connection-untested'); card.draggable = false; const testButton = card.querySelector('.server-test-button'); if (testButton) testButton.textContent = t('commands.testConnection'); saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); if (field === 'auth' && input.matches('select')) renderCommandServers(); };
+      const updateServer = () => { const server = commandServer(card.dataset.serverId); const field = input.dataset.serverField; server[field] = input.value; server.connectionStatus = 'untested'; server.connectionError = ''; if (field === 'host' || field === 'port') server.hostFingerprint = ''; card.classList.remove('connection-success', 'connection-failed', 'collapsible', 'collapsed'); card.classList.add('connection-untested'); card.draggable = false; const testButton = card.querySelector('.server-test-button'); if (testButton) testButton.textContent = t('commands.testConnection'); saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); if (field === 'auth' && input.matches('select')) renderCommandServers(); };
       input.addEventListener('input', updateServer);
       input.addEventListener('change', updateServer);
       input.addEventListener('pointerdown', (event) => event.stopPropagation());
     });
+    const unrestrictedToggle = card.querySelector('[data-server-unrestricted]');
+    unrestrictedToggle.addEventListener('pointerdown', (event) => event.stopPropagation());
+    unrestrictedToggle.addEventListener('change', () => { const server = commandServer(card.dataset.serverId); server.unrestricted = unrestrictedToggle.checked; card.classList.toggle('unrestricted', server.unrestricted); saveCommandFlows(); });
     card.querySelector('[data-server-key-file]')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const server = commandServer(card.dataset.serverId); try { state.commandServerKeys[server.id] = await file.text(); server.keyName = file.name; server.connectionStatus = 'untested'; server.connectionError = ''; saveCommandFlows(); renderCommandServers(); renderCommandFlows(); showToast(t('commands.toast.keyChosen', { name: file.name })); } catch (error) { showToast(t('commands.toast.keyReadFailed', { error: error.message })); } });
+    const expandButton = card.querySelector('[data-expand-server]');
+    expandButton.addEventListener('pointerdown', (event) => event.stopPropagation());
+    expandButton.addEventListener('click', () => { const id = card.dataset.serverId; if (state.expandedCommandServers.has(id)) state.expandedCommandServers.delete(id); else state.expandedCommandServers.add(id); renderCommandServers(); });
     card.querySelector('.server-test-button').addEventListener('click', () => testCommandServerConnection(card.dataset.serverId));
     card.querySelector('.server-remove-button').addEventListener('click', () => {
       const id = card.dataset.serverId;
       state.commandServers = state.commandServers.filter((server) => server.id !== id);
-      state.commandFlows.forEach((flow) => { if (flow.serverId === id) flow.serverId = ''; });
+      allCommandFlows().forEach((flow) => { if (flow.serverId === id) flow.serverId = ''; });
       saveCommandFlows(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
     });
   });
@@ -3281,22 +3395,24 @@ function renderCommandFlows() {
   list.innerHTML = state.commandFlows.map((flow) => {
     const server = commandServer(flow.serverId);
     const done = flow.lines.length && flow.lines.every((line) => line.status === 'success');
-    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><span>${t('commands.lineCount', { count: flow.lines.length })}</span></div><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))}</span></button><i class="command-flow-status ${done ? 'ok' : ''}"></i></div>`;
+    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><span>${t('commands.lineCount', { count: flow.lines.length })}</span></div><button class="command-flow-copy" type="button" data-copy-flow="${escapeHtml(flow.id)}" title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" /></svg></button><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))}</span></button><i class="command-flow-status ${done ? 'ok' : ''}"></i></div>`;
   }).join('');
   $('#commands-flow-count').textContent = t('commands.flowCount', { count: state.commandFlows.length });
   list.querySelectorAll('.command-flow-card').forEach((card) => {
-    card.addEventListener('click', (event) => { if (event.target.closest('.flow-bind-slot')) return; state.activeCommandFlowId = card.dataset.flowId; renderCommandFlows(); renderCommandEditor(); });
-    card.addEventListener('dragstart', (event) => { if (event.target.closest('.flow-bind-slot')) return; card.classList.add('dragging'); event.dataTransfer.setData('text/flow-id', card.dataset.flowId); });
+    card.addEventListener('click', (event) => { if (event.target.closest('.flow-bind-slot, .command-flow-copy')) return; state.activeCommandFlowId = card.dataset.flowId; renderCommandFlows(); renderCommandEditor(); });
+    card.addEventListener('dragstart', (event) => { if (event.target.closest('.flow-bind-slot')) return; card.classList.add('dragging'); event.dataTransfer.effectAllowed = 'copyMove'; event.dataTransfer.setData('text/flow-id', card.dataset.flowId); });
     card.addEventListener('dragend', () => card.classList.remove('dragging'));
     card.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/flow-id')) { event.preventDefault(); card.classList.add('drag-over'); } });
     card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
     card.addEventListener('drop', (event) => { const movedId = event.dataTransfer.getData('text/flow-id'); if (!movedId) return; event.preventDefault(); card.classList.remove('drag-over'); const from = state.commandFlows.findIndex((flow) => flow.id === movedId); const to = state.commandFlows.findIndex((flow) => flow.id === card.dataset.flowId); if (from >= 0 && to >= 0 && from !== to) { const [moved] = state.commandFlows.splice(from, 1); state.commandFlows.splice(to, 0, moved); saveCommandFlows(); renderCommandFlows(); } });
   });
+  list.querySelectorAll('.command-flow-copy').forEach((button) => button.addEventListener('click', () => duplicateCommandFlow(button.dataset.copyFlow)));
+  renderCommandGroups();
   list.querySelectorAll('.flow-bind-slot').forEach((slot) => {
     slot.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/server-id')) { event.preventDefault(); event.stopPropagation(); slot.classList.add('drop-ready'); } });
     slot.addEventListener('dragleave', () => slot.classList.remove('drop-ready'));
     slot.addEventListener('drop', (event) => { const serverId = event.dataTransfer.getData('text/server-id'); if (!serverId) return; event.preventDefault(); event.stopPropagation(); slot.classList.remove('drop-ready'); bindServerToFlow(slot.dataset.bindFlow, serverId); });
-    slot.addEventListener('click', () => { const flow = state.commandFlows.find((item) => item.id === slot.dataset.bindFlow); if (!state.commandServers.length) return showToast(t('commands.toast.noServerAbove')); const current = Math.max(-1, state.commandServers.findIndex((server) => server.id === flow.serverId)); bindServerToFlow(flow.id, state.commandServers[(current + 1) % state.commandServers.length].id); });
+    slot.addEventListener('click', () => { const flow = findCommandFlow(slot.dataset.bindFlow); if (!state.commandServers.length) return showToast(t('commands.toast.noServerAbove')); const current = Math.max(-1, state.commandServers.findIndex((server) => server.id === flow.serverId)); bindServerToFlow(flow.id, state.commandServers[(current + 1) % state.commandServers.length].id); });
   });
 }
 
@@ -3325,40 +3441,70 @@ function serializeCommandLine(element) {
 }
 
 function defaultCommandUploadDestination(flow) { const server = commandServer(flow?.serverId); if (!server?.user) return ''; return server.user === 'root' ? '/root' : `/home/${server.user}`; }
-function commandUploadLineMarkup(line, index) { const file = (state.commandFiles || []).find((item) => item.id === line.fileId); const fileName = file?.name || line.fileName || ''; const progress = Math.max(0, Math.min(100, line.uploadProgress || 0)); const status = line.status === 'running' ? `${progress}%` : line.status === 'success' ? t('commands.uploadDone') : line.status === 'error' ? t('commands.uploadFailed') : t('commands.uploadWaiting'); return `<div class="command-line command-upload-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index">${String(index + 1).padStart(2, '0')}</span><div class="command-upload-fields"><div class="command-upload-file-box">${file?.previewURL ? `<img src="${escapeHtml(file.previewURL)}" alt="" />` : '<span>FILE</span>'}<strong title="${escapeHtml(fileName)}">${escapeHtml(file ? fileName : fileName ? t('commands.fileNeedsRedrop', { name: fileName }) : t('commands.fileRemoved'))}</strong></div><label class="command-upload-destination"><span>${t('commands.serverLocation')}</span><input value="${escapeHtml(line.destination || '')}" placeholder="${t('commands.destinationPlaceholder')}" /></label><div class="command-line-upload-progress"><i style="width:${progress}%"></i><span>${status}</span></div></div><button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`; }
+function commandUploadLineMarkup(line, index) { const file = (state.commandFiles || []).find((item) => item.id === line.fileId); const fileName = file?.name || line.fileName || ''; const progress = Math.max(0, Math.min(100, line.uploadProgress || 0)); const status = line.status === 'running' ? `${progress}%` : line.status === 'success' ? t('commands.uploadDone') : line.status === 'error' ? t('commands.uploadFailed') : t('commands.uploadWaiting'); return `<div class="command-line command-upload-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index" draggable="true" title="${t('commands.dragToReorder')}">${String(index + 1).padStart(2, '0')}</span><div class="command-upload-fields"><div class="command-upload-file-box">${file?.previewURL ? `<img src="${escapeHtml(file.previewURL)}" alt="" />` : '<span>FILE</span>'}<strong title="${escapeHtml(fileName)}">${escapeHtml(file ? fileName : fileName ? t('commands.fileNeedsRedrop', { name: fileName }) : t('commands.fileRemoved'))}</strong></div><label class="command-upload-destination"><span>${t('commands.serverLocation')}</span><input value="${escapeHtml(line.destination || '')}" placeholder="${t('commands.destinationPlaceholder')}" /></label><div class="command-line-upload-progress"><i style="width:${progress}%"></i><span>${status}</span></div></div><button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`; }
 function renderCommandEditor() {
   const flow = activeCommandFlow();
   if (!flow) return;
   $('#command-flow-name').value = flow.name || '';
   $('#commands-editor-title').textContent = flow.name || t('commands.editor');
   const lines = $('#command-lines');
-  lines.innerHTML = flow.lines.map((line, index) => line.type === 'upload' ? commandUploadLineMarkup(line, index) : `<div class="command-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index">${String(index + 1).padStart(2, '0')}</span><div class="command-editable" contenteditable="true" spellcheck="false" data-placeholder="${t('commands.inputPlaceholder')}">${commandLineMarkup(line.text)}</div><button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`).join('');
+  lines.innerHTML = flow.lines.map((line, index) => line.type === 'upload' ? commandUploadLineMarkup(line, index) : `<div class="command-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index" draggable="true" title="${t('commands.dragToReorder')}">${String(index + 1).padStart(2, '0')}</span><div class="command-editable" contenteditable="true" spellcheck="false" data-placeholder="${t('commands.inputPlaceholder')}">${commandLineMarkup(line.text)}</div><button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`).join('');
   lines.querySelectorAll('.command-editable').forEach((input) => {
     input.addEventListener('input', () => { const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.text = serializeCommandLine(input); line.status = 'idle'; delete line.error; saveCommandFlows(); renderCommandFlows(); });
     input.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/command-file-id')) { event.preventDefault(); input.classList.add('file-drop-target'); } });
     input.addEventListener('dragleave', () => input.classList.remove('file-drop-target'));
-    input.addEventListener('drop', (event) => { const fileId = event.dataTransfer.getData('text/command-file-id'); if (!fileId) return; event.preventDefault(); const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.type = 'upload'; line.fileId = fileId; line.destination = defaultCommandUploadDestination(flow); line.text = ''; line.status = 'idle'; line.uploadProgress = 0; delete line.error; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); });
+    input.addEventListener('drop', (event) => { const fileId = event.dataTransfer.getData('text/command-file-id'); if (!fileId) return; event.preventDefault(); const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.type = 'upload'; line.fileId = fileId; line.fileName = (state.commandFiles || []).find((item) => item.id === fileId)?.name || ''; line.destination = defaultCommandUploadDestination(flow); line.text = ''; line.status = 'idle'; line.uploadProgress = 0; delete line.error; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); });
     input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); document.execCommand('insertText', false, '\n'); } });
   });
   lines.querySelectorAll('.command-upload-destination input').forEach((input) => input.addEventListener('input', () => { const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.destination = input.value; line.status = 'idle'; line.uploadProgress = 0; delete line.error; saveCommandFlows(); renderCommandFlows(); }));
+  // A file card dropped on an upload line replaces its file but keeps the destination.
+  lines.querySelectorAll('.command-upload-line').forEach((row) => {
+    row.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/command-file-id')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; row.classList.add('file-drop-target'); } });
+    row.addEventListener('dragleave', (event) => { if (!row.contains(event.relatedTarget)) row.classList.remove('file-drop-target'); });
+    row.addEventListener('drop', (event) => { const fileId = event.dataTransfer.getData('text/command-file-id'); if (!fileId) return; event.preventDefault(); row.classList.remove('file-drop-target'); const line = flow.lines[Number(row.dataset.index)]; line.fileId = fileId; line.fileName = (state.commandFiles || []).find((item) => item.id === fileId)?.name || ''; line.status = 'idle'; line.uploadProgress = 0; delete line.error; delete line.errorCode; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); });
+  });
+  // Lines are reordered by dragging their number; the drop position follows the pointer's half of the target row.
+  const clearLineDropMarks = () => lines.querySelectorAll('.drop-before, .drop-after').forEach((row) => row.classList.remove('drop-before', 'drop-after'));
+  lines.querySelectorAll('.command-line-index').forEach((handle) => {
+    const row = handle.closest('.command-line');
+    handle.addEventListener('dragstart', (event) => { if (state.commandRunning) { event.preventDefault(); return; } event.dataTransfer.setData('text/command-line-index', row.dataset.index); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setDragImage(row, 16, 16); row.classList.add('dragging'); });
+    handle.addEventListener('dragend', () => { row.classList.remove('dragging'); clearLineDropMarks(); });
+  });
+  lines.querySelectorAll('.command-line').forEach((row) => {
+    const after = (event) => { const box = row.getBoundingClientRect(); return event.clientY > box.top + box.height / 2; };
+    row.addEventListener('dragover', (event) => { if (!event.dataTransfer.types.includes('text/command-line-index')) return; event.preventDefault(); event.dataTransfer.dropEffect = 'move'; clearLineDropMarks(); row.classList.add(after(event) ? 'drop-after' : 'drop-before'); });
+    row.addEventListener('drop', (event) => {
+      const raw = event.dataTransfer.getData('text/command-line-index'); if (raw === '') return; event.preventDefault(); clearLineDropMarks();
+      const from = Number(raw); let to = Number(row.dataset.index) + (after(event) ? 1 : 0); if (from < to) to -= 1;
+      if (from === to || !flow.lines[from]) return;
+      const [moved] = flow.lines.splice(from, 1); flow.lines.splice(to, 0, moved); saveCommandFlows(); renderCommandEditor(); renderCommandFlows();
+    });
+  });
   lines.querySelectorAll('.command-line-remove').forEach((button) => button.addEventListener('click', () => { flow.lines.splice(Number(button.closest('.command-line').dataset.index), 1); if (!flow.lines.length) flow.lines.push({ text: '', status: 'idle' }); saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); }));
   const firstError = flow.lines.findIndex((line) => line.status === 'error');
   $('#command-progress').textContent = firstError >= 0 ? t('commands.lineFailedEditable', { index: firstError + 1 }) : t('commands.linesDone', { done: flow.lines.filter((line) => line.status === 'success').length, total: flow.lines.length });
   $('#command-error').classList.toggle('hidden', firstError < 0);
+  // With every line done the button restarts from line 1, so say so.
+  const runLabel = $('#commands-run-current-label');
+  if (runLabel) { const key = flow.lines.every((line) => line.status === 'success') ? 'commands.rerunAll' : 'commands.runFromHere'; runLabel.dataset.i18n = key; runLabel.textContent = t(key); }
   if (firstError >= 0) $('#command-error-text').textContent = flow.lines[firstError].error || t('commands.serverReturnedError');
+  const blockedByPolicy = firstError >= 0 && COMMAND_POLICY_ERRORS.has(flow.lines[firstError].errorCode) && !commandServer(flow.serverId)?.unrestricted;
+  $('#command-error-unrestrict')?.classList.toggle('hidden', !blockedByPolicy);
 }
 function updateCommandUploadProgress(line, item, index, progress, status = 'uploading') { line.uploadProgress = progress; item.uploadProgress = progress; item.uploadStatus = status; const commandLine = document.querySelector(`.command-line[data-index="${index}"]`); if (commandLine) { const bar = commandLine.querySelector('.command-line-upload-progress i'); const label = commandLine.querySelector('.command-line-upload-progress span'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? t('commands.uploadDone') : status === 'error' ? t('commands.uploadFailed') : `${progress}%`; } const card = document.querySelector(`[data-command-file-id="${CSS.escape(item.id)}"]`); if (card) { card.classList.remove('upload-idle', 'upload-uploading', 'upload-success', 'upload-error'); card.classList.add(`upload-${status}`); const bar = card.querySelector('.command-file-progress i'); const label = card.querySelector('.command-file-progress-label'); if (bar) bar.style.width = `${progress}%`; if (label) label.textContent = status === 'success' ? t('commands.uploaded') : status === 'error' ? t('commands.uploadFailed') : `${progress}%`; } }
-async function uploadCommandFile(server, line, item, index) { const body = new FormData(); body.append('host', server.host || ''); body.append('port', server.port || '22'); body.append('user', server.user || ''); body.append('auth', server.auth || 'key'); body.append('secret', server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || '')); body.append('fingerprint', server.hostFingerprint || ''); body.append('destination', line.destination || defaultCommandUploadDestination({ serverId: server.id })); body.append('file', item.file, item.name); return new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); updateCommandUploadProgress(line, item, index, 0); xhr.open('POST', '/api/commands/upload'); xhr.upload.addEventListener('progress', (event) => { if (event.lengthComputable) updateCommandUploadProgress(line, item, index, Math.min(99, Math.round((event.loaded / event.total) * 100))); }); xhr.addEventListener('load', () => { let payload = {}; try { payload = JSON.parse(xhr.responseText || '{}'); } catch {} if (xhr.status >= 200 && xhr.status < 300) { updateCommandUploadProgress(line, item, index, 100, 'success'); resolve(payload); } else { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(apiErrorMessage(payload, t('commands.toast.uploadFailedFile', { name: item.name })))); } }); xhr.addEventListener('error', () => { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(t('commands.toast.uploadFailedFile', { name: item.name }))); }); xhr.send(body); }); }
-async function uploadCommandFiles(server, line, index) {
+async function uploadCommandFile(server, line, item, index, cwd = '') { const body = new FormData(); body.append('host', server.host || ''); body.append('port', server.port || '22'); body.append('user', server.user || ''); body.append('auth', server.auth || 'key'); body.append('secret', server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || '')); body.append('fingerprint', server.hostFingerprint || ''); body.append('destination', line.destination || cwd || defaultCommandUploadDestination({ serverId: server.id })); body.append('cwd', cwd); body.append('unrestricted', server.unrestricted ? 'true' : 'false'); body.append('kind', item.folder ? 'directory' : 'file'); body.append('file', item.file, item.name); return new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); updateCommandUploadProgress(line, item, index, 0); xhr.open('POST', '/api/commands/upload'); xhr.upload.addEventListener('progress', (event) => { if (event.lengthComputable) updateCommandUploadProgress(line, item, index, Math.min(99, Math.round((event.loaded / event.total) * 100))); }); xhr.addEventListener('load', () => { let payload = {}; try { payload = JSON.parse(xhr.responseText || '{}'); } catch {} if (xhr.status >= 200 && xhr.status < 300) { updateCommandUploadProgress(line, item, index, 100, 'success'); resolve(payload); } else { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(Object.assign(new Error(apiErrorMessage(payload, t('commands.toast.uploadFailedFile', { name: item.name }))), { code: payload.error || '' })); } }); xhr.addEventListener('loadend', () => { if (state.commandUploadXhr === xhr) state.commandUploadXhr = null; }); xhr.addEventListener('abort', () => { updateCommandUploadProgress(line, item, index, 0, 'idle'); reject(Object.assign(new Error(t('commands.status.pausing')), { code: 'paused' })); }); state.commandUploadXhr = xhr; xhr.addEventListener('error', () => { updateCommandUploadProgress(line, item, index, line.uploadProgress || 0, 'error'); reject(new Error(t('commands.toast.uploadFailedFile', { name: item.name }))); }); xhr.send(body); }); }
+async function uploadCommandFiles(server, line, index, cwd = '') {
   const ids = line.type === 'upload' ? [line.fileId] : [...String(line.text || '').matchAll(/\[\[file:([^\]]+)\]\]/g)].map((match) => match[1]);
   const files = ids.map((id) => (state.commandFiles || []).find((item) => item.id === id)).filter((item) => item?.file);
   if (line.type === 'upload' && !files.length) throw new Error(t('commands.toast.uploadFileRemoved'));
   if (!files.length || !goServerConnected) return 0;
   for (const item of files) {
-    await uploadCommandFile(server, line, item, index);
+    await uploadCommandFile(server, line, item, index, cwd);
   }
   return files.length;
 }
+// Errors the allowlist raises; an unrestricted server would have run the line.
+const COMMAND_POLICY_ERRORS = new Set(['forbidden_syntax', 'command_not_allowed', 'path_outside_home', 'missing_path', 'invalid_cd', 'destination_outside_home']);
 function commandTextForExecution(text) { return String(text || '').replace(/\[\[file:([^\]]+)\]\]/g, (_, id) => (state.commandFiles || []).find((item) => item.id === id)?.name || id); }
 async function executeCommandLine(flow, line, index) {
   const server = commandServer(flow.serverId);
@@ -3368,16 +3514,20 @@ async function executeCommandLine(flow, line, index) {
   await new Promise((resolve) => setTimeout(resolve, 380));
   try {
     if (!server) throw new Error(t('commands.error.noServerBound'));
-    const uploadedFiles = await uploadCommandFiles(server, line, index);
+    const uploadedFiles = await uploadCommandFiles(server, line, index, flow.runCwd || '');
     const executableText = commandTextForExecution(line.text);
     if (line.type === 'upload' || (uploadedFiles && /^\s*scp\s+/i.test(executableText))) { line.status = 'success'; line.error = ''; return true; }
     if (goServerConnected) {
-      const response = await fetch('/api/commands/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host: server.host || '', port: server.port || '22', user: server.user || '', auth: server.auth || 'key', secret: server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || ''), fingerprint: server.hostFingerprint || '', command: executableText }) });
+      const response = await fetch('/api/commands/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host: server.host || '', port: server.port || '22', user: server.user || '', auth: server.auth || 'key', secret: server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || ''), fingerprint: server.hostFingerprint || '', command: executableText, cwd: flow.runCwd || '', unrestricted: !!server.unrestricted }) });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error([apiErrorMessage(payload, t('commands.error.serverFailed')), String(payload.output || '').replace('[output truncated]', t('commands.outputTruncated'))].filter(Boolean).join('\n'));
+      if (!response.ok) throw Object.assign(new Error([apiErrorMessage(payload, t('commands.error.serverFailed')), String(payload.output || '').replace('[output truncated]', t('commands.outputTruncated'))].filter(Boolean).join('\n')), { code: payload.error || '' });
+      if (payload.cwd) flow.runCwd = payload.cwd;
     } else if (/fail|error|错误/i.test(executableText)) throw new Error(t('commands.error.demoFailed'));
     line.status = 'success'; line.error = ''; return true;
-  } catch (error) { line.status = 'error'; line.error = error.message; return false; }
+  } catch (error) {
+    if (error.code === 'paused') { line.status = 'idle'; line.uploadProgress = 0; delete line.error; delete line.errorCode; return false; }
+    line.status = 'error'; line.error = error.message; line.errorCode = error.code || ''; return false;
+  }
 }
 
 async function runCommandFlow(startAt = 0, flow = activeCommandFlow()) {
@@ -3386,30 +3536,261 @@ async function runCommandFlow(startAt = 0, flow = activeCommandFlow()) {
   const firstError = flow.lines.findIndex((line) => line.status === 'error');
   const firstPending = flow.lines.findIndex((line) => line.status !== 'success');
   const begin = startAt > 0 ? startAt : (firstError >= 0 ? firstError : Math.max(0, firstPending));
-  let failed = -1;
-  for (let i = begin; i < flow.lines.length; i += 1) { if (flow.lines[i].type !== 'upload' && !String(flow.lines[i].text || '').trim()) continue; const ok = await executeCommandLine(flow, flow.lines[i], i); saveCommandFlows(); renderCommandFlows(); if (!ok) { failed = i; break; } }
-  state.commandRunning = false; $('#commands-run-all').disabled = false; $('#commands-run-current').disabled = false; renderCommandEditor();
+  if (begin === 0) delete flow.runCwd;
+  let failed = -1; let paused = -1;
+  state.commandPauseRequested = false; setCommandPauseButton('running');
+  for (let i = begin; i < flow.lines.length; i += 1) {
+    if (flow.lines[i].type !== 'upload' && !String(flow.lines[i].text || '').trim()) continue;
+    // A pause takes effect between lines; only an upload can be cut short.
+    if (state.commandPauseRequested) { paused = i; break; }
+    const ok = await executeCommandLine(flow, flow.lines[i], i); saveCommandFlows(); renderCommandFlows();
+    if (!ok) { if (flow.lines[i].status === 'error') failed = i; else paused = i; break; }
+  }
+  state.commandRunning = false; state.commandPauseRequested = false; setCommandPauseButton('hidden');
+  $('#commands-run-all').disabled = false; $('#commands-run-current').disabled = false; renderCommandEditor();
+  if (paused >= 0) {
+    $('#commands-run-status').textContent = t('commands.status.paused', { index: paused + 1 });
+    showToast(t('commands.toast.paused', { index: paused + 1 }));
+    return false;
+  }
   $('#commands-run-status').textContent = failed >= 0 ? t('commands.status.lineFailed', { index: failed + 1 }) : t('commands.status.flowDone');
   if (failed >= 0) showToast(t('commands.toast.flowFailedEditable'));
   return failed < 0;
 }
 
+function setCommandPauseButton(mode) {
+  const button = $('#commands-pause'); if (!button) return;
+  button.classList.toggle('hidden', mode === 'hidden');
+  button.disabled = mode === 'pausing';
+  $('#commands-pause-label').textContent = t(mode === 'pausing' ? 'commands.pausing' : 'commands.pause');
+}
+
+function requestCommandPause() {
+  if (!state.commandRunning || state.commandPauseRequested) return;
+  state.commandPauseRequested = true; setCommandPauseButton('pausing');
+  $('#commands-run-status').textContent = t('commands.status.pausing');
+  // Uploads are aborted at once; the server discards the partial file.
+  state.commandUploadXhr?.abort();
+}
+
+async function runCommandFlowSequence(flows) {
+  for (const flow of flows) {
+    state.activeCommandFlowId = flow.id; renderCommandFlows(); renderCommandEditor();
+    const ok = await runCommandFlow(0, flow); if (!ok) return false;
+  }
+  return true;
+}
+
 async function runAllCommandFlows() {
   if (state.commandRunning) return;
-  for (const flow of state.commandFlows) {
-    state.activeCommandFlowId = flow.id; renderCommandFlows(); renderCommandEditor();
-    const ok = await runCommandFlow(0, flow); if (!ok) return;
-  }
+  if (!await runCommandFlowSequence(state.commandFlows)) return;
   $('#commands-run-status').textContent = t('commands.status.allDone'); showToast(t('commands.toast.allDone'));
 }
 
+// ---- Flow groups ----
+// A group holds its own copies of flows (dropping a flow in copies it), so a
+// group can be edited, re-bound and re-filed without touching the main list.
+function commandGroup(id) { return (state.commandGroups || []).find((group) => group.id === id); }
+function commandLineFileIds(line) { return line.type === 'upload' ? [line.fileId].filter(Boolean) : [...String(line.text || '').matchAll(/\[\[file:([^\]]+)\]\]/g)].map((match) => match[1]); }
+function commandGroupFileRefs(group) {
+  const refs = new Map();
+  group.flows.forEach((flow) => flow.lines.forEach((line) => commandLineFileIds(line).forEach((id) => {
+    const ref = refs.get(id) || { id, name: '', count: 0 };
+    ref.count += 1; if (!ref.name && line.fileName) ref.name = line.fileName;
+    refs.set(id, ref);
+  })));
+  return [...refs.values()].map((ref) => { const file = (state.commandFiles || []).find((item) => item.id === ref.id); return { ...ref, name: file?.name || ref.name || t('commands.groups.removedFile'), missing: !file?.file }; });
+}
+function createCommandGroup(flows = []) {
+  const group = { id: `group-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: t('commands.groups.newName', { index: (state.commandGroups || []).length + 1 }), collapsed: false, flows };
+  state.commandGroups = state.commandGroups || [];
+  state.commandGroups.push(group);
+  return group;
+}
+function copyFlowIntoGroup(flowId, groupId, beforeFlowId = '') {
+  const source = findCommandFlow(flowId); const group = commandGroup(groupId);
+  if (!source || !group) return;
+  const copy = cloneCommandFlow(source);
+  const at = group.flows.findIndex((flow) => flow.id === beforeFlowId);
+  group.flows.splice(at >= 0 ? at : group.flows.length, 0, copy);
+  group.collapsed = false;
+  saveCommandFlows(); renderCommandFlows();
+  showToast(t('commands.groups.toast.added', { flow: source.name || t('commands.unnamedFlow'), group: group.name }));
+}
+function replaceCommandGroupFile(groupId, oldId, item) {
+  const group = commandGroup(groupId);
+  if (!group || !item || oldId === item.id) return;
+  const oldName = commandGroupFileRefs(group).find((ref) => ref.id === oldId)?.name || oldId;
+  let count = 0;
+  group.flows.forEach((flow) => flow.lines.forEach((line) => {
+    if (!commandLineFileIds(line).includes(oldId)) return;
+    if (line.type === 'upload') { line.fileId = item.id; line.fileName = item.name; }
+    else line.text = String(line.text || '').split(`[[file:${oldId}]]`).join(`[[file:${item.id}]]`);
+    line.status = 'idle'; line.uploadProgress = 0; delete line.error; delete line.errorCode; count += 1;
+  }));
+  saveCommandFlows(); renderCommandFlows();
+  if (group.flows.some((flow) => flow.id === state.activeCommandFlowId)) renderCommandEditor();
+  showToast(t('commands.groups.toast.fileReplaced', { old: oldName, name: item.name, count }));
+}
+async function runCommandGroup(groupId) {
+  const group = commandGroup(groupId);
+  if (!group) return;
+  if (state.commandRunning) return showToast(t('commands.groups.toast.busy'));
+  if (!group.flows.length) return showToast(t('commands.groups.toast.empty', { name: group.name }));
+  if (commandGroupFileRefs(group).some((ref) => ref.missing)) { group.collapsed = false; renderCommandGroups(); return showToast(t('commands.groups.toast.missingFiles', { name: group.name })); }
+  state.commandRunningGroupId = group.id; renderCommandGroups();
+  const ok = await runCommandFlowSequence(group.flows);
+  state.commandRunningGroupId = ''; renderCommandGroups();
+  if (!ok) return;
+  $('#commands-run-status').textContent = t('commands.groups.status.done', { name: group.name });
+  showToast(t('commands.groups.toast.done', { name: group.name }));
+}
+function commandFlowStatus(flow) {
+  if (flow.lines.some((line) => line.status === 'running')) return 'running';
+  if (flow.lines.some((line) => line.status === 'error')) return 'error';
+  return flow.lines.length && flow.lines.every((line) => line.status === 'success') ? 'ok' : '';
+}
+const commandCopyIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" /></svg>';
+function commandGroupMarkup(group) {
+  const lineCount = group.flows.reduce((total, flow) => total + flow.lines.length, 0);
+  const files = commandGroupFileRefs(group);
+  const running = state.commandRunningGroupId === group.id;
+  const members = group.flows.length ? group.flows.map((flow, index) => {
+    const server = commandServer(flow.serverId);
+    return `<div class="command-group-member${flow.id === state.activeCommandFlowId ? ' active' : ''}" draggable="true" data-member-flow="${escapeHtml(flow.id)}"><span class="command-group-member-index">${String(index + 1).padStart(2, '0')}</span><span class="command-group-member-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><small class="${server ? 'bound' : ''}">${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))} · ${t('commands.lineCount', { count: flow.lines.length })}</small></span><button class="command-group-icon-button" type="button" data-copy-member title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}">${commandCopyIcon}</button><button class="command-group-icon-button danger" type="button" data-remove-member title="${t('commands.groups.removeMember')}" aria-label="${t('commands.groups.removeMember')}">×</button><i class="command-flow-status ${commandFlowStatus(flow)}"></i></div>`;
+  }).join('') : `<div class="command-group-member-empty">${t('commands.groups.memberEmpty')}</div>`;
+  const fileChips = files.map((file) => `<div class="command-group-file${file.missing ? ' missing' : ''}" data-group-file="${escapeHtml(file.id)}" title="${escapeHtml(file.missing ? t('commands.groups.fileMissing') : t('commands.groups.replaceHint'))}"><span class="command-group-file-ext">${escapeHtml((file.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span><span class="command-group-file-name">${escapeHtml(file.name)}</span><button type="button" data-replace-group-file>${t('commands.groups.replace')}</button></div>`).join('');
+  return `<section class="command-group${group.collapsed ? ' collapsed' : ''}${running ? ' running' : ''}" data-group-id="${escapeHtml(group.id)}">
+    <header class="command-group-head"><button class="command-group-caret" type="button" data-toggle-group aria-expanded="${!group.collapsed}" title="${t(group.collapsed ? 'commands.groups.expand' : 'commands.groups.collapse')}"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg></button><input class="command-group-name" data-group-name value="${escapeHtml(group.name || '')}" placeholder="${t('commands.groups.namePlaceholder')}" /><button class="command-group-run" type="button" data-run-group title="${t('commands.groups.run')}" aria-label="${t('commands.groups.run')}" ${state.commandRunning ? 'disabled' : ''}>▶</button><button class="command-group-icon-button danger" type="button" data-delete-group title="${t('commands.groups.delete')}" aria-label="${t('commands.groups.delete')}">×</button></header>
+    <small class="command-group-summary">${t('commands.groups.summary', { flows: group.flows.length, lines: lineCount })}${files.some((file) => file.missing) ? ' · <em>!</em>' : ''}</small>
+    <div class="command-group-body"><div class="command-group-members">${members}</div><div class="command-group-files"><span class="command-group-files-label">${t('commands.groups.files')}</span>${fileChips || `<span class="command-group-files-empty">${t('commands.groups.noFiles')}</span>`}</div></div>
+  </section>`;
+}
+function syncCommandGroupsDrawer() {
+  const open = !!state.commandGroupsOpen;
+  $('#commands-board')?.classList.toggle('groups-open', open);
+  $('.commands-columns')?.classList.toggle('groups-open', open);
+  $('#command-groups-open')?.setAttribute('aria-expanded', String(open));
+}
+function setCommandGroupsOpen(open) {
+  state.commandGroupsOpen = open;
+  try { localStorage.setItem(commandGroupsOpenStorageKey, String(open)); } catch {}
+  syncCommandGroupsDrawer();
+}
+function renderCommandGroups() {
+  const list = $('#command-groups-list');
+  if (!list) return;
+  const groups = state.commandGroups || [];
+  $('#command-groups-rail-count').textContent = groups.length;
+  syncCommandGroupsDrawer();
+  list.innerHTML = (groups.length ? groups.map(commandGroupMarkup).join('') : `<div class="command-groups-empty">${t('commands.groups.empty')}</div>`) + `<div class="command-groups-new-drop" data-group-new-drop>${t('commands.groups.dropNew')}</div>`;
+}
+function clearCommandGroupDropMarks() { $$('#command-groups-list .drop-ready').forEach((element) => element.classList.remove('drop-ready')); }
+function bindCommandGroups() {
+  const list = $('#command-groups-list');
+  const fileInput = $('#command-group-file-input');
+  if (!list) return;
+  $('#command-groups-open')?.addEventListener('click', () => setCommandGroupsOpen(true));
+  $('#command-groups-close')?.addEventListener('click', () => setCommandGroupsOpen(false));
+  // Dragging a flow onto the folded rail springs the drawer open.
+  $('#command-groups-open')?.addEventListener('dragenter', (event) => { if (event.dataTransfer.types.includes('text/flow-id')) setCommandGroupsOpen(true); });
+  $('#command-groups-add')?.addEventListener('click', () => { const group = createCommandGroup(); saveCommandFlows(); renderCommandGroups(); showToast(t('commands.groups.toast.created', { name: group.name })); list.querySelector(`[data-group-id="${CSS.escape(group.id)}"] [data-group-name]`)?.select(); });
+  list.addEventListener('input', (event) => { const input = event.target.closest('[data-group-name]'); if (!input) return; commandGroup(input.closest('[data-group-id]').dataset.groupId).name = input.value; saveCommandFlows(); });
+  list.addEventListener('click', (event) => {
+    const section = event.target.closest('[data-group-id]'); if (!section) return;
+    const group = commandGroup(section.dataset.groupId); if (!group) return;
+    const member = event.target.closest('[data-member-flow]');
+    if (event.target.closest('[data-toggle-group]')) { group.collapsed = !group.collapsed; saveCommandFlows(); renderCommandGroups(); }
+    else if (event.target.closest('[data-run-group]')) runCommandGroup(group.id);
+    else if (event.target.closest('[data-delete-group]')) {
+      if (group.flows.length && !window.confirm(t('commands.groups.confirmDelete', { name: group.name, count: group.flows.length }))) return;
+      if (state.commandRunningGroupId === group.id) return showToast(t('commands.groups.toast.busy'));
+      state.commandGroups = state.commandGroups.filter((item) => item.id !== group.id);
+      if (!findCommandFlow(state.activeCommandFlowId)) state.activeCommandFlowId = state.commandFlows[0].id;
+      saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); showToast(t('commands.groups.toast.deleted', { name: group.name }));
+    } else if (event.target.closest('[data-replace-group-file]')) {
+      state.pendingCommandGroupFile = { groupId: group.id, fileId: event.target.closest('[data-group-file]').dataset.groupFile };
+      fileInput?.click();
+    } else if (member && event.target.closest('[data-copy-member]')) duplicateCommandFlow(member.dataset.memberFlow);
+    else if (member && event.target.closest('[data-remove-member]')) {
+      if (state.commandRunningGroupId === group.id) return showToast(t('commands.groups.toast.busy'));
+      group.flows = group.flows.filter((flow) => flow.id !== member.dataset.memberFlow);
+      if (!findCommandFlow(state.activeCommandFlowId)) state.activeCommandFlowId = state.commandFlows[0].id;
+      saveCommandFlows(); renderCommandFlows(); renderCommandEditor();
+    } else if (member) { state.activeCommandFlowId = member.dataset.memberFlow; renderCommandFlows(); renderCommandEditor(); }
+  });
+  list.addEventListener('dragstart', (event) => {
+    const member = event.target.closest('[data-member-flow]'); if (!member) return;
+    state.commandDraggedMember = { groupId: member.closest('[data-group-id]').dataset.groupId, flowId: member.dataset.memberFlow };
+    member.classList.add('dragging'); event.dataTransfer.effectAllowed = 'copyMove'; event.dataTransfer.setData('text/group-member', member.dataset.memberFlow);
+  });
+  list.addEventListener('dragend', (event) => { event.target.closest?.('[data-member-flow]')?.classList.remove('dragging'); state.commandDraggedMember = null; clearCommandGroupDropMarks(); });
+  // Work out what a drag over the drawer would do, or null when it would do nothing.
+  const dropTarget = (event) => {
+    const types = event.dataTransfer.types;
+    const fileChip = event.target.closest('[data-group-file]');
+    if (fileChip && (types.includes('text/command-file-id') || types.includes('Files'))) return { kind: 'file', element: fileChip, effect: 'copy' };
+    const member = event.target.closest('[data-member-flow]');
+    if (member && types.includes('text/server-id')) return { kind: 'server', element: member, effect: 'link' };
+    const isFlow = types.includes('text/flow-id') || types.includes('text/group-member');
+    if (!isFlow) return null;
+    if (event.target.closest('[data-group-new-drop]')) return { kind: 'new', element: event.target.closest('[data-group-new-drop]'), effect: 'copy' };
+    const section = event.target.closest('[data-group-id]'); if (!section) return null;
+    const sameGroup = types.includes('text/group-member') && state.commandDraggedMember?.groupId === section.dataset.groupId;
+    return { kind: sameGroup ? 'reorder' : 'flow', element: member || section, section, member, effect: sameGroup ? 'move' : 'copy' };
+  };
+  list.addEventListener('dragover', (event) => {
+    const target = dropTarget(event); clearCommandGroupDropMarks(); if (!target) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = target.effect; target.element.classList.add('drop-ready');
+  });
+  list.addEventListener('dragleave', (event) => { if (!list.contains(event.relatedTarget)) clearCommandGroupDropMarks(); });
+  list.addEventListener('drop', (event) => {
+    const target = dropTarget(event); clearCommandGroupDropMarks(); if (!target) return;
+    event.preventDefault();
+    if (target.kind === 'file') {
+      const groupId = target.element.closest('[data-group-id]').dataset.groupId; const oldId = target.element.dataset.groupFile;
+      const shelfId = event.dataTransfer.getData('text/command-file-id');
+      if (shelfId) return replaceCommandGroupFile(groupId, oldId, (state.commandFiles || []).find((item) => item.id === shelfId));
+      collectCommandTransferFiles(event.dataTransfer).then(addCommandFiles).then((items) => replaceCommandGroupFile(groupId, oldId, items[0])).catch((error) => showToast(error.message || String(error)));
+      return;
+    }
+    if (target.kind === 'server') return bindServerToFlow(target.element.dataset.memberFlow, event.dataTransfer.getData('text/server-id'));
+    const flowId = event.dataTransfer.getData('text/flow-id') || event.dataTransfer.getData('text/group-member');
+    if (!flowId) return;
+    if (target.kind === 'new') { const group = createCommandGroup(); copyFlowIntoGroup(flowId, group.id); return; }
+    const group = commandGroup(target.section.dataset.groupId);
+    if (target.kind === 'reorder') {
+      if (target.member?.dataset.memberFlow === flowId) return;
+      const from = group.flows.findIndex((flow) => flow.id === flowId); if (from < 0) return;
+      const over = target.member ? group.flows.findIndex((flow) => flow.id === target.member.dataset.memberFlow) : -1;
+      const [moved] = group.flows.splice(from, 1);
+      // Taking the row's old index lands after the target when dragging down, before it when dragging up.
+      group.flows.splice(over < 0 ? group.flows.length : over, 0, moved);
+      saveCommandFlows(); renderCommandGroups(); return;
+    }
+    copyFlowIntoGroup(flowId, group.id, target.member?.dataset.memberFlow || '');
+  });
+  fileInput?.addEventListener('change', (event) => {
+    const pending = state.pendingCommandGroupFile; state.pendingCommandGroupFile = null;
+    const items = addCommandFiles(event.target.files); event.target.value = '';
+    if (pending && items.length) replaceCommandGroupFile(pending.groupId, pending.fileId, items[0]);
+  });
+}
+
 function bindCommandEvents() {
-  loadCommandFlows(); bindCommandFileShelf(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
+  loadCommandFlows(); bindCommandFileShelf(); bindCommandGroups(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
   $('#command-flow-name')?.addEventListener('input', (event) => { const flow = activeCommandFlow(); flow.name = event.target.value; saveCommandFlows(); $('#commands-editor-title').textContent = flow.name || t('commands.editor'); renderCommandFlows(); });
   $('#commands-add-server')?.addEventListener('click', () => { state.commandServers.push({ id: `server-${Date.now()}`, name: t('commands.newServerName', { index: state.commandServers.length + 1 }), host: '', port: '22', user: '', auth: 'key', secret: '', connectionStatus: 'untested', connectionError: '' }); saveCommandFlows(); renderCommandServers(); });
   $('#commands-add-flow')?.addEventListener('click', () => { const flow = { id: `flow-${Date.now()}`, name: t('commands.newFlowName', { index: state.commandFlows.length + 1 }), serverId: '', lines: [{ text: '', status: 'idle' }] }; state.commandFlows.push(flow); state.activeCommandFlowId = flow.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
-  $('#commands-duplicate')?.addEventListener('click', () => { const source = activeCommandFlow(); const copy = JSON.parse(JSON.stringify(source)); copy.id = `flow-${Date.now()}`; copy.name = t('commands.flowCopySuffix', { name: source.name || t('commands.flowFallbackName') }); copy.lines.forEach((line) => { line.status = 'idle'; delete line.error; }); state.commandFlows.push(copy); state.activeCommandFlowId = copy.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); showToast(t('commands.toast.flowDuplicated')); });
-  $('#commands-delete')?.addEventListener('click', () => { if (state.commandFlows.length <= 1) return showToast(t('commands.toast.keepOneFlow')); const index = state.commandFlows.findIndex((flow) => flow.id === state.activeCommandFlowId); state.commandFlows.splice(index, 1); state.activeCommandFlowId = state.commandFlows[Math.max(0, index - 1)].id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
+  $('#commands-duplicate')?.addEventListener('click', () => duplicateCommandFlow(activeCommandFlow()?.id));
+  $('#commands-delete')?.addEventListener('click', () => {
+    const container = commandFlowContainer(state.activeCommandFlowId); if (!container) return;
+    // The main list keeps at least one flow; a group may be emptied.
+    if (container === state.commandFlows && state.commandFlows.length <= 1) return showToast(t('commands.toast.keepOneFlow'));
+    const index = container.findIndex((flow) => flow.id === state.activeCommandFlowId); container.splice(index, 1);
+    state.activeCommandFlowId = (container[Math.max(0, index - 1)] || state.commandFlows[0]).id;
+    saveCommandFlows(); renderCommandFlows(); renderCommandEditor();
+  });
   $('#commands-favorite')?.addEventListener('click', openCommandFavorites);
   $('#command-favorite-form')?.addEventListener('submit', saveCommandFavorite);
   $$('[data-close-command-favorites]').forEach((button) => button.addEventListener('click', closeCommandFavorites));
@@ -3422,6 +3803,12 @@ function bindCommandEvents() {
   });
   $('#commands-add-line')?.addEventListener('click', () => { activeCommandFlow().lines.push({ text: '', status: 'idle' }); saveCommandFlows(); renderCommandEditor(); });
   $('#commands-run-all')?.addEventListener('click', runAllCommandFlows);
+  $('#commands-pause')?.addEventListener('click', requestCommandPause);
+  $('#command-error-unrestrict')?.addEventListener('click', () => {
+    const flow = activeCommandFlow(); const server = commandServer(flow?.serverId); if (!server || state.commandRunning) return;
+    server.unrestricted = true; saveCommandFlows(); renderCommandServers(); showToast(t('commands.toast.unrestricted', { name: server.name || server.host || '' }));
+    const index = flow.lines.findIndex((line) => line.status === 'error'); runCommandFlow(Math.max(0, index), flow);
+  });
   $('#commands-run-current')?.addEventListener('click', () => { const flow = activeCommandFlow(); const index = flow.lines.findIndex((line) => line.status !== 'success'); runCommandFlow(index >= 0 ? index : 0, flow); });
   $('#commands-import-button')?.addEventListener('click', () => $('#commands-file-input').click());
   $('#commands-file-input')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const flow = activeCommandFlow(); const text = await file.text(); flow.lines = text.split(/\r?\n/).filter((line) => line.trim()).map((line) => ({ text: line, status: 'idle' })); if (!flow.lines.length) flow.lines = [{ text: '', status: 'idle' }]; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); showToast(t('commands.toast.linesImported', { count: flow.lines.length })); event.target.value = ''; });

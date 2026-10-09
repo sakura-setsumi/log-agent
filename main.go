@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -15,6 +16,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -90,6 +92,12 @@ type commandExecutionRequest struct {
 	Secret      string `json:"secret"`
 	Fingerprint string `json:"fingerprint"`
 	Command     string `json:"command"`
+	// Cwd is the directory a previous `cd` line in the same flow moved to.
+	// Each line runs in a fresh SSH session, so the client carries it forward.
+	Cwd string `json:"cwd"`
+	// Unrestricted servers skip the command allowlist: the line is handed to
+	// the remote shell as written. Users opt in per server.
+	Unrestricted bool `json:"unrestricted"`
 }
 
 type commandHostKeyError struct{ Fingerprint string }
@@ -487,66 +495,245 @@ func (s *server) handleCommandFileUpload(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 128<<20)
-	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "upload_read_failed", "detail": err.Error()})
-		return
+	// The file is streamed from the request straight into the SSH session, so
+	// large deploy artifacts are neither buffered in memory nor on local disk.
+	r.Body = http.MaxBytesReader(w, r.Body, maxCommandUploadBytes)
+	// Responding before the body is consumed makes browsers report a bare
+	// network error, so drain what is left before reporting a failure.
+	fail := func(status int, payload map[string]string) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		writeJSON(w, status, payload)
 	}
-	file, header, err := r.FormFile("file")
+	reader, err := r.MultipartReader()
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_file"})
+		fail(http.StatusBadRequest, map[string]string{"error": "upload_read_failed", "detail": err.Error()})
 		return
 	}
-	defer file.Close()
-	request := commandConnectionRequest{Host: strings.TrimSpace(r.FormValue("host")), Port: strings.TrimSpace(r.FormValue("port")), User: strings.TrimSpace(r.FormValue("user")), Auth: strings.TrimSpace(r.FormValue("auth")), Secret: r.FormValue("secret"), Fingerprint: strings.TrimSpace(r.FormValue("fingerprint"))}
+	// Form fields precede the file part, so the connection can be validated
+	// before any file bytes are read.
+	fields := map[string]string{}
+	var file *multipart.Part
+	for file == nil {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			fail(http.StatusBadRequest, uploadReadError(err))
+			return
+		}
+		if part.FormName() == "file" {
+			file = part
+			break
+		}
+		value, err := io.ReadAll(io.LimitReader(part, 64<<10))
+		if err != nil {
+			fail(http.StatusBadRequest, uploadReadError(err))
+			return
+		}
+		fields[part.FormName()] = string(value)
+	}
+	if file == nil {
+		fail(http.StatusBadRequest, map[string]string{"error": "missing_file"})
+		return
+	}
+	request := commandConnectionRequest{Host: strings.TrimSpace(fields["host"]), Port: strings.TrimSpace(fields["port"]), User: strings.TrimSpace(fields["user"]), Auth: strings.TrimSpace(fields["auth"]), Secret: fields["secret"], Fingerprint: strings.TrimSpace(fields["fingerprint"])}
 	if request.Port == "" {
 		request.Port = "22"
 	}
 	if request.Host == "" || request.User == "" || request.Secret == "" || request.Fingerprint == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "incomplete_connection"})
+		fail(http.StatusBadRequest, map[string]string{"error": "incomplete_connection"})
 		return
 	}
-	filename := path.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
-	if filename == "." || filename == "/" || filename == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_filename"})
+	filename := path.Base(strings.ReplaceAll(file.FileName(), "\\", "/"))
+	if filename == "." || filename == ".." || filename == "/" || filename == "" {
+		fail(http.StatusBadRequest, map[string]string{"error": "invalid_filename"})
 		return
 	}
-	homeDirectory := path.Join("/home", request.User)
-	if request.User == "root" {
-		homeDirectory = "/root"
+	homeDirectory := commandHomeDirectory(request.User)
+	// Uploads may also target the directory the flow entered with `cd`.
+	cwd, err := normalizeCommandCwd(strings.TrimSpace(fields["cwd"]), request.User)
+	if err != nil {
+		var apiErr *apiError
+		if errors.As(err, &apiErr) {
+			fail(http.StatusBadRequest, map[string]string{"error": apiErr.code})
+		} else {
+			fail(http.StatusBadRequest, map[string]string{"error": "invalid_cwd"})
+		}
+		return
 	}
-	destination := strings.TrimSpace(r.FormValue("destination"))
+	destination := strings.TrimSpace(fields["destination"])
 	if destination == "" {
-		destination = homeDirectory
+		destination = cwd
 	}
 	if strings.ContainsRune(destination, '\x00') {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_destination"})
+		fail(http.StatusBadRequest, map[string]string{"error": "invalid_destination"})
 		return
 	}
-	destination = path.Clean(destination)
-	if destination != homeDirectory && !strings.HasPrefix(destination, homeDirectory+"/") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "destination_outside_home", "detail": homeDirectory})
+	destination = commandResolvePath(destination, cwd, homeDirectory)
+	unrestricted := fields["unrestricted"] == "true"
+	if !unrestricted && !commandPathWithin(destination, homeDirectory) && !(cwd != homeDirectory && commandPathWithin(destination, cwd)) {
+		fail(http.StatusBadRequest, map[string]string{"error": "destination_outside_home", "detail": homeDirectory})
 		return
 	}
 	remotePath := path.Join(destination, filename)
 	client, err := newCommandSSHClient(request)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ssh_connect_failed", "detail": err.Error()})
+		fail(http.StatusBadGateway, map[string]string{"error": "ssh_connect_failed", "detail": err.Error()})
 		return
 	}
 	defer client.Close()
-	session, err := client.NewSession()
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ssh_session_failed", "detail": err.Error()})
+	runRemote := func(command string, stdin io.Reader) error {
+		session, err := client.NewSession()
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+		session.Stdin = stdin
+		return session.Run(command)
+	}
+	if fields["kind"] == "directory" {
+		size, status, payload := uploadCommandDirectory(file, destination, remotePath, runRemote)
+		if payload != nil {
+			fail(status, payload)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": remotePath, "size": size})
 		return
 	}
-	defer session.Close()
-	session.Stdin = file
-	if err := session.Run("umask 077 && mkdir -p -- " + shellQuote(destination) + " && cat > " + shellQuote(remotePath)); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "remote_write_failed", "detail": err.Error()})
+	// Write to a temporary name and rename only once the whole file arrived:
+	// ssh closes stdin normally even when reading the request fails, so a
+	// single `cat && mv` could move a truncated file into place.
+	partialPath := remotePath + ".uploading"
+	upload := &countingReader{reader: file}
+	writeErr := runRemote("umask 077 && mkdir -p -- "+shellQuote(destination)+" && cat > "+shellQuote(partialPath), upload)
+	if upload.err != nil {
+		_ = runRemote("rm -f -- "+shellQuote(partialPath), nil)
+		fail(http.StatusBadRequest, uploadReadError(upload.err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": remotePath})
+	if writeErr == nil {
+		writeErr = runRemote("mv -f -- "+shellQuote(partialPath)+" "+shellQuote(remotePath), nil)
+	}
+	if writeErr != nil {
+		_ = runRemote("rm -f -- "+shellQuote(partialPath), nil)
+		fail(http.StatusBadGateway, map[string]string{"error": "remote_write_failed", "detail": writeErr.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": remotePath, "size": upload.count})
+}
+
+var errInvalidUploadArchive = errors.New("invalid archive entry")
+
+// uploadCommandDirectory receives a folder the browser packed as a tar stream
+// and extracts it to remotePath. It is unpacked beside the target first and
+// swapped in only once tar succeeded, so a failed upload leaves the previous
+// folder untouched.
+func uploadCommandDirectory(file io.Reader, destination, remotePath string, runRemote func(string, io.Reader) error) (int64, int, map[string]string) {
+	partialPath := remotePath + ".uploading"
+	upload := &countingReader{reader: file}
+	reader, writer := io.Pipe()
+	packed := make(chan error, 1)
+	go func() {
+		err := sanitizeCommandUploadArchive(writer, upload)
+		writer.CloseWithError(err)
+		packed <- err
+	}()
+	// Folders are usually web assets served by another user (nginx), so they
+	// stay world-readable instead of following the 077 umask of single files.
+	writeErr := runRemote("umask 022 && mkdir -p -- "+shellQuote(destination)+" && rm -rf -- "+shellQuote(partialPath)+" && mkdir -- "+shellQuote(partialPath)+" && tar -xf - -C "+shellQuote(partialPath), reader)
+	// Unblock the packer if the remote tar stopped reading early.
+	reader.CloseWithError(io.ErrClosedPipe)
+	packErr := <-packed
+	cleanup := func() { _ = runRemote("rm -rf -- "+shellQuote(partialPath), nil) }
+	switch {
+	case upload.err != nil:
+		cleanup()
+		return 0, http.StatusBadRequest, uploadReadError(upload.err)
+	case errors.Is(packErr, errInvalidUploadArchive):
+		cleanup()
+		return 0, http.StatusBadRequest, map[string]string{"error": "invalid_archive", "detail": strings.TrimPrefix(packErr.Error(), errInvalidUploadArchive.Error()+": ")}
+	case writeErr != nil:
+		cleanup()
+		return 0, http.StatusBadGateway, map[string]string{"error": "remote_write_failed", "detail": writeErr.Error()}
+	case packErr != nil:
+		cleanup()
+		return 0, http.StatusBadRequest, uploadReadError(packErr)
+	}
+	if err := runRemote("rm -rf -- "+shellQuote(remotePath)+" && mv -- "+shellQuote(partialPath)+" "+shellQuote(remotePath), nil); err != nil {
+		cleanup()
+		return 0, http.StatusBadGateway, map[string]string{"error": "remote_write_failed", "detail": err.Error()}
+	}
+	return upload.count, http.StatusOK, nil
+}
+
+// sanitizeCommandUploadArchive re-packs the uploaded tar entry by entry, so a
+// hand-crafted archive cannot smuggle links or `..` paths out of the target
+// folder, and every entry gets plain file or directory permissions.
+func sanitizeCommandUploadArchive(dst io.Writer, src io.Reader) error {
+	reader := tar.NewReader(src)
+	writer := tar.NewWriter(dst)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			return writer.Close()
+		}
+		if err != nil {
+			return err
+		}
+		name := path.Clean(strings.ReplaceAll(header.Name, "\\", "/"))
+		if name == "." {
+			continue
+		}
+		if path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") || strings.ContainsRune(name, '\x00') {
+			return fmt.Errorf("%w: %s", errInvalidUploadArchive, header.Name)
+		}
+		out := &tar.Header{Name: name, ModTime: header.ModTime}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			out.Typeflag, out.Name, out.Mode = tar.TypeDir, name+"/", 0o755
+		case tar.TypeReg:
+			out.Typeflag, out.Mode, out.Size = tar.TypeReg, 0o644, header.Size
+		default:
+			return fmt.Errorf("%w: %s", errInvalidUploadArchive, header.Name)
+		}
+		if err := writer.WriteHeader(out); err != nil {
+			return err
+		}
+		if _, err := io.Copy(writer, reader); err != nil {
+			return err
+		}
+	}
+}
+
+// maxCommandUploadBytes bounds one upload; deploy artifacts such as fat jars
+// routinely exceed a few hundred megabytes.
+const maxCommandUploadBytes = 4 << 30
+
+// countingReader remembers a read failure that ssh would otherwise swallow
+// as a normal end of stdin, which would let a truncated file be renamed into
+// place.
+type countingReader struct {
+	reader io.Reader
+	count  int64
+	err    error
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	c.count += int64(n)
+	if err != nil && err != io.EOF {
+		c.err = err
+	}
+	return n, err
+}
+
+func uploadReadError(err error) map[string]string {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return map[string]string{"error": "upload_too_large", "detail": fmt.Sprintf("%d MB", tooLarge.Limit>>20)}
+	}
+	return map[string]string{"error": "upload_read_failed", "detail": err.Error()}
 }
 
 func splitCommandWords(command string) ([]string, error) {
@@ -601,19 +788,70 @@ func commandHomeDirectory(user string) string {
 	}
 	return path.Join("/home", user)
 }
-func commandPathInsideHome(value, home string) bool {
+func commandPathWithin(candidate, root string) bool {
+	return root == "/" || candidate == root || strings.HasPrefix(candidate, root+"/")
+}
+
+func commandResolvePath(value, cwd, home string) string {
+	switch {
+	case value == "~":
+		return home
+	case strings.HasPrefix(value, "~/"):
+		value = path.Join(home, value[2:])
+	case !strings.HasPrefix(value, "/"):
+		value = path.Join(cwd, value)
+	}
+	return path.Clean(value)
+}
+
+// commandPathAllowed accepts paths under the home directory, or under the
+// directory the flow explicitly moved into with `cd`.
+func commandPathAllowed(value, cwd, home string) bool {
 	if value == "" || strings.HasPrefix(value, "-") {
 		return true
 	}
-	candidate := value
-	if !strings.HasPrefix(candidate, "/") {
-		candidate = path.Join(home, candidate)
-	}
-	candidate = path.Clean(candidate)
-	return candidate == home || strings.HasPrefix(candidate, home+"/")
+	candidate := commandResolvePath(value, cwd, home)
+	return commandPathWithin(candidate, home) || (cwd != home && commandPathWithin(candidate, cwd))
 }
 
-func validateRemoteCommand(command, user string) error {
+// normalizeCommandCwd validates the working directory sent back by the client;
+// an empty value means the user's home directory.
+func normalizeCommandCwd(cwd, user string) (string, error) {
+	home := commandHomeDirectory(user)
+	if cwd == "" {
+		return home, nil
+	}
+	if !strings.HasPrefix(cwd, "/") || strings.ContainsAny(cwd, "\x00\r\n") {
+		return "", &apiError{code: "invalid_cwd"}
+	}
+	return path.Clean(cwd), nil
+}
+
+// parseCdCommand reports whether command is a `cd` line and, if so, the
+// absolute directory it targets.
+func parseCdCommand(command, user, cwd string) (string, bool, error) {
+	if strings.ContainsAny(command, "`$;&|<>\r\n") {
+		return "", false, nil
+	}
+	words, err := splitCommandWords(command)
+	if err != nil || len(words) == 0 || words[0] != "cd" {
+		return "", false, nil
+	}
+	home := commandHomeDirectory(user)
+	switch len(words) {
+	case 1:
+		return home, true, nil
+	case 2:
+		if strings.HasPrefix(words[1], "-") {
+			return "", true, &apiError{code: "invalid_cd"}
+		}
+		return commandResolvePath(words[1], cwd, home), true, nil
+	default:
+		return "", true, &apiError{code: "invalid_cd"}
+	}
+}
+
+func validateRemoteCommand(command, user, cwd string) error {
 	if strings.ContainsAny(command, "`$;&|<>\r\n") {
 		return &apiError{code: "forbidden_syntax"}
 	}
@@ -642,6 +880,9 @@ func validateRemoteCommand(command, user string) error {
 		return &apiError{code: "command_not_allowed", detail: words[0]}
 	}
 	home := commandHomeDirectory(user)
+	if cwd == "" {
+		cwd = home
+	}
 	start := 1
 	if words[0] == "chmod" {
 		for start < len(words) && strings.HasPrefix(words[start], "-") {
@@ -657,7 +898,7 @@ func validateRemoteCommand(command, user string) error {
 			continue
 		}
 		pathCount++
-		if !commandPathInsideHome(word, home) {
+		if !commandPathAllowed(word, cwd, home) {
 			return &apiError{code: "path_outside_home", detail: home}
 		}
 	}
@@ -742,9 +983,43 @@ func (s *server) handleCommandExecute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "incomplete_execution"})
 		return
 	}
-	if err := validateRemoteCommand(request.Command, request.User); err != nil {
+	explicitCwd := request.Cwd != ""
+	cwd, err := normalizeCommandCwd(strings.TrimSpace(request.Cwd), request.User)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err)
+		return
+	}
+	target, isCd, err := parseCdCommand(request.Command, request.User, cwd)
+	if err != nil {
 		writeAPIError(w, http.StatusForbidden, err)
 		return
+	}
+	if isCd {
+		// The directory change only lives as long as this session, so verify the
+		// target exists and hand the resolved path back for the next line.
+		request.Command = "cd -- " + shellQuote(target) + " && pwd"
+		output, err := commandExecutionRun(request)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "execution_failed", "detail": err.Error(), "output": output})
+			return
+		}
+		resolved := target
+		if lines := strings.Split(strings.TrimSpace(output), "\n"); strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "/") {
+			resolved = path.Clean(strings.TrimSpace(lines[len(lines)-1]))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "output": output, "cwd": resolved})
+		return
+	}
+	if !request.Unrestricted {
+		if err := validateRemoteCommand(request.Command, request.User, cwd); err != nil {
+			writeAPIError(w, http.StatusForbidden, err)
+			return
+		}
+	}
+	if explicitCwd {
+		// A separate line keeps the user's command intact, including trailing
+		// `&` or `;`, which would not compose with an `&&` prefix.
+		request.Command = "cd -- " + shellQuote(cwd) + " || exit 1\n" + request.Command
 	}
 	output, err := commandExecutionRun(request)
 	if err != nil {
