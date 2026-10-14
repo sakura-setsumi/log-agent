@@ -12,12 +12,6 @@ func TestEncodePowerShellCommandIsUTF16LEBase64(t *testing.T) {
 	}
 }
 
-func TestWantsBrowser(t *testing.T) {
-	if !wantsBrowser([]string{"--open"}) || wantsBrowser(nil) || wantsBrowser([]string{"open"}) {
-		t.Fatal("wantsBrowser should match only the --open flag")
-	}
-}
-
 func TestParseDesktopShortcutOutputSkipsNoise(t *testing.T) {
 	want := `C:\Users\EDY\Desktop\日志中枢.lnk`
 	line := "created|" + base64.StdEncoding.EncodeToString([]byte(want))

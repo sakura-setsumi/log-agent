@@ -33,7 +33,7 @@ import (
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
 //
-//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js favicon.png ai-icon.png loading.gif
+//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js menubar.js favicon.png ai-icon.png loading.gif
 var frontend embed.FS
 
 const (
@@ -346,44 +346,12 @@ func main() {
 		log.Fatalf("failed to start: %v", err)
 	}
 	s := newServer()
-	address := listenAddress()
-	dashboard := "http://localhost:" + strings.TrimPrefix(address, ":")
 	go ensureDesktopShortcut()
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		// Double-clicking the shortcut while an instance is already running
-		// should still bring up the dashboard rather than flash an error.
-		if wantsBrowser(os.Args[1:]) {
-			_ = openBrowser(dashboard)
-		}
-		log.Fatalf("failed to listen on %s: %v", address, err)
+	// The dashboard runs in its own window and talks to the handlers in this
+	// process directly; there is no network listener (see bridge.go).
+	if err := runDesktop(newHTTPHandler(s)); err != nil {
+		log.Fatalf("desktop window: %v", err)
 	}
-	log.Printf("Log Agent is running at %s", dashboard)
-	if wantsBrowser(os.Args[1:]) {
-		if err := openBrowser(dashboard); err != nil {
-			log.Printf("could not open the browser: %v", err)
-		}
-	}
-	log.Fatal(http.Serve(listener, newHTTPHandler(s)))
-}
-
-// listenAddress resolves the listen address. PORT (or LOG_AGENT_PORT) lets a
-// user run a second instance next to a Dozzle install that already owns 8099.
-func listenAddress() string {
-	for _, name := range []string{"LOG_AGENT_PORT", "PORT"} {
-		raw := strings.TrimSpace(os.Getenv(name))
-		if raw == "" {
-			continue
-		}
-		raw = strings.TrimPrefix(raw, ":")
-		port, err := strconv.Atoi(raw)
-		if err != nil || port < 1 || port > 65535 {
-			log.Printf("ignoring invalid %s=%q; falling back to 8099", name, raw)
-			continue
-		}
-		return ":" + strconv.Itoa(port)
-	}
-	return ":8099"
 }
 
 func newHTTPHandler(s *server) http.Handler {
@@ -403,6 +371,7 @@ func newHTTPHandler(s *server) http.Handler {
 	mux.HandleFunc("/api/commands/upload", s.handleCommandFileUpload)
 	mux.HandleFunc("/api/commands/execute", s.handleCommandExecute)
 	mux.HandleFunc("/api/commands/state", s.handleCommandsState)
+	mux.HandleFunc("/api/commands/logs", s.handleCommandLogs)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/settings/admin", s.handleAdminSettings)
 	mux.HandleFunc("/api/settings/environment", s.handleEnvironmentSettings)

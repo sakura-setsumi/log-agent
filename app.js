@@ -3042,6 +3042,7 @@ const commandFavoritesStorageKey = 'log-agent-command-favorites';
 const commandGroupsStorageKey = 'log-agent-command-groups';
 const commandGroupsOpenStorageKey = 'log-agent-command-groups-open';
 const commandParallelStorageKey = 'log-agent-command-parallel';
+const commandLogsStorageKey = 'log-agent-command-logs';
 
 function commandDefaults() {
   return [{ id: `flow-${Date.now()}`, name: t('commands.defaultFlowName'), serverId: '', lines: [
@@ -3156,6 +3157,7 @@ async function loadCommandData() {
     applyCommandData(readBrowserCommandData());
     if (await saveCommandFile()) clearBrowserCommandData();
   }
+  await loadCommandLogs();
   renderCommandServers(); renderCommandFlows(); renderCommandEditor();
 }
 
@@ -3364,7 +3366,10 @@ function renderCommandFileShelf() {
   if (!list) return;
   const files = state.commandFiles || [];
   $('#command-file-count').textContent = t('commands.fileCount', { count: files.length });
-  list.innerHTML = files.map((item) => `<article class="command-file-card upload-${escapeHtml(item.uploadStatus || 'idle')}" draggable="true" data-command-file-id="${escapeHtml(item.id)}"><div class="command-file-thumb${item.previewURL ? ' image' : ''}">${item.previewURL ? `<img src="${escapeHtml(item.previewURL)}" alt="${escapeHtml(item.name)}" />` : `<span>${item.folder ? 'DIR' : escapeHtml((item.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span>`}</div><div class="command-file-copy"><strong>${escapeHtml(item.name)}</strong><small><span>${item.folder ? `${t('commands.folderFiles', { count: item.fileCount })} · ` : ''}${formatFileSize(item.size || 0)}</span><span class="command-file-progress-label">${item.uploadStatus === 'uploading' ? `${item.uploadProgress || 0}%` : item.uploadStatus === 'success' ? t('commands.uploaded') : item.uploadStatus === 'error' ? t('commands.uploadFailed') : ''}</span></small></div><div class="command-file-progress"><i style="width:${Math.max(0, Math.min(100, item.uploadProgress || 0))}%"></i></div><button type="button" class="command-file-remove" aria-label="${t('commands.removeFile')}">×</button></article>`).join('');
+  $('#command-file-drop-zone')?.classList.toggle('has-files', files.length > 0);
+  const badge = $('#command-dock-files-count');
+  if (badge) { badge.textContent = String(files.length); badge.classList.toggle('hidden', !files.length); }
+  list.innerHTML = files.map((item) => `<article class="command-file-card upload-${escapeHtml(item.uploadStatus || 'idle')}" draggable="true" data-command-file-id="${escapeHtml(item.id)}" title="${escapeHtml(item.name)}"><div class="command-file-thumb${item.previewURL ? ' image' : ''}">${item.previewURL ? `<img src="${escapeHtml(item.previewURL)}" alt="${escapeHtml(item.name)}" />` : `<span>${item.folder ? 'DIR' : escapeHtml((item.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span>`}</div><div class="command-file-copy"><strong>${escapeHtml(item.name)}</strong><small><span>${item.folder ? `${t('commands.folderFiles', { count: item.fileCount })} · ` : ''}${formatFileSize(item.size || 0)}</span><span class="command-file-progress-label">${item.uploadStatus === 'uploading' ? `${item.uploadProgress || 0}%` : item.uploadStatus === 'success' ? t('commands.uploaded') : item.uploadStatus === 'error' ? t('commands.uploadFailed') : ''}</span></small></div><div class="command-file-progress"><i style="width:${Math.max(0, Math.min(100, item.uploadProgress || 0))}%"></i></div><button type="button" class="command-file-remove" aria-label="${t('commands.removeFile')}">×</button></article>`).join('');
   list.querySelectorAll('.command-file-card').forEach((card) => {
     card.addEventListener('dragstart', (event) => { event.dataTransfer.setData('text/command-file-id', card.dataset.commandFileId); event.dataTransfer.effectAllowed = 'copy'; });
     card.querySelector('.command-file-remove').addEventListener('click', () => { const removed = state.commandFiles.find((item) => item.id === card.dataset.commandFileId); if (removed?.previewURL) URL.revokeObjectURL(removed.previewURL); state.commandFiles = state.commandFiles.filter((item) => item.id !== card.dataset.commandFileId); renderCommandFileShelf(); renderCommandGroups(); });
@@ -3378,9 +3383,84 @@ function bindCommandFileShelf() {
   $('#command-file-select')?.addEventListener('click', () => input?.click());
   input?.addEventListener('change', (event) => { addCommandFiles(event.target.files); event.target.value = ''; });
   zone?.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); zone.classList.add('drag-active'); } });
-  zone?.addEventListener('dragleave', () => zone.classList.remove('drag-active'));
+  // The file cards now sit inside the zone; moving onto one is not leaving it.
+  zone?.addEventListener('dragleave', (event) => { if (!zone.contains(event.relatedTarget)) zone.classList.remove('drag-active'); });
   zone?.addEventListener('drop', (event) => { event.preventDefault(); zone.classList.remove('drag-active'); collectCommandTransferFiles(event.dataTransfer).then(addCommandFiles).catch((error) => showToast(error.message || String(error))); });
   document.addEventListener('paste', (event) => { if ($('#commands-view')?.classList.contains('hidden')) return; if (!event.clipboardData?.files?.length) return; event.preventDefault(); collectCommandTransferFiles(event.clipboardData).then(addCommandFiles).catch((error) => showToast(error.message || String(error))); });
+}
+// The upload shelf and the server library live in popups opened from two buttons
+// in the bottom-left corner, mirroring the AI launcher at the bottom-right. One
+// popup is open at a time; they stay open while a card is dragged out of them.
+function setCommandPopup(id) {
+  $$('.command-dock-popup').forEach((popup) => {
+    const hide = popup.id !== id;
+    // A popup that was dragged away comes back to its home spot when it closes.
+    if (hide) resetCommandPopup(popup);
+    popup.classList.toggle('hidden', hide);
+  });
+  $$('.command-dock-button').forEach((button) => {
+    const open = button.dataset.popup === id;
+    button.classList.toggle('active', open);
+    button.setAttribute('aria-expanded', String(open));
+  });
+}
+// The popups can be dragged by their heading so they never cover the spot a card
+// is about to be dropped on. The offset is kept in the `translate` property, on
+// top of the dock's own position, and is clamped so the popup stays on screen.
+function placeCommandPopup(popup, dx, dy) {
+  popup.dataset.dx = String(dx);
+  popup.dataset.dy = String(dy);
+  popup.style.translate = `${dx}px ${dy}px`;
+}
+function resetCommandPopup(popup) {
+  delete popup.dataset.dx;
+  delete popup.dataset.dy;
+  popup.style.translate = '';
+}
+function clampCommandPopup(popup, dx = Number(popup.dataset.dx) || 0, dy = Number(popup.dataset.dy) || 0) {
+  const rect = popup.getBoundingClientRect();
+  if (!rect.width) return;
+  const homeLeft = rect.left - (Number(popup.dataset.dx) || 0);
+  const homeTop = rect.top - (Number(popup.dataset.dy) || 0);
+  const top = document.getElementById('menubar')?.getBoundingClientRect().bottom || 0;
+  const nx = Math.min(Math.max(dx, -homeLeft), window.innerWidth - rect.width - homeLeft);
+  const ny = Math.min(Math.max(dy, top - homeTop), window.innerHeight - rect.height - homeTop);
+  placeCommandPopup(popup, nx, ny);
+}
+function clampCommandPopups() {
+  $$('.command-dock-popup:not(.hidden)').forEach((popup) => { if (popup.dataset.dx || popup.dataset.dy) clampCommandPopup(popup); });
+}
+function makeCommandPopupDraggable(popup) {
+  const handle = popup.querySelector('.panel-heading');
+  if (!handle) return;
+  let drag = null;
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.target.closest('button, input, select, a')) return;
+    drag = { x: event.clientX, y: event.clientY, dx: Number(popup.dataset.dx) || 0, dy: Number(popup.dataset.dy) || 0 };
+    handle.setPointerCapture(event.pointerId);
+    popup.classList.add('dragging');
+    event.preventDefault();
+  });
+  handle.addEventListener('pointermove', (event) => {
+    if (drag) clampCommandPopup(popup, drag.dx + event.clientX - drag.x, drag.dy + event.clientY - drag.y);
+  });
+  const end = () => { drag = null; popup.classList.remove('dragging'); };
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+}
+function bindCommandDock() {
+  $$('.command-dock-popup').forEach(makeCommandPopupDraggable);
+  window.addEventListener('resize', clampCommandPopups);
+  $$('.command-dock-button').forEach((button) => button.addEventListener('click', () => {
+    setCommandPopup($(`#${button.dataset.popup}`)?.classList.contains('hidden') ? button.dataset.popup : '');
+  }));
+  $$('[data-popup-close]').forEach((button) => button.addEventListener('click', () => setCommandPopup('')));
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !$('.command-dock-popup:not(.hidden)')) return;
+    setCommandPopup('');
+  });
+  // A new server is edited in the library, so show the library when adding one.
+  $('#commands-add-server')?.addEventListener('click', () => setCommandPopup('command-popup-servers'));
 }
 function renderCommandServers() {
   const list = $('#server-card-list');
@@ -3465,11 +3545,11 @@ function renderCommandFlows() {
   if (!list) return;
   list.innerHTML = state.commandFlows.map((flow) => {
     const server = commandServer(flow.serverId);
-    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><span>${t('commands.lineCount', { count: flow.lines.length })}</span></div><button class="command-flow-copy" type="button" data-copy-flow="${escapeHtml(flow.id)}" title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" /></svg></button><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))}</span></button><i class="command-flow-status ${commandFlowStatus(flow)}"></i></div>`;
+    return `<div class="command-flow-card ${flow.id === state.activeCommandFlowId ? 'active' : ''}" draggable="true" data-flow-id="${escapeHtml(flow.id)}"><span class="command-flow-handle">⁙</span><div class="command-flow-main"><strong>${escapeHtml(flow.name || t('commands.unnamedFlow'))}</strong><span class="command-flow-meta">${t('commands.lineCount', { count: flow.lines.length })}${commandLogButton('flow', flow.id)}</span></div><button class="command-flow-copy" type="button" data-copy-flow="${escapeHtml(flow.id)}" title="${t('commands.copyFlow')}" aria-label="${t('commands.copyFlow')}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" /></svg></button><span class="flow-direction-arrow">→</span><button class="flow-bind-slot ${server ? 'bound' : ''}" type="button" data-bind-flow="${escapeHtml(flow.id)}"><i>⌘</i><span>${escapeHtml(server ? (server.name || server.host) : t('commands.dropServer'))}</span></button><i class="command-flow-status ${commandFlowStatus(flow)}"></i></div>`;
   }).join('');
   $('#commands-flow-count').textContent = t('commands.flowCount', { count: state.commandFlows.length });
   list.querySelectorAll('.command-flow-card').forEach((card) => {
-    card.addEventListener('click', (event) => { if (event.target.closest('.flow-bind-slot, .command-flow-copy')) return; state.commandPasteGroupId = ''; state.activeCommandFlowId = card.dataset.flowId; renderCommandFlows(); renderCommandEditor(); });
+    card.addEventListener('click', (event) => { if (event.target.closest('.command-log-button')) return openCommandLogs('flow', card.dataset.flowId); if (event.target.closest('.flow-bind-slot, .command-flow-copy')) return; state.commandPasteGroupId = ''; state.activeCommandFlowId = card.dataset.flowId; renderCommandFlows(); renderCommandEditor(); });
     card.addEventListener('dragstart', (event) => { if (event.target.closest('.flow-bind-slot')) return; card.classList.add('dragging'); event.dataTransfer.effectAllowed = 'copyMove'; event.dataTransfer.setData('text/flow-id', card.dataset.flowId); });
     card.addEventListener('dragend', () => card.classList.remove('dragging'));
     card.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/flow-id')) { event.preventDefault(); card.classList.add('drag-over'); } });
@@ -3511,14 +3591,15 @@ function serializeCommandLine(element) {
 }
 
 function defaultCommandUploadDestination(flow) { const server = commandServer(flow?.serverId); if (!server?.user) return ''; return server.user === 'root' ? '/root' : `/home/${server.user}`; }
-function commandUploadLineMarkup(line, index) { const file = (state.commandFiles || []).find((item) => item.id === line.fileId); const fileName = file?.name || line.fileName || ''; const progress = Math.max(0, Math.min(100, line.uploadProgress || 0)); const status = line.status === 'running' ? `${progress}%` : line.status === 'success' ? t('commands.uploadDone') : line.status === 'error' ? t('commands.uploadFailed') : t('commands.uploadWaiting'); return `<div class="command-line command-upload-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index" draggable="true" title="${t('commands.dragToReorder')}">${String(index + 1).padStart(2, '0')}</span><div class="command-upload-fields"><div class="command-upload-file-box">${file?.previewURL ? `<img src="${escapeHtml(file.previewURL)}" alt="" />` : '<span>FILE</span>'}<strong title="${escapeHtml(fileName)}">${escapeHtml(file ? fileName : fileName ? t('commands.fileNeedsRedrop', { name: fileName }) : t('commands.fileRemoved'))}</strong></div><label class="command-upload-destination"><span>${t('commands.serverLocation')}</span><input value="${escapeHtml(line.destination || '')}" placeholder="${t('commands.destinationPlaceholder')}" /></label><div class="command-line-upload-progress"><i style="width:${progress}%"></i><span>${status}</span></div></div><button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`; }
+function commandUploadLineMarkup(line, index) { const file = (state.commandFiles || []).find((item) => item.id === line.fileId); const fileName = file?.name || line.fileName || ''; const progress = Math.max(0, Math.min(100, line.uploadProgress || 0)); const status = line.status === 'running' ? `${progress}%` : line.status === 'success' ? t('commands.uploadDone') : line.status === 'error' ? t('commands.uploadFailed') : t('commands.uploadWaiting'); return `<div class="command-line command-upload-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index" draggable="true" title="${t('commands.dragToReorder')}">${String(index + 1).padStart(2, '0')}</span><div class="command-upload-fields"><div class="command-upload-file-box">${file?.previewURL ? `<img src="${escapeHtml(file.previewURL)}" alt="" />` : '<span>FILE</span>'}<strong title="${escapeHtml(fileName)}">${escapeHtml(file ? fileName : fileName ? t('commands.fileNeedsRedrop', { name: fileName }) : t('commands.fileRemoved'))}</strong></div><label class="command-upload-destination"><span>${t('commands.serverLocation')}</span><input value="${escapeHtml(line.destination || '')}" placeholder="${t('commands.destinationPlaceholder')}" /></label><div class="command-line-upload-progress"><i style="width:${progress}%"></i><span>${status}</span></div></div>${commandLineRunButton(index)}<button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`; }
+function commandLineRunButton(index) { const label = t('commands.runFromLine', { index: index + 1 }); return `<button class="command-line-run" type="button" title="${label}" aria-label="${label}">▶</button>`; }
 function renderCommandEditor() {
   const flow = activeCommandFlow();
   if (!flow) return;
   $('#command-flow-name').value = flow.name || '';
   $('#commands-editor-title').textContent = flow.name || t('commands.editor');
   const lines = $('#command-lines');
-  lines.innerHTML = flow.lines.map((line, index) => line.type === 'upload' ? commandUploadLineMarkup(line, index) : `<div class="command-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index" draggable="true" title="${t('commands.dragToReorder')}">${String(index + 1).padStart(2, '0')}</span><div class="command-editable" contenteditable="true" spellcheck="false" data-placeholder="${t('commands.inputPlaceholder')}">${commandLineMarkup(line.text)}</div><button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`).join('');
+  lines.innerHTML = flow.lines.map((line, index) => line.type === 'upload' ? commandUploadLineMarkup(line, index) : `<div class="command-line" data-index="${index}" data-status="${line.status || 'idle'}"><span class="command-line-index" draggable="true" title="${t('commands.dragToReorder')}">${String(index + 1).padStart(2, '0')}</span><div class="command-editable" contenteditable="true" spellcheck="false" data-placeholder="${t('commands.inputPlaceholder')}">${commandLineMarkup(line.text)}</div>${commandLineRunButton(index)}<button class="command-line-remove" type="button" aria-label="${t('commands.deleteLine', { index: index + 1 })}">×</button></div>`).join('');
   lines.querySelectorAll('.command-editable').forEach((input) => {
     input.addEventListener('input', () => { const line = flow.lines[Number(input.closest('.command-line').dataset.index)]; line.text = serializeCommandLine(input); line.status = 'idle'; delete line.error; saveCommandFlows(); renderCommandFlows(); });
     input.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('text/command-file-id')) { event.preventDefault(); input.classList.add('file-drop-target'); } });
@@ -3550,6 +3631,7 @@ function renderCommandEditor() {
       const [moved] = flow.lines.splice(from, 1); flow.lines.splice(to, 0, moved); saveCommandFlows(); renderCommandEditor(); renderCommandFlows();
     });
   });
+  lines.querySelectorAll('.command-line-run').forEach((button) => button.addEventListener('click', () => runCommandFlow(Number(button.closest('.command-line').dataset.index), flow, null, true)));
   lines.querySelectorAll('.command-line-remove').forEach((button) => button.addEventListener('click', () => { flow.lines.splice(Number(button.closest('.command-line').dataset.index), 1); if (!flow.lines.length) flow.lines.push({ text: '', status: 'idle' }); saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); }));
   const firstError = flow.lines.findIndex((line) => line.status === 'error');
   $('#command-progress').textContent = firstError >= 0 ? t('commands.lineFailedEditable', { index: firstError + 1 }) : t('commands.linesDone', { done: flow.lines.filter((line) => line.status === 'success').length, total: flow.lines.length });
@@ -3579,6 +3661,7 @@ const COMMAND_POLICY_ERRORS = new Set(['forbidden_syntax', 'command_not_allowed'
 function commandTextForExecution(text) { return String(text || '').replace(/\[\[file:([^\]]+)\]\]/g, (_, id) => (state.commandFiles || []).find((item) => item.id === id)?.name || id); }
 async function executeCommandLine(flow, line, index, run = null) {
   const server = commandServer(flow.serverId);
+  const entry = beginCommandLogEntry(run?.log, flow, line, index);
   if (line.type === 'upload') line.uploadProgress = 0;
   line.status = 'running'; renderCommandFlows();
   if (flow.id === state.activeCommandFlowId) renderCommandEditor();
@@ -3588,17 +3671,20 @@ async function executeCommandLine(flow, line, index, run = null) {
     if (!server) throw new Error(t('commands.error.noServerBound'));
     const uploadedFiles = await uploadCommandFiles(server, line, index, flow.runCwd || '', run);
     const executableText = commandTextForExecution(line.text);
-    if (line.type === 'upload' || (uploadedFiles && /^\s*scp\s+/i.test(executableText))) { line.status = 'success'; line.error = ''; return true; }
+    if (line.type === 'upload' || (uploadedFiles && /^\s*scp\s+/i.test(executableText))) { line.status = 'success'; line.error = ''; finishCommandLogEntry(run?.log, entry, 'success', { output: t('logs.uploaded', { count: uploadedFiles || 0, destination: line.destination || flow.runCwd || defaultCommandUploadDestination(flow) }) }); return true; }
     if (goServerConnected) {
       const response = await fetch('/api/commands/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host: server.host || '', port: server.port || '22', user: server.user || '', auth: server.auth || 'key', secret: server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || ''), fingerprint: server.hostFingerprint || '', command: executableText, cwd: flow.runCwd || '', unrestricted: !!server.unrestricted }) });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw Object.assign(new Error([apiErrorMessage(payload, t('commands.error.serverFailed')), String(payload.output || '').replace('[output truncated]', t('commands.outputTruncated'))].filter(Boolean).join('\n')), { code: payload.error || '' });
+      if (!response.ok) throw Object.assign(new Error([apiErrorMessage(payload, t('commands.error.serverFailed')), String(payload.output || '').replace('[output truncated]', t('commands.outputTruncated'))].filter(Boolean).join('\n')), { code: payload.error || '', output: payload.output || '', reason: apiErrorMessage(payload, t('commands.error.serverFailed')) });
       if (payload.cwd) flow.runCwd = payload.cwd;
+      entry && (entry.output = String(payload.output || '').replace('[output truncated]', t('commands.outputTruncated')));
     } else if (/fail|error|错误/i.test(executableText)) throw new Error(t('commands.error.demoFailed'));
-    line.status = 'success'; line.error = ''; return true;
+    line.status = 'success'; line.error = ''; finishCommandLogEntry(run?.log, entry, 'success', { cwd: flow.runCwd || '' }); return true;
   } catch (error) {
-    if (error.code === 'paused') { line.status = 'idle'; line.uploadProgress = 0; delete line.error; delete line.errorCode; return false; }
-    line.status = 'error'; line.error = error.message; line.errorCode = error.code || ''; return false;
+    if (error.code === 'paused') { line.status = 'idle'; line.uploadProgress = 0; delete line.error; delete line.errorCode; finishCommandLogEntry(run?.log, entry, 'paused', {}); return false; }
+    line.status = 'error'; line.error = error.message; line.errorCode = error.code || '';
+    finishCommandLogEntry(run?.log, entry, 'error', { output: String(error.output || '').replace('[output truncated]', t('commands.outputTruncated')), error: error.reason || error.message });
+    return false;
   }
 }
 
@@ -3613,19 +3699,22 @@ function setCommandRunningStatus(flow, index) {
 }
 function syncCommandRunControls() {
   const flow = activeCommandFlow();
-  const runButton = $('#commands-run-current'); if (runButton) runButton.disabled = !!flow && isCommandFlowRunning(flow.id);
+  const running = !!flow && isCommandFlowRunning(flow.id);
+  const runButton = $('#commands-run-current'); if (runButton) runButton.disabled = running;
+  document.querySelectorAll('#command-lines .command-line-run').forEach((button) => { button.disabled = running; });
   const runs = [...(state.commandRuns?.values() || [])];
   setCommandPauseButton(!runs.length ? 'hidden' : runs.every((run) => run.pauseRequested) ? 'pausing' : 'running', runs.length);
 }
 
-async function runCommandFlow(startAt = 0, flow = activeCommandFlow()) {
+// `exact` starts at startAt as given; otherwise 0 means resume from the first error or pending line.
+async function runCommandFlow(startAt = 0, flow = activeCommandFlow(), batch = null, exact = false) {
   if (!flow) return false;
   if (isCommandFlowRunning(flow.id)) { showToast(t('commands.toast.flowBusy', { name: flow.name || t('commands.unnamedFlow') })); return false; }
-  const run = { pauseRequested: false, uploads: new Set() };
+  const run = { pauseRequested: false, uploads: new Set(), log: startCommandLog(flow, batch) };
   state.commandRuns.set(flow.id, run); syncCommandRunControls();
   const firstError = flow.lines.findIndex((line) => line.status === 'error');
   const firstPending = flow.lines.findIndex((line) => line.status !== 'success');
-  const begin = startAt > 0 ? startAt : (firstError >= 0 ? firstError : Math.max(0, firstPending));
+  const begin = exact || startAt > 0 ? startAt : (firstError >= 0 ? firstError : Math.max(0, firstPending));
   if (begin === 0) delete flow.runCwd;
   let failed = -1; let paused = -1;
   for (let i = begin; i < flow.lines.length; i += 1) {
@@ -3635,6 +3724,7 @@ async function runCommandFlow(startAt = 0, flow = activeCommandFlow()) {
     const ok = await executeCommandLine(flow, flow.lines[i], i, run); saveCommandFlows(); renderCommandFlows();
     if (!ok) { if (flow.lines[i].status === 'error') failed = i; else paused = i; break; }
   }
+  finishCommandLog(run.log, paused >= 0 ? 'paused' : failed >= 0 ? 'error' : 'success');
   state.commandRuns.delete(flow.id); syncCommandRunControls(); renderCommandFlows();
   if (flow.id === state.activeCommandFlowId) renderCommandEditor();
   const name = flow.name || t('commands.unnamedFlow');
@@ -3668,18 +3758,18 @@ function requestCommandPause() {
 
 // In parallel mode every flow starts at once; otherwise they run in order and
 // the first failure or pause stops the rest.
-async function runCommandFlowSequence(flows, parallel = state.commandParallel) {
+async function runCommandFlowSequence(flows, parallel = state.commandParallel, batch = null) {
   const busy = flows.filter((flow) => isCommandFlowRunning(flow.id));
   if (parallel) {
     const idle = flows.filter((flow) => !isCommandFlowRunning(flow.id));
     if (!idle.length) { showToast(t('commands.groups.toast.busy')); return false; }
-    const results = await Promise.all(idle.map((flow) => runCommandFlow(0, flow)));
+    const results = await Promise.all(idle.map((flow) => runCommandFlow(0, flow, batch)));
     return !busy.length && results.every(Boolean);
   }
   if (busy.length) { showToast(t('commands.toast.flowBusy', { name: busy[0].name || t('commands.unnamedFlow') })); return false; }
   for (const flow of flows) {
     state.activeCommandFlowId = flow.id; renderCommandFlows(); renderCommandEditor();
-    const ok = await runCommandFlow(0, flow); if (!ok) return false;
+    const ok = await runCommandFlow(0, flow, batch); if (!ok) return false;
   }
   return true;
 }
@@ -3747,7 +3837,7 @@ async function runCommandGroup(groupId, parallel) {
   if (!group.flows.length) return showToast(t('commands.groups.toast.empty', { name: group.name }));
   if (commandGroupFileRefs(group).some((ref) => ref.missing)) { group.collapsed = false; renderCommandGroups(); return showToast(t('commands.groups.toast.missingFiles', { name: group.name })); }
   state.commandRunningGroups.add(group.id); renderCommandGroups();
-  const ok = await runCommandFlowSequence(group.flows, parallel);
+  const ok = await runCommandFlowSequence(group.flows, parallel, { id: `batch-${Date.now()}-${Math.random().toString(16).slice(2)}`, groupId: group.id, groupName: group.name });
   state.commandRunningGroups.delete(group.id); renderCommandGroups();
   if (!ok) return;
   if (commandRunCount()) return showToast(t('commands.groups.toast.done', { name: group.name }));
@@ -3775,7 +3865,7 @@ function commandGroupMarkup(group) {
   }).join('') : `<div class="command-group-member-empty">${t('commands.groups.memberEmpty')}</div>`;
   const fileChips = files.map((file) => `<div class="command-group-file${file.missing ? ' missing' : ''}" data-group-file="${escapeHtml(file.id)}" title="${escapeHtml(file.missing ? t('commands.groups.fileMissing') : t('commands.groups.replaceHint'))}"><span class="command-group-file-ext">${escapeHtml((file.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase())}</span><span class="command-group-file-name">${escapeHtml(file.name)}</span><button type="button" data-replace-group-file>${t('commands.groups.replace')}</button></div>`).join('');
   return `<section class="command-group${group.collapsed ? ' collapsed' : ''}${running ? ' running' : ''}" data-group-id="${escapeHtml(group.id)}">
-    <header class="command-group-head"><button class="command-group-caret" type="button" data-toggle-group aria-expanded="${!group.collapsed}" title="${t(group.collapsed ? 'commands.groups.expand' : 'commands.groups.collapse')}"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg></button><input class="command-group-name" data-group-name value="${escapeHtml(group.name || '')}" placeholder="${t('commands.groups.namePlaceholder')}" /><button class="command-group-icon-button danger" type="button" data-delete-group title="${t('commands.groups.delete')}" aria-label="${t('commands.groups.delete')}">×</button></header>
+    <header class="command-group-head"><button class="command-group-caret" type="button" data-toggle-group aria-expanded="${!group.collapsed}" title="${t(group.collapsed ? 'commands.groups.expand' : 'commands.groups.collapse')}"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg></button><input class="command-group-name" data-group-name value="${escapeHtml(group.name || '')}" placeholder="${t('commands.groups.namePlaceholder')}" />${commandLogButton('group', group.id)}<button class="command-group-icon-button danger" type="button" data-delete-group title="${t('commands.groups.delete')}" aria-label="${t('commands.groups.delete')}">×</button></header>
     <div class="command-group-actions"><button class="command-group-run" type="button" data-run-group="sequential" title="${t('commands.groups.runSequentialHint')}" ${running ? 'disabled' : ''}><span aria-hidden="true">▶</span>${t('commands.groups.runSequential')}</button><button class="command-group-run parallel" type="button" data-run-group="parallel" title="${t('commands.groups.runParallelHint')}" ${running ? 'disabled' : ''}><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 3.5h8M7.5 1.5l2 2-2 2M1.5 8.5h8M7.5 6.5l2 2-2 2" /></svg>${t('commands.groups.runParallel')}</button></div>
     <small class="command-group-summary">${t('commands.groups.summary', { flows: group.flows.length, lines: lineCount })}${files.some((file) => file.missing) ? ' · <em>!</em>' : ''}</small>
     <div class="command-group-body"><div class="command-group-members">${members}</div><div class="command-group-files"><span class="command-group-files-label">${t('commands.groups.files')}</span>${fileChips || `<span class="command-group-files-empty">${t('commands.groups.noFiles')}</span>`}</div></div>
@@ -3801,6 +3891,160 @@ function renderCommandGroups() {
   list.innerHTML = (groups.length ? groups.map(commandGroupMarkup).join('') : `<div class="command-groups-empty">${t('commands.groups.empty')}</div>`) + `<div class="command-groups-new-drop" data-group-new-drop>${t('commands.groups.dropNew')}</div>`;
 }
 function clearCommandGroupDropMarks() { $$('#command-groups-list .drop-ready').forEach((element) => element.classList.remove('drop-ready')); }
+// ---- Run logs ----
+// Each run of a flow becomes one record: the server it ran on and, per line,
+// the command sent and what the server returned. Records are kept newest first
+// in the same place as the flows (data/command-logs.json locally, this
+// browser's localStorage for a visitor), capped so the store stays small.
+const COMMAND_LOG_MAX_RUNS = 200;
+const COMMAND_LOG_MAX_BROWSER_RUNS = 50;
+const COMMAND_LOG_MAX_OUTPUT = 20000;
+function clampCommandLogText(text) { const value = String(text || ''); return value.length > COMMAND_LOG_MAX_OUTPUT ? `${value.slice(0, COMMAND_LOG_MAX_OUTPUT)}\n${t('commands.outputTruncated')}` : value; }
+async function loadCommandLogs() {
+  state.commandLogs = [];
+  if (state.commandStorage === 'file') {
+    try {
+      const response = await fetch('/api/commands/logs');
+      if (response.ok) state.commandLogs = ((await response.json()).runs || []).filter((run) => run && Array.isArray(run.entries));
+    } catch {}
+  } else {
+    try { const saved = JSON.parse(localStorage.getItem(commandLogsStorageKey) || '[]'); state.commandLogs = Array.isArray(saved) ? saved.filter((run) => run && Array.isArray(run.entries)) : []; } catch {}
+  }
+  // A run cut off by closing the page never got its end; it did not finish.
+  state.commandLogs.forEach((run) => { if (run.result === 'running') { run.result = 'paused'; run.entries.forEach((entry) => { if (entry.status === 'running') entry.status = 'paused'; }); } });
+}
+function saveCommandLogs() {
+  clearTimeout(state.commandLogsSaveTimer);
+  state.commandLogsSaveTimer = setTimeout(async () => {
+    state.commandLogs = state.commandLogs.slice(0, COMMAND_LOG_MAX_RUNS);
+    if (state.commandStorage === 'file') {
+      try {
+        const response = await fetch('/api/commands/logs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state.commandLogs) });
+        if (!response.ok) throw new Error(apiErrorMessage(await response.json().catch(() => ({})), `HTTP ${response.status}`));
+        state.commandLogsError = '';
+      } catch (error) {
+        if (!state.commandLogsError) showToast(t('logs.saveFailed', { error: error.message }));
+        state.commandLogsError = error.message;
+      }
+    } else if (state.commandStorage === 'browser') {
+      try { localStorage.setItem(commandLogsStorageKey, JSON.stringify(state.commandLogs.slice(0, COMMAND_LOG_MAX_BROWSER_RUNS))); } catch {}
+    }
+  }, 400);
+}
+function startCommandLog(flow, batch) {
+  const server = commandServer(flow.serverId);
+  const group = batch ? commandGroup(batch.groupId) : (state.commandGroups || []).find((item) => item.flows.some((member) => member.id === flow.id));
+  const log = {
+    id: `run-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    flowId: flow.id, flowName: flow.name || t('commands.unnamedFlow'),
+    groupId: group?.id || '', groupName: group?.name || batch?.groupName || '', batchId: batch?.id || '',
+    serverName: server ? (server.name || server.host || '') : '', host: server ? `${server.user ? `${server.user}@` : ''}${server.host || ''}${server.port && server.port !== '22' ? `:${server.port}` : ''}` : '',
+    startedAt: Date.now(), endedAt: 0, result: 'running', entries: []
+  };
+  state.commandLogs = [log, ...(state.commandLogs || [])].slice(0, COMMAND_LOG_MAX_RUNS);
+  // An open log window for this flow or group follows the run that just started.
+  const view = state.commandLogsView;
+  if (view && (view.scope === 'group' ? log.groupId : log.flowId) === view.id) view.runId = log.id;
+  saveCommandLogs(); refreshCommandLogs();
+  return log;
+}
+function beginCommandLogEntry(log, flow, line, index) {
+  if (!log) return null;
+  const fileName = (state.commandFiles || []).find((file) => file.id === line.fileId)?.name || line.fileName || '';
+  const entry = {
+    index, kind: line.type === 'upload' ? 'upload' : 'command',
+    command: line.type === 'upload' ? `${fileName} → ${line.destination || flow.runCwd || defaultCommandUploadDestination(flow)}` : commandTextForExecution(line.text),
+    cwd: flow.runCwd || '', startedAt: Date.now(), durationMs: 0, status: 'running', output: '', error: ''
+  };
+  log.entries.push(entry);
+  saveCommandLogs(); refreshCommandLogs();
+  return entry;
+}
+function finishCommandLogEntry(log, entry, status, { output, error, cwd } = {}) {
+  if (!log || !entry) return;
+  entry.status = status; entry.durationMs = Date.now() - entry.startedAt;
+  if (output !== undefined) entry.output = clampCommandLogText(output);
+  else entry.output = clampCommandLogText(entry.output);
+  if (error) entry.error = clampCommandLogText(error);
+  if (cwd) entry.cwd = cwd;
+  saveCommandLogs(); refreshCommandLogs();
+}
+function finishCommandLog(log, result) {
+  if (!log) return;
+  log.result = result; log.endedAt = Date.now();
+  saveCommandLogs(); refreshCommandLogs(); renderCommandFlows();
+}
+function commandLogRuns(scope, id) { return (state.commandLogs || []).filter((run) => (scope === 'group' ? run.groupId : run.flowId) === id); }
+function commandLogButton(scope, id) {
+  const count = commandLogRuns(scope, id).length;
+  return `<button class="command-log-button" type="button" data-log-scope="${scope}" data-log-id="${escapeHtml(id)}" title="${t('logs.openTitle')}" aria-label="${t('logs.openTitle')}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h7l3 3v8H3z" /><path d="M5.5 7.5h5M5.5 10h5" /></svg><span>${t('logs.open')}</span>${count ? `<b>${count}</b>` : ''}</button>`;
+}
+function formatCommandLogTime(time) { return time ? new Date(time).toLocaleString(activeLanguage() === 'zh' ? 'zh-CN' : 'en-US', { hour12: false }) : ''; }
+function formatCommandLogDuration(ms) { if (!ms && ms !== 0) return ''; return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`; }
+function commandLogScopeName(view) {
+  if (view.scope === 'group') return t('logs.groupScope', { name: commandGroup(view.id)?.name || commandLogRuns('group', view.id)[0]?.groupName || '' });
+  return t('logs.flowScope', { name: findCommandFlow(view.id)?.name || commandLogRuns('flow', view.id)[0]?.flowName || '' });
+}
+function openCommandLogs(scope, id) {
+  state.commandLogsView = { scope, id, runId: commandLogRuns(scope, id)[0]?.id || '' };
+  renderCommandLogs();
+  $('#command-logs-modal')?.classList.remove('hidden');
+}
+function closeCommandLogs() { $('#command-logs-modal')?.classList.add('hidden'); state.commandLogsView = null; }
+// Re-render while a run is writing into an open modal, batched to one paint.
+// A timer rather than requestAnimationFrame: rAF never fires in a hidden tab.
+function refreshCommandLogs() {
+  if (!state.commandLogsView || state.commandLogsRefresh) return;
+  state.commandLogsRefresh = setTimeout(() => { state.commandLogsRefresh = 0; if (state.commandLogsView) renderCommandLogs(); }, 30);
+}
+function commandLogResultLabel(result) { return t(`logs.result.${['running', 'success', 'error', 'paused'].includes(result) ? result : 'paused'}`); }
+function renderCommandLogs() {
+  const view = state.commandLogsView; if (!view) return;
+  const runs = commandLogRuns(view.scope, view.id);
+  if (!runs.some((run) => run.id === view.runId)) view.runId = runs[0]?.id || '';
+  $('#command-logs-scope').textContent = `${commandLogScopeName(view)} · ${t('logs.runCount', { count: runs.length })}`;
+  $('#command-logs-clear').disabled = !runs.length; $('#command-logs-copy').disabled = !view.runId;
+  $('#command-logs-runs').innerHTML = runs.length ? runs.map((run) => {
+    const title = view.scope === 'group' ? run.flowName : formatCommandLogTime(run.startedAt);
+    const meta = [view.scope === 'group' ? formatCommandLogTime(run.startedAt) : '', run.serverName || t('logs.noServer'), run.endedAt ? formatCommandLogDuration(run.endedAt - run.startedAt) : ''].filter(Boolean).join(' · ');
+    return `<button class="command-log-run result-${escapeHtml(run.result)}${run.id === view.runId ? ' active' : ''}" type="button" data-log-run="${escapeHtml(run.id)}"><span class="command-log-run-title"><strong>${escapeHtml(title)}</strong><i>${commandLogResultLabel(run.result)}</i></span><small>${escapeHtml(meta)}</small></button>`;
+  }).join('') : `<div class="command-logs-empty">${t('logs.empty')}</div>`;
+  const detail = $('#command-logs-detail');
+  const run = runs.find((item) => item.id === view.runId);
+  const keepScroll = detail.dataset.runId === (run?.id || '') ? detail.scrollTop : 0;
+  const stickToBottom = run?.result === 'running' && detail.scrollHeight - detail.scrollTop - detail.clientHeight < 40;
+  detail.dataset.runId = run?.id || '';
+  detail.innerHTML = run ? `<div class="command-log-summary"><strong>${escapeHtml(run.flowName)}</strong><span class="result-${escapeHtml(run.result)}">${commandLogResultLabel(run.result)}</span><small>${escapeHtml([run.groupName ? t('logs.groupScope', { name: run.groupName }) : '', run.serverName ? `${run.serverName}${run.host ? ` (${run.host})` : ''}` : t('logs.noServer'), formatCommandLogTime(run.startedAt)].filter(Boolean).join(' · '))}</small></div>${run.entries.length ? run.entries.map((entry) => `<article class="command-log-entry status-${escapeHtml(entry.status)}"><header><span class="command-log-entry-index">${String(entry.index + 1).padStart(2, '0')}</span><code>${entry.kind === 'upload' ? '⇧ ' : '$ '}${escapeHtml(entry.command)}</code><small>${escapeHtml([entry.status === 'running' ? commandLogResultLabel('running') : formatCommandLogDuration(entry.durationMs), entry.cwd ? `${t('logs.cwd')} ${entry.cwd}` : ''].filter(Boolean).join(' · '))}</small></header>${entry.error ? `<pre class="command-log-error">${escapeHtml(entry.error)}</pre>` : ''}${entry.output ? `<pre>${escapeHtml(entry.output)}</pre>` : entry.status === 'running' || entry.error ? '' : `<pre class="command-log-none">${t('logs.noOutput')}</pre>`}</article>`).join('') : `<div class="command-logs-empty">${t('logs.noEntries')}</div>`}` : `<div class="command-logs-empty">${t(runs.length ? 'logs.selectRun' : 'logs.empty')}</div>`;
+  detail.scrollTop = stickToBottom ? detail.scrollHeight : keepScroll;
+}
+function commandLogText(run) {
+  const lines = [`# ${run.flowName}${run.groupName ? ` (${run.groupName})` : ''}`, `# ${run.serverName || t('logs.noServer')}${run.host ? ` ${run.host}` : ''} · ${formatCommandLogTime(run.startedAt)} · ${commandLogResultLabel(run.result)}`, ''];
+  run.entries.forEach((entry) => {
+    lines.push(`[${String(entry.index + 1).padStart(2, '0')}] ${entry.kind === 'upload' ? '⇧' : '$'} ${entry.command}${entry.durationMs ? `  (${formatCommandLogDuration(entry.durationMs)})` : ''}`);
+    if (entry.error) lines.push(entry.error);
+    if (entry.output) lines.push(entry.output);
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+function bindCommandLogs() {
+  $$('[data-close-command-logs]').forEach((button) => button.addEventListener('click', closeCommandLogs));
+  bindBackdropDismissal($('#command-logs-modal'), closeCommandLogs);
+  $('#command-logs-runs')?.addEventListener('click', (event) => { const button = event.target.closest('[data-log-run]'); if (!button || !state.commandLogsView) return; state.commandLogsView.runId = button.dataset.logRun; renderCommandLogs(); });
+  $('#command-logs-copy')?.addEventListener('click', async () => {
+    const run = (state.commandLogs || []).find((item) => item.id === state.commandLogsView?.runId); if (!run) return;
+    try { await navigator.clipboard.writeText(commandLogText(run)); showToast(t('logs.copied')); } catch (error) { showToast(error.message || String(error)); }
+  });
+  $('#command-logs-clear')?.addEventListener('click', () => {
+    const view = state.commandLogsView; if (!view) return;
+    const runs = commandLogRuns(view.scope, view.id); if (!runs.length) return;
+    if (!window.confirm(t('logs.confirmClear', { scope: commandLogScopeName(view), count: runs.length }))) return;
+    const ids = new Set(runs.filter((run) => run.result !== 'running').map((run) => run.id));
+    state.commandLogs = state.commandLogs.filter((run) => !ids.has(run.id));
+    saveCommandLogs(); renderCommandLogs(); renderCommandFlows(); showToast(t('logs.cleared'));
+  });
+}
+
 // ---- Ctrl+C / Ctrl+V on flows ----
 // Outside text fields, copy puts the active flow on the system clipboard as
 // tagged JSON, and paste drops a copy after the active flow -- into the group
@@ -3880,6 +4124,7 @@ function bindCommandGroups() {
     if (event.target.closest('[data-member-server]')) return;
     if (event.target.closest('[data-toggle-group]')) { group.collapsed = !group.collapsed; saveCommandFlows(); renderCommandGroups(); }
     else if (event.target.closest('[data-run-group]')) runCommandGroup(group.id, event.target.closest('[data-run-group]').dataset.runGroup === 'parallel');
+    else if (event.target.closest('.command-log-button')) openCommandLogs('group', group.id);
     else if (event.target.closest('[data-delete-group]')) {
       if (group.flows.length && !window.confirm(t('commands.groups.confirmDelete', { name: group.name, count: group.flows.length }))) return;
       if (state.commandRunningGroups.has(group.id) || group.flows.some((flow) => isCommandFlowRunning(flow.id))) return showToast(t('commands.groups.toast.busy'));
@@ -3956,7 +4201,7 @@ function bindCommandGroups() {
 }
 
 function bindCommandEvents() {
-  loadCommandFlows(); bindCommandFileShelf(); bindCommandGroups(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
+  loadCommandFlows(); bindCommandFileShelf(); bindCommandDock(); bindCommandGroups(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
   loadCommandData();
   $('#command-flow-name')?.addEventListener('input', (event) => { const flow = activeCommandFlow(); flow.name = event.target.value; saveCommandFlows(); $('#commands-editor-title').textContent = flow.name || t('commands.editor'); renderCommandFlows(); });
   $('#commands-add-server')?.addEventListener('click', () => { state.commandServers.push({ id: `server-${Date.now()}`, name: t('commands.newServerName', { index: state.commandServers.length + 1 }), host: '', port: '22', user: '', auth: 'key', secret: '', connectionStatus: 'untested', connectionError: '' }); saveCommandFlows(); renderCommandServers(); });
@@ -3993,6 +4238,7 @@ function bindCommandEvents() {
   });
   $('#commands-run-current')?.addEventListener('click', () => { const flow = activeCommandFlow(); const index = flow.lines.findIndex((line) => line.status !== 'success'); runCommandFlow(index >= 0 ? index : 0, flow); });
   bindCommandFlowClipboard();
+  bindCommandLogs();
   $('#commands-import-button')?.addEventListener('click', () => $('#commands-file-input').click());
   $('#commands-file-input')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const flow = activeCommandFlow(); const text = await file.text(); flow.lines = text.split(/\r?\n/).filter((line) => line.trim()).map((line) => ({ text: line, status: 'idle' })); if (!flow.lines.length) flow.lines = [{ text: '', status: 'idle' }]; saveCommandFlows(); renderCommandEditor(); renderCommandFlows(); showToast(t('commands.toast.linesImported', { count: flow.lines.length })); event.target.value = ''; });
 }
@@ -4007,6 +4253,7 @@ function onLanguageChanged() {
   renderConnectionsView();
   if (typeof renderCommandServers === 'function') { renderCommandServers(); renderCommandFlows(); renderCommandEditor(); }
   if (typeof renderAssistant === 'function') renderAssistant();
+  if (typeof refreshCommandLogs === 'function') refreshCommandLogs();
   setView(view);
 }
 function setView(view) {
@@ -4245,7 +4492,6 @@ function bindEvents() {
   bindCommandEvents();
   if ($('#add-rule-button')) $('#add-rule-button').addEventListener('click', () => showToast(t('rules.toast.templatesSoon'))); 
   $('#rules-add-rule').addEventListener('click', () => showToast(t('rules.toast.templatesSoon')));
-  $('#open-add-node').addEventListener('click', () => openNodeModal());
   $('#connections-add-node').addEventListener('click', () => openNodeModal());
   if ($('#edit-node-button')) $('#edit-node-button').addEventListener('click', (event) => {
     const node = getNode(event.currentTarget.dataset.nodeId);

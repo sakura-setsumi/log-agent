@@ -7,36 +7,71 @@
     <title>Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="preload" href="loading.gif" as="image" type="image/gif" />
-    <link rel="stylesheet" href="styles.css?v=flow-count-nowrap-121" />
+    <link rel="stylesheet" href="styles.css?v=rail-nav-132" />
   </head>
   <body>
+    <nav class="menubar" id="menubar" aria-label="应用菜单" data-i18n-aria-label="menu.label">
+      <div class="menu">
+        <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="menu.file">文件</button>
+        <div class="menu-panel" role="menu">
+          <button class="menu-item" type="button" role="menuitem" data-click="#export-button" data-i18n="menu.exportView">导出视图…</button>
+          <div class="menu-separator" role="separator"></div>
+          <button class="menu-item" type="button" role="menuitem" data-quit data-i18n="menu.quit">退出</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="menu.view">视图</button>
+        <div class="menu-panel" role="menu">
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='overview']" data-i18n="nav.overview">实时日志流</button>
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='rules']" data-i18n="nav.rules">处理规则</button>
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='connections']" data-i18n="nav.connections">连接管理</button>
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='commands']" data-i18n="nav.commands">服务器指令</button>
+          <div class="menu-separator" role="separator"></div>
+          <button class="menu-item" type="button" role="menuitem" data-click="#theme-toggle" data-label-from="#theme-toggle">切换主题</button>
+          <button class="menu-item" type="button" role="menuitem" data-click="#language-toggle" data-i18n="menu.language">语言：English / 中文</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="menu.nodes">节点</button>
+        <div class="menu-panel" role="menu">
+          <button class="menu-item" type="button" role="menuitem" data-call="openNodeModal" data-i18n="sidebar.addNode">添加 Dozzle 节点</button>
+          <button class="menu-item" type="button" role="menuitemcheckbox" aria-checked="false" data-click="#node-multi-select-toggle" data-checked-from="#node-multi-select-toggle" data-i18n="menu.multiSelect">节点多选</button>
+          <div class="menu-separator" role="separator"></div>
+          <button class="menu-item" type="button" role="menuitem" data-click="#refresh-button" data-i18n="menu.refresh">刷新状态</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="menu.settings">设置</button>
+        <div class="menu-panel" role="menu">
+          <button class="menu-item" type="button" role="menuitem" data-click="#settings-button" data-i18n="menu.appSettings">系统设置…</button>
+          <button class="menu-item" type="button" role="menuitem" data-call="openAISettings" data-i18n="menu.modelSettings">模型设置…</button>
+        </div>
+      </div>
+    </nav>
     <div class="app-shell">
+      <div class="side-shell">
+      <nav class="rail" aria-label="主导航" data-i18n-aria-label="sidebar.navLabel">
+        <div class="brand-mark" aria-hidden="true">
+          <img src="favicon.png" alt="" />
+        </div>
+        <button class="nav-item active" data-view="overview">
+          <span class="nav-icon">⌁</span><span data-i18n="nav.overview">实时日志流</span><span class="nav-count" id="stream-nav-count">00</span>
+        </button>
+        <button class="nav-item" data-view="rules">
+          <span class="nav-icon">◌</span><span data-i18n="nav.rules">加工规则</span>
+        </button>
+        <button class="nav-item" data-view="connections">
+          <span class="nav-icon">⌘</span><span data-i18n="nav.connections">连接管理</span>
+        </button>
+        <button class="nav-item" data-view="commands">
+          <span class="nav-icon">▤</span><span data-i18n="nav.commands">服务器指令</span>
+        </button>
+      </nav>
       <aside class="sidebar">
         <div class="brand-block">
-          <div class="brand-mark" aria-hidden="true">
-            <img src="favicon.png" alt="" />
-          </div>
-          <div>
-            <div class="brand-name" data-i18n="brand.name">日志中枢</div>
-            <div class="brand-caption">LOG AGENT / 1.0.0</div>
-          </div>
+          <div class="brand-name" data-i18n="brand.name">日志中枢</div>
+          <div class="brand-caption">LOG AGENT / 1.0.0</div>
         </div>
-
-        <div class="sidebar-label" data-i18n="sidebar.workspace">工作台</div>
-        <nav class="primary-nav" aria-label="主导航" data-i18n-aria-label="sidebar.navLabel">
-          <button class="nav-item active" data-view="overview">
-            <span class="nav-icon">⌁</span><span data-i18n="nav.overview">实时日志流</span><span class="nav-count" id="stream-nav-count">00</span>
-          </button>
-          <button class="nav-item" data-view="rules">
-            <span class="nav-icon">◌</span><span data-i18n="nav.rules">加工规则</span>
-          </button>
-          <button class="nav-item" data-view="connections">
-            <span class="nav-icon">⌘</span><span data-i18n="nav.connections">连接管理</span>
-          </button>
-          <button class="nav-item" data-view="commands">
-            <span class="nav-icon">▤</span><span data-i18n="nav.commands">服务器指令</span>
-          </button>
-        </nav>
 
         <div class="workspace-heading">
           <div class="sidebar-label" data-i18n="sidebar.dozzleNodes">Dozzle 节点</div>
@@ -50,15 +85,12 @@
         </div>
         <div class="node-list" id="node-list"></div>
 
-        <button class="add-node-button" id="open-add-node">
-          <span>＋</span> <span data-i18n="sidebar.addNode">添加 Dozzle 节点</span>
-        </button>
-
         <div class="sidebar-footer">
           <div class="system-status" id="system-status" data-state="offline"><span class="pulse-dot"></span> <span id="system-status-label" data-i18n="sidebar.status.connecting">等待服务连接</span></div>
           <div class="footer-meta"><span data-i18n="sidebar.lastSync">上次同步</span><strong id="last-sync" data-i18n="sidebar.notSynced">未同步</strong></div>
         </div>
       </aside>
+      </div>
 
       <main class="main-content">
         <header class="topbar">
@@ -255,22 +287,31 @@
         </div>
 
         <div class="page-content page-view hidden" id="commands-view">
-          <section class="page-intro"><div><div class="eyebrow"><span class="eyebrow-line"></span> SERVER COMMANDS</div><h1 data-i18n="commands.title">服务器指令</h1><p data-i18n="commands.subtitle">编排服务器操作步骤，按顺序逐行执行并保留每一步结果。</p></div><div class="intro-actions command-intro-actions"><span class="sync-time"><span class="status-dot"></span> <span id="commands-run-status" data-i18n="commands.ready">就绪</span></span><input id="commands-file-input" type="file" accept=".txt,.sh,.bash,.command,.log" hidden /></div></section>
+          <section class="page-intro"><div><div class="eyebrow"><span class="eyebrow-line"></span> SERVER COMMANDS</div><h1 data-i18n="commands.title">服务器指令</h1><p data-i18n="commands.subtitle">编排服务器操作步骤，按顺序逐行执行并保留每一步结果。</p></div><div class="intro-actions command-intro-actions"><button class="primary-button" id="commands-add-server" type="button"><span>＋</span> <span data-i18n="commands.addServer">新增服务器</span></button><span class="sync-time"><span class="status-dot"></span> <span id="commands-run-status" data-i18n="commands.ready">就绪</span></span><input id="commands-file-input" type="file" accept=".txt,.sh,.bash,.command,.log" hidden /></div></section>
           <section class="commands-columns">
-            <div class="commands-column commands-column-left">
-              <section class="server-library panel">
-                <div class="panel-heading compact-heading"><div><div class="section-kicker">REUSABLE SERVERS</div><h2 data-i18n="commands.library">服务器库</h2></div><button class="primary-button compact-button" id="commands-add-server" type="button"><span>＋</span> <span data-i18n="commands.addServer">新增服务器</span></button></div>
-                <div class="server-card-scroll"><div class="server-card-list" id="server-card-list"></div></div>
-              </section>
-              <section class="command-file-shelf panel" id="command-file-shelf">
-                <div class="panel-heading compact-heading"><div><div class="section-kicker">FILE STAGING</div><h2 data-i18n="commands.fileShelf">上传文件</h2></div><div class="file-shelf-actions"><span id="command-file-count" data-i18n="commands.fileCountZero">0 个文件</span><button class="secondary-button compact-button" id="command-file-select" type="button"><span>⇧</span> <span data-i18n="commands.selectFiles">选择文件</span></button><input id="command-file-input-shelf" type="file" multiple hidden /></div></div>
-                <div class="file-drop-zone" id="command-file-drop-zone" tabindex="0"><span class="file-drop-icon">＋</span><span data-i18n="commands.dropZone">将文件或文件夹拖入这里，或直接 Ctrl+V 粘贴</span><small data-i18n="commands.dropZoneHint">文件会显示为缩略图，可拖动到任意指令行中</small></div>
-                <div class="command-file-list" id="command-file-list"></div>
-              </section>
-            </div>
             <div class="commands-board panel commands-column-center" id="commands-board"><aside class="command-groups-drawer" id="command-groups-drawer"><button class="command-groups-rail" id="command-groups-open" type="button" aria-expanded="false" data-i18n-title="commands.groups.open" title="展开指令集组"><span class="command-groups-rail-icon">»</span><span class="command-groups-rail-label" data-i18n="commands.groups.title">指令集组</span><b id="command-groups-rail-count">0</b></button><div class="command-groups-panel"><div class="command-groups-heading"><div><div class="section-kicker">FLOW GROUPS</div><h3 data-i18n="commands.groups.title">指令集组</h3></div><div class="command-groups-heading-actions"><button class="secondary-button compact-button" id="command-groups-add" type="button"><span>＋</span> <span data-i18n="commands.groups.add">新增组</span></button><button class="command-groups-close" id="command-groups-close" type="button" data-i18n-title="commands.groups.close" title="收起指令集组" data-i18n-aria-label="commands.groups.close" aria-label="收起指令集组">«</button></div></div><div class="command-groups-list" id="command-groups-list"></div><input id="command-group-file-input" type="file" hidden /></div></aside><div class="commands-board-main"><div class="panel-heading compact-heading"><div><div class="section-kicker">COMMAND FLOWS</div><h2 data-i18n="commands.flows">指令集</h2></div><div class="command-board-actions"><button class="command-parallel-toggle" id="commands-parallel" type="button" aria-pressed="true" data-i18n-title="commands.parallelHint" title="开启后，「运行全部」会同时启动所有指令集；关闭后按顺序逐个运行，遇到失败即停止"><i aria-hidden="true"></i><span data-i18n="commands.parallel">并行</span></button><button class="secondary-button compact-button command-board-utility" id="commands-run-all" type="button"><span>▶</span> <span data-i18n="commands.runAll">运行全部</span></button><button class="command-favorite-button" id="commands-favorite" type="button" data-i18n-aria-label="commands.favorite" aria-label="收藏指令集组" data-i18n-title="commands.favorite" title="收藏指令集组"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" /></svg></button><button class="primary-button compact-button" id="commands-add-flow" type="button"><span>＋</span> <span data-i18n="commands.addFlow">新增指令集</span></button></div></div><div class="commands-flow-list" id="commands-flow-list"></div><div class="commands-board-footer"><span data-i18n="commands.flowFooter">拖动左侧手柄调整顺序，将上方服务器拖到绑定槽；选中后 Ctrl+C / Ctrl+V 复制</span><span id="commands-flow-count" data-i18n="commands.flowCountZero">0 个</span></div></div></div>
             <aside class="commands-editor panel commands-column-right" id="commands-editor"><div class="panel-heading compact-heading"><div><div class="section-kicker">FLOW EDITOR</div><h2 id="commands-editor-title" data-i18n="commands.editor">运行指令</h2></div><div class="command-editor-actions"><button class="secondary-button compact-button command-editor-utility" id="commands-import-button" type="button"><span>⇧</span> <span data-i18n="commands.import">导入指令</span></button><button class="text-button" id="commands-duplicate" type="button" data-i18n="commands.duplicate">复制</button><button class="danger-button" id="commands-delete" type="button" data-i18n="commands.delete">删除</button></div></div><div class="command-flow-meta"><label><span data-i18n="commands.flowName">指令集名称</span><input id="command-flow-name" type="text" data-i18n-placeholder="commands.flowNamePlaceholder" placeholder="例如：发布前检查" /></label></div><div class="command-editor-body"><div class="command-editor-divider"><span data-i18n="commands.runLines">运行指令</span><button class="secondary-button compact-button" id="commands-add-line" type="button"><span>＋</span> <span data-i18n="commands.addLine">添加一行</span></button></div><div class="command-lines" id="command-lines"></div><div class="command-error hidden" id="command-error"><strong data-i18n="commands.runFailed">执行失败</strong><span id="command-error-text"></span><button class="command-error-unrestrict hidden" id="command-error-unrestrict" type="button" data-i18n="commands.allowAndContinue">允许此服务器执行任意命令并继续</button></div></div><div class="command-editor-footer"><span id="command-progress" data-i18n="commands.notRunYet">尚未运行</span><button class="secondary-button command-pause-button hidden" id="commands-pause" type="button"><span>❚❚</span> <span id="commands-pause-label" data-i18n="commands.pause">暂停</span></button><button class="primary-button" id="commands-run-current" type="button"><span>▶</span> <span id="commands-run-current-label" data-i18n="commands.runFromHere">从当前行运行</span></button></div></aside>
           </section>
+          <div class="command-dock" id="command-dock">
+            <div class="command-dock-popup hidden" id="command-popup-servers" role="dialog" data-i18n-aria-label="commands.library" aria-label="服务器库">
+              <section class="server-library panel">
+                <div class="panel-heading compact-heading"><div><div class="section-kicker">REUSABLE SERVERS</div><h2 data-i18n="commands.library">服务器库</h2></div></div>
+                <div class="server-card-scroll"><div class="server-card-list" id="server-card-list"></div></div>
+              </section>
+              <button class="command-popup-close" type="button" data-popup-close data-i18n-aria-label="commands.popup.close" aria-label="收起">×</button>
+            </div>
+            <div class="command-dock-popup hidden" id="command-popup-files" role="dialog" data-i18n-aria-label="commands.fileShelf" aria-label="上传文件">
+              <section class="command-file-shelf panel" id="command-file-shelf">
+                <div class="panel-heading compact-heading"><div><div class="section-kicker">FILE STAGING</div><h2 data-i18n="commands.fileShelf">上传文件</h2></div><div class="file-shelf-actions"><span id="command-file-count" data-i18n="commands.fileCountZero">0 个文件</span><button class="secondary-button compact-button" id="command-file-select" type="button"><span>⇧</span> <span data-i18n="commands.selectFiles">选择文件</span></button><input id="command-file-input-shelf" type="file" multiple hidden /></div></div>
+                <div class="file-drop-zone" id="command-file-drop-zone" tabindex="0"><div class="file-drop-hint"><span class="file-drop-icon">＋</span><span data-i18n="commands.dropZone">将文件或文件夹拖入这里，或直接 Ctrl+V 粘贴</span><small data-i18n="commands.dropZoneHint">文件会显示为缩略图，可拖动到任意指令行中</small></div><div class="command-file-list" id="command-file-list"></div></div>
+              </section>
+              <button class="command-popup-close" type="button" data-popup-close data-i18n-aria-label="commands.popup.close" aria-label="收起">×</button>
+            </div>
+            <div class="command-dock-buttons">
+              <button class="command-dock-button" id="command-dock-files" type="button" aria-haspopup="dialog" aria-expanded="false" data-popup="command-popup-files" data-i18n-title="commands.fileShelf" data-i18n-aria-label="commands.fileShelf" title="上传文件" aria-label="上传文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.4 11.1l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/></svg><b class="command-dock-badge hidden" id="command-dock-files-count">0</b></button>
+              <button class="command-dock-button" id="command-dock-servers" type="button" aria-haspopup="dialog" aria-expanded="false" data-popup="command-popup-servers" data-i18n-title="commands.library" data-i18n-aria-label="commands.library" title="服务器库" aria-label="服务器库"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3.5" width="18" height="7" rx="1.8"/><rect x="3" y="13.5" width="18" height="7" rx="1.8"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg></button>
+            </div>
+          </div>
         </div>
 
         <div class="page-content page-view hidden" id="connections-view">
@@ -362,6 +403,13 @@
       </div>
     </div>
 
+    <div class="modal-backdrop hidden" id="command-logs-modal" role="dialog" aria-modal="true" aria-labelledby="command-logs-title">
+      <div class="modal-card command-logs-card">
+        <div class="modal-header"><div><div class="section-kicker">RUN LOGS</div><h2 id="command-logs-title" data-i18n="logs.title">运行日志</h2><p class="command-logs-scope" id="command-logs-scope"></p></div><button class="close-button" data-close-command-logs type="button">×</button></div>
+        <div class="command-logs-body"><div class="command-logs-runs" id="command-logs-runs"></div><div class="command-logs-detail" id="command-logs-detail"></div></div>
+        <div class="modal-actions"><button type="button" class="danger-button" id="command-logs-clear" data-i18n="logs.clear">清空日志</button><button type="button" class="secondary-button" id="command-logs-copy" data-i18n="logs.copy">复制日志</button><button type="button" class="secondary-button" data-close-command-logs data-i18n="favorites.close">关闭</button></div>
+      </div>
+    </div>
     <div class="modal-backdrop hidden" id="command-favorites-modal" role="dialog" aria-modal="true" aria-labelledby="command-favorites-title">
       <div class="modal-card command-favorites-card">
         <div class="modal-header"><div><div class="section-kicker">COMMAND GROUP FAVORITES</div><h2 id="command-favorites-title" data-i18n="favorites.title">收藏指令集组</h2></div><button class="close-button" data-close-command-favorites type="button">×</button></div>
@@ -380,5 +428,6 @@
     <script src="app.js?v=group-run-buttons-72"></script>
     <script src="assistant-ui.js?v=modal-dismiss-3"></script>
     <script src="bootstrap.js?v=admin-token-deadlock-4"></script>
+    <script src="menubar.js?v=1"></script>
   </body>
 </html>

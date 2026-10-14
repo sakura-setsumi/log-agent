@@ -569,32 +569,6 @@ func TestConfigDirResultIsStableAcrossCalls(t *testing.T) {
 	}
 }
 
-func TestListenAddressResolution(t *testing.T) {
-	cases := []struct {
-		name    string
-		port    string
-		envPort string
-		want    string
-	}{
-		{name: "default", want: ":8099"},
-		{name: "LOG_AGENT_PORT wins", port: "7777", envPort: "6666", want: ":7777"},
-		{name: "PORT fallback", envPort: "6666", want: ":6666"},
-		{name: "leading colon tolerated", port: ":7777", want: ":7777"},
-		{name: "invalid falls back", port: "not-a-port", want: ":8099"},
-		{name: "out of range falls back", port: "70000", want: ":8099"},
-		{name: "zero falls back", port: "0", want: ":8099"},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Setenv("LOG_AGENT_PORT", testCase.port)
-			t.Setenv("PORT", testCase.envPort)
-			if got := listenAddress(); got != testCase.want {
-				t.Fatalf("listenAddress() = %s, want %s", got, testCase.want)
-			}
-		})
-	}
-}
-
 func TestRuleOrderUpdateValidatesAndReturnsNewOrder(t *testing.T) {
 	s := &server{rules: map[string]bool{"mask": true, "structure": true, "noise": false}, ruleOrder: defaultRuleOrder()}
 	response := httptest.NewRecorder()

@@ -35,7 +35,6 @@ if ($exists -and $shell.CreateShortcut($path).TargetPath -ieq $env:LOG_AGENT_SHO
 if (-not $exists -and $env:LOG_AGENT_SHORTCUT_ONLY_UPDATE -eq '1') { Report 'removed'; exit 0 }
 $link = $shell.CreateShortcut($path)
 $link.TargetPath = $env:LOG_AGENT_SHORTCUT_TARGET
-$link.Arguments = '--open'
 $link.WorkingDirectory = Split-Path -Parent $env:LOG_AGENT_SHORTCUT_TARGET
 $link.IconLocation = $env:LOG_AGENT_SHORTCUT_TARGET + ',0'
 $link.Description = 'Log Agent'
@@ -72,8 +71,4 @@ func writeDesktopShortcut(executable string, onlyUpdate bool) (string, string, e
 		return status, path, nil
 	}
 	return "", "", fmt.Errorf("unexpected PowerShell output: %q", strings.TrimSpace(stdout.String()))
-}
-
-func openBrowser(url string) error {
-	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }

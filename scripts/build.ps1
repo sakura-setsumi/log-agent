@@ -22,7 +22,7 @@ try {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
-    & $go build -buildvcs=false -o $output .
+    & $go build -buildvcs=false -ldflags "-H=windowsgui" -o $output .
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
     Pop-Location

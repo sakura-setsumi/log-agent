@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
 
@@ -1005,8 +1006,6 @@ func TestE2EBrowserModeKeepsItsOwnProviders(t *testing.T) {
 type sidebarLayoutView struct {
 	ListTop       float64 `json:"listTop"`
 	ListBottom    float64 `json:"listBottom"`
-	ButtonTop     float64 `json:"buttonTop"`
-	ButtonBottom  float64 `json:"buttonBottom"`
 	FooterTop     float64 `json:"footerTop"`
 	FooterBottom  float64 `json:"footerBottom"`
 	SidebarBottom float64 `json:"sidebarBottom"`
@@ -1017,9 +1016,8 @@ type sidebarLayoutView struct {
 //
 // The node list used to be capped at min(62vh, 560px) while the footer claimed
 // the remaining slack with margin-top: auto. With only a couple of nodes the
-// list stopped growing early, so the add-node button sat just below it and a
-// tall dead gap opened between the button and the status footer. The list now
-// stretches to fill that space, which places the button at the bottom.
+// list stopped growing early and a tall dead gap opened between it and the
+// status footer. The list now stretches to fill that space.
 //
 // Geometry is asserted rather than class names because the bug was purely a
 // matter of where things ended up; a rule-level assertion would have passed
@@ -1068,7 +1066,7 @@ func TestE2ESidebarNodeListFillsAvailableHeight(t *testing.T) {
 		chromedp.Headless,
 		chromedp.NoSandbox,
 		// A desktop-sized viewport; the sidebar collapses below 680px, where
-		// the button and footer are hidden by design.
+		// the footer is hidden by design.
 		chromedp.WindowSize(1440, 1000),
 	)
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
@@ -1078,7 +1076,7 @@ func TestE2ESidebarNodeListFillsAvailableHeight(t *testing.T) {
 
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("load dashboard: %v", err)
 	}
@@ -1087,11 +1085,9 @@ func TestE2ESidebarNodeListFillsAvailableHeight(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 		const box = (selector) => document.querySelector(selector).getBoundingClientRect();
 		const list = box('#node-list');
-		const button = box('#open-add-node');
 		const footer = box('.sidebar-footer');
 		return JSON.stringify({
 			listTop: list.top, listBottom: list.bottom,
-			buttonTop: button.top, buttonBottom: button.bottom,
 			footerTop: footer.top, footerBottom: footer.bottom,
 			sidebarBottom: box('.sidebar').bottom,
 			viewportH: window.innerHeight,
@@ -1104,15 +1100,11 @@ func TestE2ESidebarNodeListFillsAvailableHeight(t *testing.T) {
 		t.Fatalf("decode sidebar layout %q: %v", raw, err)
 	}
 
-	// The list must reach the button. The residual gap is the button's own
-	// 15px top margin, so the tolerance covers that plus rounding.
-	if gap := layout.ButtonTop - layout.ListBottom; gap > 20 {
-		t.Fatalf("node list stops %.0fpx short of the add-node button; want it to stretch (layout %+v)", gap, layout)
-	}
-	// And the button must sit directly above the footer, so the empty space
-	// lives inside the scrollable list instead of beneath the button.
-	if gap := layout.FooterTop - layout.ButtonBottom; gap > 40 {
-		t.Fatalf("add-node button floats %.0fpx above the footer; want it pushed to the bottom (layout %+v)", gap, layout)
+	// The list must reach the footer, so the empty space lives inside the
+	// scrollable list. The residual gap is the footer's own 15px top margin,
+	// so the tolerance covers that plus rounding.
+	if gap := layout.FooterTop - layout.ListBottom; gap > 20 {
+		t.Fatalf("node list stops %.0fpx short of the footer; want it to stretch (layout %+v)", gap, layout)
 	}
 	// The sidebar should still span the viewport with no trailing gap.
 	if slack := layout.ViewportH - layout.SidebarBottom; slack > 4 {
@@ -1333,7 +1325,7 @@ func TestE2EMultiSelectRestoreIsConsistent(t *testing.T) {
 	// restoreSelection() consumes it.
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.Evaluate(`localStorage.setItem('log-agent-selection', JSON.stringify({nodes:['node-a','node-b'],containers:['node-a::api','node-b::web']}))`, nil),
 		chromedp.Reload(),
 		chromedp.WaitVisible(`#node-list .node-item`, chromedp.ByQuery),
@@ -1365,34 +1357,39 @@ func TestE2EMultiSelectRestoreIsConsistent(t *testing.T) {
 // columns. Layout bugs here are about where boxes land, so the assertions use
 // pixel positions rather than class names, which pass either way.
 type commandsColumnView struct {
-	LeftLeft     float64 `json:"leftLeft"`
-	LeftRight    float64 `json:"leftRight"`
-	LeftTop      float64 `json:"leftTop"`
-	LeftBottom   float64 `json:"leftBottom"`
-	MidLeft      float64 `json:"midLeft"`
-	MidRight     float64 `json:"midRight"`
-	MidTop       float64 `json:"midTop"`
-	MidBottom    float64 `json:"midBottom"`
-	RightLeft    float64 `json:"rightLeft"`
-	RightRight   float64 `json:"rightRight"`
-	RightTop     float64 `json:"rightTop"`
-	RightBottom  float64 `json:"rightBottom"`
-	ServerTop    float64 `json:"serverTop"`
-	ShelfTop     float64 `json:"shelfTop"`
-	ServerBottom float64 `json:"serverBottom"`
-	ShelfBottom  float64 `json:"shelfBottom"`
-	IntroBottom  float64 `json:"introBottom"`
-	IntroLeft    float64 `json:"introLeft"`
-	IntroRight   float64 `json:"introRight"`
-	PageLeft     float64 `json:"pageLeft"`
-	PageRight    float64 `json:"pageRight"`
-	BodyScrollW  float64 `json:"bodyScrollW"`
-	ViewportW    float64 `json:"viewportW"`
+	MidLeft     float64 `json:"midLeft"`
+	MidRight    float64 `json:"midRight"`
+	MidTop      float64 `json:"midTop"`
+	MidBottom   float64 `json:"midBottom"`
+	RightLeft   float64 `json:"rightLeft"`
+	RightRight  float64 `json:"rightRight"`
+	RightTop    float64 `json:"rightTop"`
+	RightBottom float64 `json:"rightBottom"`
+	IntroBottom float64 `json:"introBottom"`
+	IntroLeft   float64 `json:"introLeft"`
+	IntroRight  float64 `json:"introRight"`
+	// The dock: two buttons at the bottom-left, the mirror of the AI launcher.
+	FilesLeft      float64 `json:"filesLeft"`
+	FilesTop       float64 `json:"filesTop"`
+	ServersLeft    float64 `json:"serversLeft"`
+	ServersTop     float64 `json:"serversTop"`
+	AIRight        float64 `json:"aiRight"`
+	AITop          float64 `json:"aiTop"`
+	MainLeft       float64 `json:"mainLeft"`
+	MainRight      float64 `json:"mainRight"`
+	AddServerInBar bool    `json:"addServerInBar"`
+	NodePanelShown bool    `json:"nodePanelShown"`
+	LibraryHidden  bool    `json:"libraryHidden"`
+	ShelfHidden    bool    `json:"shelfHidden"`
+	BodyScrollW    float64 `json:"bodyScrollW"`
+	ViewportW      float64 `json:"viewportW"`
 }
 
-// TestE2ECommandsColumnsLayout asserts the server-commands page lays out as three
-// equal-height columns: servers over the file shelf at ~25%, the flow list at
-// ~35%, and the editor at ~40%, all starting at the page's existing left margin.
+// TestE2ECommandsColumnsLayout asserts the server-commands page lays out as two
+// equal-height columns -- the flow list at ~44% and the editor at ~56% -- with
+// the server library and the file shelf out of the page: "new server" sits in the
+// page toolbar and the two panels are popups behind a pair of buttons at the
+// bottom-left, mirroring the AI launcher at the bottom-right.
 func TestE2ECommandsColumnsLayout(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
@@ -1441,7 +1438,7 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.Evaluate(`setView('commands')`, nil),
 		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
 	); err != nil {
@@ -1451,20 +1448,26 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 	var raw string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 		const box = (sel) => { const el = document.querySelector(sel); return el ? el.getBoundingClientRect() : null; };
-		const left = box('.commands-column-left');
 		const mid = box('.commands-column-center');
 		const right = box('.commands-column-right');
-		const server = box('.server-library');
-		const shelf = box('#command-file-shelf');
 		const intro = box('#commands-view .page-intro');
-		const page = box('#commands-view');
+		const files = box('#command-dock-files');
+		const servers = box('#command-dock-servers');
+		const ai = box('#assistant-launcher');
+		const main = box('.main-content');
+		const addServer = document.querySelector('#commands-add-server');
+		const hidden = (sel) => document.querySelector(sel).getBoundingClientRect().height === 0;
 		return JSON.stringify({
-			leftLeft: left.left, leftRight: left.right, leftTop: left.top, leftBottom: left.bottom,
 			midLeft: mid.left, midRight: mid.right, midTop: mid.top, midBottom: mid.bottom,
 			rightLeft: right.left, rightRight: right.right, rightTop: right.top, rightBottom: right.bottom,
-			serverTop: server.top, serverBottom: server.bottom, shelfTop: shelf.top, shelfBottom: shelf.bottom,
 			introBottom: intro.bottom, introLeft: intro.left, introRight: intro.right,
-			pageLeft: page.left, pageRight: page.right,
+			filesLeft: files.left, filesTop: files.top,
+			serversLeft: servers.left, serversTop: servers.top,
+			aiRight: ai.right, aiTop: ai.top,
+			mainLeft: main.left, mainRight: main.right,
+			addServerInBar: !!addServer && !!addServer.closest('#commands-view > .page-intro'),
+			nodePanelShown: getComputedStyle(document.querySelector('.sidebar')).display !== 'none',
+			libraryHidden: hidden('.server-library'), shelfHidden: hidden('#command-file-shelf'),
 			bodyScrollW: document.documentElement.scrollWidth, viewportW: window.innerWidth,
 		});
 	})()`, &raw)); err != nil {
@@ -1475,18 +1478,14 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 		t.Fatalf("decode commands layout %q: %v", raw, err)
 	}
 
-	// The three columns sit side by side, in order, without overlapping.
-	if !(v.LeftRight <= v.MidLeft+0.5) {
-		t.Fatalf("left column overlaps the middle one: left.right=%.1f mid.left=%.1f (%+v)", v.LeftRight, v.MidLeft, v)
-	}
+	// The two columns sit side by side, in order, without overlapping.
 	if !(v.MidRight <= v.RightLeft+0.5) {
 		t.Fatalf("middle column overlaps the right one: mid.right=%.1f right.left=%.1f (%+v)", v.MidRight, v.RightLeft, v)
 	}
 
-	// Widths should track 25/35/40 of the grid width. Compare against the sum of
-	// the three columns' outer span so page padding is excluded.
-	leftW, midW, rightW := v.LeftRight-v.LeftLeft, v.MidRight-v.MidLeft, v.RightRight-v.RightLeft
-	span := v.RightRight - v.LeftLeft
+	// Widths should track 44/56 of the grid width.
+	midW, rightW := v.MidRight-v.MidLeft, v.RightRight-v.RightLeft
+	span := v.RightRight - v.MidLeft
 	if span <= 0 {
 		t.Fatalf("columns span is not positive: %+v", v)
 	}
@@ -1494,50 +1493,66 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 		name string
 		got  float64
 		want float64
-	}{{"left", leftW, 25}, {"middle", midW, 35}, {"right", rightW, 40}} {
+	}{{"middle", midW, 44}, {"right", rightW, 56}} {
 		share := c.got / span * 100
-		if diff := share - c.want; diff > 2.5 || diff < -2.5 {
+		if diff := share - c.want; diff > 3 || diff < -3 {
 			t.Fatalf("%s column is %.1f%% of the row, want ~%.0f%% (measured %+v)", c.name, share, c.want, v)
 		}
 	}
 
-	// Equal height: the three columns must share a top and a bottom edge.
-	if d := v.MidTop - v.LeftTop; d > 1 || d < -1 {
-		t.Fatalf("middle column top %.1f differs from left %.1f (%+v)", v.MidTop, v.LeftTop, v)
+	// Equal height: the columns must share a top and a bottom edge.
+	if d := v.RightTop - v.MidTop; d > 1 || d < -1 {
+		t.Fatalf("right column top %.1f differs from middle %.1f (%+v)", v.RightTop, v.MidTop, v)
 	}
-	if d := v.RightTop - v.LeftTop; d > 1 || d < -1 {
-		t.Fatalf("right column top %.1f differs from left %.1f (%+v)", v.RightTop, v.LeftTop, v)
-	}
-	if d := v.MidBottom - v.LeftBottom; d > 1 || d < -1 {
-		t.Fatalf("middle column bottom %.1f differs from left %.1f (%+v)", v.MidBottom, v.LeftBottom, v)
-	}
-	if d := v.RightBottom - v.LeftBottom; d > 1 || d < -1 {
-		t.Fatalf("right column bottom %.1f differs from left %.1f (%+v)", v.RightBottom, v.LeftBottom, v)
-	}
-
-	// The first column stacks servers above the file shelf, with the grid gap.
-	if !(v.ServerBottom <= v.ShelfTop) {
-		t.Fatalf("server library (bottom %.1f) should sit above the file shelf (top %.1f) (%+v)", v.ServerBottom, v.ShelfTop, v)
-	}
-	if gap := v.ShelfTop - v.ServerBottom; gap < 8 || gap > 40 {
-		t.Fatalf("stacked panels are %.1fpx apart, want the grid gap (~16px) (%+v)", gap, v)
+	if d := v.RightBottom - v.MidBottom; d > 1 || d < -1 {
+		t.Fatalf("right column bottom %.1f differs from middle %.1f (%+v)", v.RightBottom, v.MidBottom, v)
 	}
 
 	// The columns begin below the page intro and keep the page's existing left
 	// margin. The reference is the intro's own left edge, not #commands-view's:
 	// the view IS .page-content and carries the 39px horizontal padding, so its
 	// border box sits 39px left of where its content actually starts.
-	if !(v.LeftTop >= v.IntroBottom-1) {
-		t.Fatalf("columns (top %.1f) should start below the intro (bottom %.1f) (%+v)", v.LeftTop, v.IntroBottom, v)
+	if !(v.MidTop >= v.IntroBottom-1) {
+		t.Fatalf("columns (top %.1f) should start below the intro (bottom %.1f) (%+v)", v.MidTop, v.IntroBottom, v)
 	}
-	if d := v.LeftLeft - v.IntroLeft; d > 1 || d < -1 {
-		t.Fatalf("columns left edge %.1f does not line up with the page intro left edge %.1f (%+v)", v.LeftLeft, v.IntroLeft, v)
+	if d := v.MidLeft - v.IntroLeft; d > 1 || d < -1 {
+		t.Fatalf("columns left edge %.1f does not line up with the page intro left edge %.1f (%+v)", v.MidLeft, v.IntroLeft, v)
 	}
 	if d := v.IntroRight - v.RightRight; d > 1 || d < -1 {
 		t.Fatalf("columns right edge %.1f does not line up with the page intro right edge %.1f (%+v)", v.RightRight, v.IntroRight, v)
 	}
 
-	// No horizontal overflow from the new grid.
+	// The Dozzle node panel is not shown on this page; only the icon rail is.
+	if v.NodePanelShown {
+		t.Fatalf("the node panel should be hidden on the server-commands page (%+v)", v)
+	}
+
+	// "New server" lives in the page toolbar; the library and the shelf are
+	// closed popups until their buttons are used.
+	if !v.AddServerInBar {
+		t.Fatalf("新增服务器 should be a button in the page toolbar (%+v)", v)
+	}
+	if !v.LibraryHidden || !v.ShelfHidden {
+		t.Fatalf("server library / file shelf should start closed (%+v)", v)
+	}
+
+	// The dock mirrors the AI launcher: the two buttons are side by side on the
+	// launcher's row, as far from the left edge of the page as the launcher is
+	// from the right one, and the columns end above them.
+	if d := v.FilesTop - v.AITop; d > 1 || d < -1 {
+		t.Fatalf("dock buttons are not on the AI launcher's row: files.top=%.1f ai.top=%.1f (%+v)", v.FilesTop, v.AITop, v)
+	}
+	if left, right := v.FilesLeft-v.MainLeft, v.MainRight-v.AIRight; left-right > 1 || right-left > 1 {
+		t.Fatalf("dock sits %.1fpx from the left edge but the AI launcher is %.1fpx from the right (%+v)", left, right, v)
+	}
+	if !(v.FilesLeft < v.ServersLeft) || v.ServersTop != v.FilesTop {
+		t.Fatalf("dock buttons should sit side by side, files first (%+v)", v)
+	}
+	if v.MidBottom > v.FilesTop+0.5 {
+		t.Fatalf("columns (bottom %.1f) run under the dock buttons (top %.1f) (%+v)", v.MidBottom, v.FilesTop, v)
+	}
+
+	// No horizontal overflow from the grid.
 	if v.BodyScrollW > v.ViewportW+1 {
 		t.Fatalf("page overflows horizontally: scrollWidth=%.1f viewport=%.1f (%+v)", v.BodyScrollW, v.ViewportW, v)
 	}
@@ -1638,12 +1653,15 @@ func TestE2ECommandsPanelsScrollInsteadOfStretching(t *testing.T) {
 
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.Evaluate(seed, nil),
 		chromedp.Reload(),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.Evaluate(`setView('commands')`, nil),
 		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
+		// The server list lives in the library popup.
+		chromedp.Click(`#command-dock-servers`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#server-card-list`, chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("seed and open commands view: %v", err)
 	}
@@ -1716,22 +1734,22 @@ type fileShelfFitsView struct {
 	DropZoneBottom     float64 `json:"dropZoneBottom"`
 	DropZoneVisible    bool    `json:"dropZoneVisible"`
 	FileListBottom     float64 `json:"fileListBottom"`
-	ServerLibH         float64 `json:"serverLibH"`
-	ServerListH        float64 `json:"serverListH"`
-	ServerListSh       float64 `json:"serverListSh"`
+	PopupTop           float64 `json:"popupTop"`
+	PopupBottom        float64 `json:"popupBottom"`
+	DockTop            float64 `json:"dockTop"`
+	LibraryOpen        bool    `json:"libraryOpen"`
 	ServerListOverflow string  `json:"serverListOverflow"`
 	DocScrollH         float64 `json:"docScrollH"`
 	DocClientH         float64 `json:"docClientH"`
 }
 
-// TestE2EFileShelfIsNotClippedByTheLeftColumn guards the bug where the file
-// shelf was shrunk below its own content. The left column splits its height
-// between the server library and the shelf; when the shelf was `flex:0 1 auto`
-// the library's demand squashed it, and `overflow:hidden` clipped the drop zone
-// completely off the panel -- the user saw a "上传文件" heading with an empty
-// body. The shelf must therefore keep a content floor, and the server library
-// (whose list genuinely scrolls) is what gives up the space.
-func TestE2EFileShelfIsNotClippedByTheLeftColumn(t *testing.T) {
+// TestE2EFileShelfPopupIsNotClipped guards the file shelf against being shrunk
+// below its own content. The shelf is a popup above the dock, and
+// `overflow:hidden` clips whatever does not fit, so a squeezed shelf shows a
+// "上传文件" heading with an empty body. The shelf must keep a content floor and
+// stay inside the viewport above its button; opening it closes the library
+// popup, whose list genuinely scrolls.
+func TestE2EFileShelfPopupIsNotClipped(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
 		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
@@ -1797,13 +1815,15 @@ func TestE2EFileShelfIsNotClippedByTheLeftColumn(t *testing.T) {
 	var raw string
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.Evaluate(seed, nil),
 		chromedp.Reload(),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.Evaluate(`setView('commands')`, nil),
 		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
-		chromedp.Sleep(300*time.Millisecond),
+		chromedp.Click(`#command-dock-files`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#command-file-drop-zone`, chromedp.ByQuery),
+		chromedp.Sleep(400*time.Millisecond),
 		chromedp.Evaluate(`(() => {
 			const el = (sel) => document.querySelector(sel);
 			const shelf = el('#command-file-shelf');
@@ -1823,9 +1843,10 @@ func TestE2EFileShelfIsNotClippedByTheLeftColumn(t *testing.T) {
 				// shelf's clip rect; a partially clipped zone is the bug.
 				dropZoneVisible: zoneBox.top >= shelfBox.top - 0.5 && zoneBox.bottom <= shelfBox.bottom + 0.5,
 				fileListBottom: listBox.bottom,
-				serverLibH: el('.server-library').getBoundingClientRect().height,
-				serverListH: serverList.getBoundingClientRect().height,
-				serverListSh: serverList.scrollHeight,
+				popupTop: el('#command-popup-files').getBoundingClientRect().top,
+				popupBottom: el('#command-popup-files').getBoundingClientRect().bottom,
+				dockTop: el('#command-dock-files').getBoundingClientRect().top,
+				libraryOpen: el('.server-library').getBoundingClientRect().height > 0,
 				serverListOverflow: getComputedStyle(serverList).overflowY,
 				docScrollH: document.documentElement.scrollHeight,
 				docClientH: document.documentElement.clientHeight,
@@ -1852,12 +1873,17 @@ func TestE2EFileShelfIsNotClippedByTheLeftColumn(t *testing.T) {
 		t.Fatalf("shelf content (%.1f) exceeds its height (%.1f) — it was squeezed below its chrome (%+v)", v.ShelfScrollH, v.ShelfH, v)
 	}
 
-	// The server library is the one that absorbs the pressure by scrolling.
+	// The popup sits fully on screen, directly above its button, and opening the
+	// shelf closes the library.
+	if v.PopupTop < 0 || v.PopupBottom > v.DockTop+0.5 {
+		t.Fatalf("file popup is not above the dock inside the viewport: popup=%.1f..%.1f dock.top=%.1f (%+v)", v.PopupTop, v.PopupBottom, v.DockTop, v)
+	}
+	if v.LibraryOpen {
+		t.Fatalf("server library should be closed while the file shelf is open (%+v)", v)
+	}
+	// The library's list absorbs pressure by scrolling inside its popup.
 	if v.ServerListOverflow != "auto" {
 		t.Fatalf("server list overflow-y should be auto, got %q (%+v)", v.ServerListOverflow, v)
-	}
-	if v.ServerListSh <= v.ServerListH+1 {
-		t.Fatalf("server list did not overflow: scrollHeight=%.1f height=%.1f — increase the fixture (%+v)", v.ServerListSh, v.ServerListH, v)
 	}
 
 	// Fixing the shelf must not reintroduce a page-level scrollbar.
@@ -1887,12 +1913,9 @@ type narrowColumnView struct {
 // TestE2ENarrowLayoutKeepsPanelsWhole covers the reported "上传文件 还是没显示全"
 // at a narrow window, where `.commands-columns` collapses to 2 columns.
 //
-// Two things went wrong there. The left column became a 2-column grid with
-// `align-items:start`, so the server library grew to its natural height and
-// pushed the file shelf out of the column; and the shelf was left with no
-// content floor, so the column could squeeze it below its own heading and
-// `overflow:hidden` clipped the drop zone away. Separately the board heading
-// squeezed its action buttons until the labels wrapped.
+// The shelf (now a popup) must keep a content floor so `overflow:hidden` cannot
+// clip the drop zone away, and the board heading must not squeeze its action
+// buttons until the labels wrap.
 func TestE2ENarrowLayoutKeepsPanelsWhole(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
@@ -1931,7 +1954,7 @@ func TestE2ENarrowLayoutKeepsPanelsWhole(t *testing.T) {
 		chromedp.ExecPath(browserPath),
 		chromedp.Headless,
 		chromedp.NoSandbox,
-		// Below the 1180px breakpoint, so the left column is a 2-column grid.
+		// Below the 1180px breakpoint, so the columns collapse.
 		chromedp.WindowSize(1092, 600),
 	)
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
@@ -1958,12 +1981,14 @@ func TestE2ENarrowLayoutKeepsPanelsWhole(t *testing.T) {
 	var raw string
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.Evaluate(seed, nil),
 		chromedp.Reload(),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.Evaluate(`setView('commands')`, nil),
 		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
+		chromedp.Click(`#command-dock-files`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#command-file-drop-zone`, chromedp.ByQuery),
 		chromedp.Sleep(400*time.Millisecond),
 		chromedp.Evaluate(`(() => {
 			const el = (sel) => document.querySelector(sel);
@@ -2146,7 +2171,7 @@ func TestE2EContainerClicksDoNotWidenNodeSelection(t *testing.T) {
 
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.WaitVisible(`#node-list .node-item[data-node-id="node-a"]`, chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("open page: %v", err)
@@ -2262,7 +2287,7 @@ func TestE2EStaleContainerScopeIsPrunedOnSync(t *testing.T) {
 
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.WaitVisible(`#node-list .node-item[data-node-id="node-a"]`, chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("open page: %v", err)
@@ -2448,7 +2473,7 @@ func TestE2ESelectionInvariantHoldsAcrossInteractions(t *testing.T) {
 
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(web.URL),
-		chromedp.WaitVisible(`#open-add-node`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
 		chromedp.WaitVisible(`#node-list .node-item[data-node-id="node-a"]`, chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("open page: %v", err)
@@ -2508,4 +2533,262 @@ func TestE2ESelectionInvariantHoldsAcrossInteractions(t *testing.T) {
 	// --- Turning the switch off must collapse a multi-node selection.
 	clickMultiSelectToggle(t, ctx)
 	assertSelectionInvariant(t, ctx, "turn the switch back off")
+}
+
+// TestE2ECommandPopupsCanBeDragged checks that the file and server popups move
+// with their heading, so they can be pushed off whatever the user wants to drop
+// on, that they cannot be dragged off the screen, and that closing one sends it
+// back to its home position.
+func TestE2ECommandPopupsCanBeDragged(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes:                 []Node{{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"}},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		chromedp.WindowSize(1600, 1000),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
+		chromedp.Evaluate(`setView('commands')`, nil),
+		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
+		chromedp.Click(`#command-dock-files`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#command-file-drop-zone`, chromedp.ByQuery),
+		chromedp.Sleep(400*time.Millisecond),
+	); err != nil {
+		t.Fatalf("open file popup: %v", err)
+	}
+
+	type rect struct {
+		Left, Top, Right, Bottom float64
+		HeadX, HeadY             float64
+		MenuBottom               float64
+		ViewportW, ViewportH     float64
+	}
+	measure := func() rect {
+		t.Helper()
+		var raw string
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+			const popup = document.querySelector('#command-popup-files').getBoundingClientRect();
+			const title = document.querySelector('#command-popup-files h2').getBoundingClientRect();
+			return JSON.stringify({
+				Left: popup.left, Top: popup.top, Right: popup.right, Bottom: popup.bottom,
+				HeadX: title.left + 20, HeadY: title.top + title.height / 2,
+				MenuBottom: document.getElementById('menubar').getBoundingClientRect().bottom,
+				ViewportW: window.innerWidth, ViewportH: window.innerHeight,
+			});
+		})()`, &raw)); err != nil {
+			t.Fatalf("measure popup: %v", err)
+		}
+		var r rect
+		if err := json.Unmarshal([]byte(raw), &r); err != nil {
+			t.Fatalf("decode popup rect %q: %v", raw, err)
+		}
+		return r
+	}
+	drag := func(from rect, dx, dy float64) {
+		t.Helper()
+		if err := chromedp.Run(ctx,
+			chromedp.MouseEvent(input.MouseMoved, from.HeadX, from.HeadY),
+			chromedp.MouseEvent(input.MousePressed, from.HeadX, from.HeadY, chromedp.ButtonLeft),
+			chromedp.MouseEvent(input.MouseMoved, from.HeadX+dx/2, from.HeadY+dy/2, chromedp.ButtonLeft),
+			chromedp.MouseEvent(input.MouseMoved, from.HeadX+dx, from.HeadY+dy, chromedp.ButtonLeft),
+			chromedp.MouseEvent(input.MouseReleased, from.HeadX+dx, from.HeadY+dy, chromedp.ButtonLeft),
+		); err != nil {
+			t.Fatalf("drag popup: %v", err)
+		}
+	}
+	near := func(got, want float64) bool { return got-want < 2 && want-got < 2 }
+
+	before := measure()
+	drag(before, 200, -150)
+	after := measure()
+	if !near(after.Left-before.Left, 200) || !near(after.Top-before.Top, -150) {
+		t.Fatalf("popup moved by (%.1f, %.1f), want (200, -150): before=%+v after=%+v",
+			after.Left-before.Left, after.Top-before.Top, before, after)
+	}
+
+	// Dragging far past every edge stops at the window and the menu bar.
+	drag(after, -5000, -5000)
+	corner := measure()
+	if corner.Left < -0.5 || corner.Top < corner.MenuBottom-0.5 {
+		t.Fatalf("popup left the screen at the top-left: %+v", corner)
+	}
+	drag(corner, 9000, 9000)
+	far := measure()
+	if far.Right > far.ViewportW+0.5 || far.Bottom > far.ViewportH+0.5 {
+		t.Fatalf("popup left the screen at the bottom-right: %+v", far)
+	}
+
+	// Closing the popup puts it back where it started when it is reopened.
+	var reopened rect
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`#command-dock-files`, chromedp.ByQuery),
+		chromedp.Click(`#command-dock-files`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#command-file-drop-zone`, chromedp.ByQuery),
+		chromedp.Sleep(300*time.Millisecond),
+	); err != nil {
+		t.Fatalf("reopen popup: %v", err)
+	}
+	reopened = measure()
+	if !near(reopened.Left, before.Left) || !near(reopened.Top, before.Top) {
+		t.Fatalf("reopened popup is not back at its home position: home=%+v reopened=%+v", before, reopened)
+	}
+}
+
+// TestE2EFlowListKeepsItsWidthWithGroupsOpen guards the flow list against being
+// squeezed to nothing when the groups drawer opens inside the board: the drawer
+// takes a fixed width, so the board must be given enough of the row for the flow
+// names to stay readable and the cards to stay inside the panel.
+func TestE2EFlowListKeepsItsWidthWithGroupsOpen(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+
+	s := &server{
+		nodes:                 []Node{{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"}},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		// The window size the layout was reported at: a 975px column row.
+		chromedp.WindowSize(1440, 900),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	seed := `(() => {
+		const servers = [{ id: 'srv-0', name: '溯帆服务器', host: '124.174.71.198', port: '22', user: 'root', auth: 'password', secret: 'x', connectionStatus: 'success' }];
+		const flows = [];
+		for (let i = 0; i < 3; i++) {
+			flows.push({ id: 'flow-' + i, name: '封包更新分后台' + i, lines: [{ id: 'l-' + i, text: 'ls' }], bindings: [{ serverId: 'srv-0' }] });
+		}
+		const request = new XMLHttpRequest();
+		request.open('PUT', '/api/commands/state', false);
+		request.setRequestHeader('Content-Type', 'application/json');
+		request.send(JSON.stringify({ flows, servers }));
+		if (request.status !== 200) throw new Error('seed commands.json: ' + request.status);
+		return 'ok';
+	})()`
+
+	var raw string
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
+		chromedp.Evaluate(seed, nil),
+		chromedp.Reload(),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
+		chromedp.Evaluate(`setView('commands')`, nil),
+		chromedp.WaitVisible(`.commands-columns`, chromedp.ByQuery),
+		chromedp.Evaluate(`setCommandGroupsOpen(true)`, nil),
+		chromedp.Sleep(400*time.Millisecond),
+		chromedp.Evaluate(`(() => {
+			const main = document.querySelector('.commands-board-main');
+			const list = document.querySelector('#commands-flow-list');
+			const name = document.querySelector('.command-flow-card .command-flow-main strong');
+			const editor = document.querySelector('#commands-editor');
+			return JSON.stringify({
+				mainW: main.getBoundingClientRect().width,
+				editorW: editor.getBoundingClientRect().width,
+				listScrollW: list.scrollWidth, listClientW: list.clientWidth,
+				nameScrollW: name.scrollWidth, nameClientW: name.clientWidth,
+				cards: document.querySelectorAll('.command-flow-card').length,
+			});
+		})()`, &raw),
+	); err != nil {
+		t.Fatalf("open groups drawer: %v", err)
+	}
+	var v struct {
+		MainW       float64 `json:"mainW"`
+		EditorW     float64 `json:"editorW"`
+		ListScrollW float64 `json:"listScrollW"`
+		ListClientW float64 `json:"listClientW"`
+		NameScrollW float64 `json:"nameScrollW"`
+		NameClientW float64 `json:"nameClientW"`
+		Cards       int     `json:"cards"`
+	}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		t.Fatalf("decode groups layout %q: %v", raw, err)
+	}
+	if v.Cards != 3 {
+		t.Fatalf("expected the 3 seeded flows, got %d (%+v)", v.Cards, v)
+	}
+	if v.MainW < 340 {
+		t.Fatalf("flow list is only %.0fpx wide with the groups drawer open, want at least 340 (%+v)", v.MainW, v)
+	}
+	if v.EditorW < 300 {
+		t.Fatalf("editor was squeezed to %.0fpx by the open groups drawer (%+v)", v.EditorW, v)
+	}
+	if v.ListScrollW > v.ListClientW+1 {
+		t.Fatalf("flow cards overflow the list horizontally: scrollWidth=%.0f clientWidth=%.0f (%+v)", v.ListScrollW, v.ListClientW, v)
+	}
+	if v.NameScrollW > v.NameClientW+1 {
+		t.Fatalf("flow name is truncated at this width: scrollWidth=%.0f clientWidth=%.0f (%+v)", v.NameScrollW, v.NameClientW, v)
+	}
 }

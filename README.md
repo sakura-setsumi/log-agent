@@ -25,18 +25,16 @@ Requires Go 1.22 or newer for development:
 go run .
 ```
 
-Open <http://localhost:8099>.
-
-For a stable installation, build and run the executable instead of `go run .`:
+This is a Windows desktop app: it opens its own window (Microsoft Edge WebView2, preinstalled on Windows 11) and does not listen on any network port or open in a browser. For a stable installation, build and run the executable instead of `go run .`:
 
 ```powershell
 .\scripts\build.ps1
 .\dist\dozzle-ops.exe
 ```
 
-The service listens on `:8099` by default. Set `LOG_AGENT_PORT` or `PORT` to use another port.
+The window serves its own frontend and talks to the Go handlers in-process, so nothing else on the machine (or network) can reach the dashboard. Only one instance runs at a time; starting a second one brings the first window forward. Links to external sites open in the system browser. Diagnostics go to `log-agent.log` in the data directory, and `LOG_AGENT_DEBUG=1` enables the WebView2 developer tools.
 
-On Windows the first start creates a desktop shortcut named **日志中枢**. It launches the executable with `--open`, which also opens the dashboard in the browser (or just opens the browser if an instance is already running). Moving the executable repoints the shortcut on its next start; a deleted shortcut is not recreated. Set `LOG_AGENT_NO_SHORTCUT=1` to skip it.
+The first start creates a desktop shortcut named **日志中枢**. Moving the executable repoints the shortcut on its next start; a deleted shortcut is not recreated. Set `LOG_AGENT_NO_SHORTCUT=1` to skip it.
 
 The latest Windows amd64 executable is available in the [Releases](https://github.com/sakura-setsumi/log-agent/releases) page.
 
@@ -49,7 +47,8 @@ dozzle-ops.exe
 data/
 ├─ nodes.json
 ├─ models.json
-└─ commands.json
+├─ commands.json
+└─ command-logs.json
 ```
 
 When the dashboard is opened through localhost, this local directory is used. When it is opened from another machine, that visitor's browser `localStorage` is used instead. This keeps remote visitors' connections and API keys isolated from the host machine.
@@ -62,7 +61,7 @@ Useful environment variables:
 | `LOG_AGENT_SETTINGS_FILE` | Choose the runtime settings JSON file. |
 | `LOG_AGENT_ADMIN_TOKEN` | Preconfigure the administrator token. |
 | `LOG_AGENT_ENVIRONMENT` | Set the displayed runtime environment. |
-| `LOG_AGENT_PORT` / `PORT` | Change the listening port. |
+| `LOG_AGENT_DEBUG` | Set to `1` to enable the WebView2 developer tools and context menu. |
 | `LOG_AGENT_MAX_STORED_LOGS` | Set the global in-memory cache limit (1–1,000,000). |
 | `LOG_AGENT_NO_SHORTCUT` | Set to `1` to skip creating the Windows desktop shortcut. |
 
@@ -70,7 +69,6 @@ Example:
 
 ```powershell
 $env:LOG_AGENT_CONFIG_DIR = 'D:\log-agent-config'
-$env:LOG_AGENT_PORT = '9099'
 .\log-agent.exe
 ```
 
@@ -84,7 +82,7 @@ Run the complete test suite:
 go test ./...
 ```
 
-The end-to-end tests start an isolated temporary service and use a local Chrome or Edge session. They do not use port 8099 or real Dozzle nodes.
+The end-to-end tests start an isolated temporary service and use a local Chrome or Edge session. They do not use real Dozzle nodes.
 
 Build the Windows executable with tests:
 
@@ -153,18 +151,18 @@ Log Agent 是一个面向 Dozzle 的自托管日志聚合、检索、加工和�
 go run .
 ```
 
-浏览器访问 <http://localhost:8099>。正式运行建议先构建可执行文件：
+这是 Windows 桌面应用：程序打开独立窗口（基于 Microsoft Edge WebView2，Windows 11 自带），不监听任何网络端口，也不再通过浏览器访问。请先构建可执行文件：
 
 ```powershell
 .\scripts\build.ps1
 .\dist\dozzle-ops.exe
 ```
 
-默认监听 `:8099`，可通过 `LOG_AGENT_PORT` 或 `PORT` 修改端口。Windows 下首次启动会在桌面创建名为「日志中枢」的快捷方式，双击即可启动并自动在浏览器打开页面；程序已在运行时双击只会打开浏览器。移动 exe 后再启动一次会更新快捷方式；手动删除后不会再自动创建。设置 `LOG_AGENT_NO_SHORTCUT=1` 可关闭此功能。Windows amd64 最新可执行文件位于 [Releases](https://github.com/sakura-setsumi/log-agent/releases)。
+窗口内的前端资源由程序自身提供，接口在进程内直接调用，不占用端口，本机其他程序和局域网都无法访问。同一时间只运行一个实例，再次启动会把已有窗口切到前台；外部网站链接用系统浏览器打开；运行日志写入数据目录下的 `log-agent.log`，设置 `LOG_AGENT_DEBUG=1` 可开启 WebView2 开发者工具。首次启动会在桌面创建名为「日志中枢」的快捷方式。移动 exe 后再启动一次会更新快捷方式；手动删除后不会再自动创建。设置 `LOG_AGENT_NO_SHORTCUT=1` 可关闭此功能。Windows amd64 最新可执行文件位于 [Releases](https://github.com/sakura-setsumi/log-agent/releases)。
 
 ## 配置和安全
 
-节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`，服务器指令页的指令集、指令集组、服务器库和收藏保存在 `data/commands.json`（本机访问时只读写该文件，不再使用浏览器 localStorage；其他机器访问时仍保存在各自浏览器中。旧版本留在浏览器里的指令集会在首次启动时自动迁移进该文件）。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_PORT`、`LOG_AGENT_MAX_STORED_LOGS` 和 `LOG_AGENT_NO_SHORTCUT` 覆盖默认设置。
+节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`，服务器指令页的指令集、指令集组、服务器库和收藏保存在 `data/commands.json`，每次运行的指令与服务器返回日志保存在 `data/command-logs.json`（保留最近 200 次运行）（本机访问时只读写该文件，不再使用浏览器 localStorage；其他机器访问时仍保存在各自浏览器中。旧版本留在浏览器里的指令集会在首次启动时自动迁移进该文件）。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_DEBUG`、`LOG_AGENT_MAX_STORED_LOGS` 和 `LOG_AGENT_NO_SHORTCUT` 覆盖默认设置。
 
 `models.json` 会以明文保存 API key，`commands.json` 会以明文保存使用密码登录的服务器密码，请勿提交到公开仓库，也不要共享导出的敏感配置、私钥或管理员 token。服务不会修改 Nginx 或主机系统配置。
 

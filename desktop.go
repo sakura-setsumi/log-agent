@@ -9,10 +9,6 @@ import (
 	"unicode/utf16"
 )
 
-// openBrowserFlag is passed by the desktop shortcut: a double-click should land
-// on the dashboard, not on a console window the user then has to read a URL from.
-const openBrowserFlag = "--open"
-
 const desktopShortcutName = "日志中枢"
 
 // desktopShortcutMarker records that the shortcut was created once, so a user
@@ -21,15 +17,6 @@ const desktopShortcutName = "日志中枢"
 // ".desktop-shortcut-created" even when nothing was created, so that name is
 // deliberately not reused.)
 const desktopShortcutMarker = ".desktop-shortcut"
-
-func wantsBrowser(args []string) bool {
-	for _, arg := range args {
-		if arg == openBrowserFlag {
-			return true
-		}
-	}
-	return false
-}
 
 // ensureDesktopShortcut creates a desktop shortcut to this executable the first
 // time it runs, and repoints an existing one if the executable has moved.
