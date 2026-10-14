@@ -4252,6 +4252,7 @@ function onLanguageChanged() {
   updatePreview();
   renderConnectionsView();
   if (typeof renderCommandServers === 'function') { renderCommandServers(); renderCommandFlows(); renderCommandEditor(); }
+  if (typeof renderTerminalView === 'function') renderTerminalView();
   if (typeof renderAssistant === 'function') renderAssistant();
   if (typeof refreshCommandLogs === 'function') refreshCommandLogs();
   setView(view);
@@ -4261,10 +4262,11 @@ function setView(view) {
   // The breadcrumb label comes from the same table the sidebar uses, so the two
   // cannot drift apart in either language.
   $('#view-breadcrumb').textContent = t(`nav.${view}`);
-  Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view', commands: '#commands-view' }).forEach(([name, selector]) => {
+  Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view', commands: '#commands-view', terminal: '#terminal-view' }).forEach(([name, selector]) => {
     $(selector).classList.toggle('hidden', name !== view);
   });
   if (view === 'rules') syncRuleButtons();
+  if (view === 'terminal' && typeof renderTerminalView === 'function') renderTerminalView({ shown: true });
   if (view === 'connections') renderConnectionsView();
   if (view === 'rules') showToast(t('view.toast.rules'));
   if (view === 'connections') showToast(t('view.toast.connections'));

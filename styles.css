@@ -1134,3 +1134,91 @@ html[data-theme="dark"] .command-dock-button.active { color: var(--orange); bord
   .app-shell:has(#commands-view:not(.hidden)) .command-dock { left: calc(var(--rail) + 24px); }
   .app-shell:has(#commands-view:not(.hidden)) .command-dock-popup { width: min(400px, calc(100vw - var(--rail) - 48px)); }
 }
+
+/* Server terminal page: an SSH terminal over a file browser, fitted to the window
+   like the live-stream page (no page scrollbar; the panels scroll themselves).
+   The node panel has nothing to do here, so only the icon rail stays. */
+.app-shell:has(#terminal-view:not(.hidden)) { height: calc(100vh - var(--menubar-h)); min-height: 0; overflow: hidden; --sidebar: 0px; }
+.app-shell:has(#terminal-view:not(.hidden)) .sidebar { display: none; }
+.app-shell:has(#terminal-view:not(.hidden)) .main-content { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+#terminal-view:not(.hidden) { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding-top: 12px; padding-bottom: 12px; }
+.term-shell { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.term-bar { flex: none; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.term-server-pick { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.term-server-pick select { height: 30px; max-width: 340px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--surface-soft); font-size: 12px; outline: 0; }
+.term-server-pick select:focus { border-color: var(--orange); }
+.term-tabs { flex: 1 1 auto; min-width: 0; display: flex; gap: 4px; margin-left: 6px; overflow-x: auto; scrollbar-width: none; }
+.term-tabs::-webkit-scrollbar { display: none; }
+.term-tab { flex: none; height: 30px; display: flex; align-items: center; gap: 7px; padding: 0 5px 0 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--surface); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.term-tab:hover { color: var(--text); }
+.term-tab.active { border-color: var(--orange); color: var(--text); background: var(--orange-soft); }
+.term-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--orange); }
+.term-tab.open .term-tab-dot { background: var(--teal); }
+.term-tab.ended .term-tab-dot { background: var(--muted-2); }
+.term-tab-close { width: 20px; height: 20px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; color: var(--muted-2); background: transparent; font-size: 15px; line-height: 1; }
+.term-tab-close:hover { color: var(--text); background: var(--surface-soft); }
+.term-workspace { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(120px, 1fr) 10px var(--term-lower-h, 38%); }
+.term-screen { position: relative; min-height: 0; overflow: hidden; border-radius: 8px; background: #0f1b27; }
+.term-session { position: absolute; inset: 8px 4px 8px 12px; display: none; }
+.term-session.active { display: block; }
+.term-screen .xterm { height: 100%; }
+.term-empty { position: absolute; inset: 0; display: grid; place-content: center; gap: 6px; padding: 0 24px; text-align: center; color: #9fb3c4; font-size: 12px; }
+.term-empty strong { color: #e4eef6; font-size: 15px; }
+.term-splitter { display: grid; place-items: center; cursor: row-resize; touch-action: none; }
+.term-splitter::after { content: ""; width: 54px; height: 3px; border-radius: 2px; background: var(--line); transition: background .15s; }
+.term-splitter:hover::after, .term-splitter.dragging::after { background: var(--orange); }
+.term-lower { min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.term-lower-tabs { flex: none; display: flex; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
+.term-lower-tabs button { height: 30px; padding: 0 20px; border: 0; border-right: 1px solid var(--line); color: var(--muted); background: transparent; font-size: 12px; }
+.term-lower-tabs button:hover { color: var(--text); }
+.term-lower-tabs button.active { color: var(--text); background: var(--surface); box-shadow: inset 0 -2px 0 var(--orange); }
+.term-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.term-file-toolbar { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); }
+.term-file-toolbar input { flex: 1 1 220px; min-width: 140px; height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--surface-soft); font: 12px Consolas, "Cascadia Mono", monospace; outline: 0; }
+.term-file-toolbar input:focus { border-color: var(--orange); }
+.term-file-toolbar .compact-button { flex: none; white-space: nowrap; }
+.term-file-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr); }
+.term-tree { min-height: 0; overflow: auto; padding: 4px 0; border-right: 1px solid var(--line-soft); font-size: 12px; scrollbar-width: thin; }
+.term-tree-row { height: 24px; display: flex; align-items: center; gap: 4px; padding-right: 8px; color: var(--text); white-space: nowrap; cursor: pointer; }
+.term-tree-row:hover { background: var(--surface-soft); }
+.term-tree-row.active { background: var(--orange-soft); }
+.term-tree-arrow { width: 14px; flex: none; padding: 0; border: 0; color: var(--muted-2); background: transparent; font-size: 10px; line-height: 1; }
+.term-tree svg, .term-name svg { width: 14px; height: 14px; flex: none; fill: none; stroke: var(--orange); stroke-width: 1.7; stroke-linejoin: round; }
+.term-table-wrap { position: relative; min-width: 0; min-height: 0; overflow: auto; scrollbar-width: thin; }
+.term-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.term-table th { position: sticky; top: 0; z-index: 1; padding: 5px 10px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--surface-soft); font-weight: 600; text-align: left; white-space: nowrap; }
+.term-table td { padding: 4px 10px; border-bottom: 1px solid var(--line-soft); color: var(--text); white-space: nowrap; cursor: default; user-select: none; }
+.term-table tbody tr:hover td { background: var(--surface-soft); }
+.term-table tbody tr.selected td { background: var(--orange-soft); }
+.term-name { display: flex; align-items: center; gap: 6px; }
+.term-name em { color: var(--muted-2); font-style: normal; }
+.term-name svg { stroke: var(--muted-2); }
+tr[data-name] .term-name svg { stroke: var(--muted-2); }
+.term-table td:first-child { min-width: 180px; }
+.term-empty-row td { padding: 24px 10px; color: var(--muted-2); text-align: center; cursor: default; }
+.term-drop-hint { position: absolute; inset: 4px; display: none; place-items: center; border: 2px dashed var(--orange); border-radius: 8px; color: var(--orange); background: var(--orange-soft); font-size: 13px; pointer-events: none; }
+.term-table-wrap.drag-active .term-drop-hint { display: grid; }
+.term-status { flex: none; height: 24px; display: flex; align-items: center; padding: 0 10px; border-top: 1px solid var(--line-soft); color: var(--muted-2); font-size: 11px; }
+.term-cmd-list { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 8px; padding: 10px; scrollbar-width: thin; }
+.term-cmd-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.term-cmd-item > div { min-width: 0; }
+.term-cmd-item strong, .term-cmd-item small, .term-cmd-item code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-cmd-item strong { font-size: 13px; }
+.term-cmd-item small { margin-top: 2px; color: var(--muted-2); font-size: 11px; }
+.term-cmd-item code { margin-top: 4px; color: var(--muted); font: 11px Consolas, "Cascadia Mono", monospace; }
+.term-cmd-empty { padding: 24px; color: var(--muted-2); font-size: 12px; text-align: center; }
+@media (max-width: 930px) {
+  .term-file-body { grid-template-columns: minmax(0, 1fr); }
+  .term-tree { display: none; }
+}
+@media (max-width: 680px) {
+  .term-bar { flex-wrap: wrap; }
+}
+
+/* xterm paints its viewport black; the terminal area is rarely an exact number of
+   rows tall, so the leftover strip under the last row showed as a black bar. */
+.term-screen .xterm .xterm-viewport { background-color: transparent !important; }
+/* The viewport keeps a native scrollbar under xterm's own overlay one; its arrow
+   button showed up as a small white mark in the terminal's bottom-right corner. */
+.term-screen .xterm .xterm-viewport { scrollbar-width: none; }
+.term-screen .xterm .xterm-viewport::-webkit-scrollbar { display: none; width: 0; height: 0; }

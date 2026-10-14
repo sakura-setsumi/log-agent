@@ -33,7 +33,7 @@ import (
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
 //
-//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js menubar.js favicon.png ai-icon.png loading.gif
+//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js menubar.js terminal.js third_party/xterm/xterm.js third_party/xterm/xterm.css third_party/xterm/addon-fit.js favicon.png ai-icon.png loading.gif
 var frontend embed.FS
 
 const (
@@ -372,6 +372,7 @@ func newHTTPHandler(s *server) http.Handler {
 	mux.HandleFunc("/api/commands/execute", s.handleCommandExecute)
 	mux.HandleFunc("/api/commands/state", s.handleCommandsState)
 	mux.HandleFunc("/api/commands/logs", s.handleCommandLogs)
+	mux.HandleFunc("/api/term/", s.handleTerm)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/settings/admin", s.handleAdminSettings)
 	mux.HandleFunc("/api/settings/environment", s.handleEnvironmentSettings)

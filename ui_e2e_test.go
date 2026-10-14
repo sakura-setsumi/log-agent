@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/input"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
 
@@ -2791,4 +2792,216 @@ func TestE2EFlowListKeepsItsWidthWithGroupsOpen(t *testing.T) {
 	if v.NameScrollW > v.NameClientW+1 {
 		t.Fatalf("flow name is truncated at this width: scrollWidth=%.0f clientWidth=%.0f (%+v)", v.NameScrollW, v.NameClientW, v)
 	}
+}
+
+// TestE2ETerminalPage drives the server terminal page against an in-process SSH
+// server: the rail labels, connecting, typing into the shell, and the file
+// browser (upload, new folder, open, delete).
+func TestE2ETerminalPage(t *testing.T) {
+	browserPath := firstExistingPath(
+		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:/Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:/Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	)
+	if browserPath == "" {
+		t.Skip("Chrome or Edge is required for UI end-to-end tests")
+	}
+	t.Cleanup(closeAllTermSessions)
+	t.Setenv("LOG_AGENT_CONFIG_DIR", t.TempDir())
+	*configDirCache() = configDirState{}
+	host, port, fingerprint := startFakeSSHServer(t)
+
+	s := &server{
+		nodes:                 []Node{{ID: "node-a", Name: "溯帆", URL: "http://124.174.71.198:8099", Status: "connected", Initial: "溯"}},
+		nextLogID:             1,
+		historyRange:          "30m",
+		rules:                 map[string]bool{"mask": true, "structure": true, "noise": false},
+		ruleOrder:             defaultRuleOrder(),
+		subscribers:           make(map[chan LogEntry]struct{}),
+		containerNames:        make(map[string]map[string]string),
+		containerLogs:         make(map[string][]LogEntry),
+		historyCoverage:       make(map[string]time.Time),
+		historyLoads:          make(map[string]struct{}),
+		historyLoadGeneration: make(map[string]uint64),
+		streams:               make(map[string]struct{}),
+		nodeContexts:          make(map[string]context.Context),
+		nodeCancels:           make(map[string]context.CancelFunc),
+		settings:              defaultAppSettings(),
+	}
+	web := httptest.NewServer(newHTTPHandler(s))
+	t.Cleanup(web.Close)
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.ExecPath(browserPath),
+		chromedp.Headless,
+		chromedp.NoSandbox,
+		chromedp.WindowSize(1440, 900),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithErrorf(func(string, ...any) {}))
+	t.Cleanup(cancel)
+
+	// prompt() asks for the name of a new folder; confirm() guards deletion.
+	chromedp.ListenTarget(ctx, func(ev any) {
+		if dialog, ok := ev.(*page.EventJavascriptDialogOpening); ok {
+			go func() {
+				_ = chromedp.Run(ctx, page.HandleJavaScriptDialog(true).WithPromptText("newdir"))
+			}()
+			_ = dialog
+		}
+	})
+
+	seed := `(() => {
+		const servers = [{ id: 'srv-0', name: '测试服务器', host: '` + host + `', port: '` + port + `', user: 'tester', auth: 'password', secret: 'pw', connectionStatus: 'success', hostFingerprint: '` + fingerprint + `' }];
+		const flows = [{ id: 'flow-0', name: '检查磁盘', lines: [{ id: 'l-0', type: 'command', text: 'df -h' }], bindings: [] }];
+		const request = new XMLHttpRequest();
+		request.open('PUT', '/api/commands/state', false);
+		request.setRequestHeader('Content-Type', 'application/json');
+		request.send(JSON.stringify({ flows, servers }));
+		if (request.status !== 200) throw new Error('seed commands.json: ' + request.status);
+		return 'ok';
+	})()`
+	wait := func(expr, what string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			var ok bool
+			if err := chromedp.Run(ctx, chromedp.Evaluate(expr, &ok)); err == nil && ok {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		var dump string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#terminal-view').innerText.slice(0, 1200)`, &dump))
+		t.Fatalf("timed out waiting for %s; page text: %q", what, dump)
+	}
+
+	upload := filepathJoinTemp(t, "upload-me.txt", "uploaded from the page\n")
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(web.URL),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
+		chromedp.Evaluate(seed, nil),
+		chromedp.Reload(),
+		chromedp.WaitVisible(`#node-list`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("load page: %v", err)
+	}
+
+	// The old page is "指令集组" now and the SSH client is "服务器指令".
+	var labels string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll('.rail .nav-item')).map((b) => b.dataset.view + '=' + b.textContent.replace(/[0-9]+$/, '').trim()).join('|')`, &labels)); err != nil {
+		t.Fatal(err)
+	}
+	// The browser here runs in English; the Chinese UI says 指令集组 / 服务器指令.
+	if !strings.Contains(labels, "commands=▤Command Groups") || !strings.Contains(labels, "terminal=>_Server Commands") {
+		t.Fatalf("rail labels = %q, want Command Groups for commands and Server Commands for terminal", labels)
+	}
+	var commandsTitle string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#commands-view h1').textContent`, &commandsTitle)); err != nil || commandsTitle != "Command Groups" {
+		t.Fatalf("commands page title = %q (%v), want Command Groups", commandsTitle, err)
+	}
+
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`.nav-item[data-view="terminal"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#term-server-select`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open terminal page: %v", err)
+	}
+	wait(`document.querySelector('#term-server-select').value === 'srv-0'`, "the server list")
+	// Page height: the terminal page must fit the window.
+	var overflow float64
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.documentElement.scrollHeight - window.innerHeight`, &overflow)); err != nil || overflow > 2 {
+		t.Fatalf("terminal page grew a scrollbar: overflow=%.1f (%v)", overflow, err)
+	}
+
+	if err := chromedp.Run(ctx, chromedp.Click(`#term-connect`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`!!document.querySelector('.term-tab.open')`, "the session tab to open")
+	wait(`(document.querySelector('.term-session.active .xterm-rows') || {innerText: ''}).innerText.includes('ready$')`, "the shell prompt")
+
+	// The terminal must fill its panel: xterm starts at 80x24 and only grows once
+	// it has been fitted, which left a dead strip under the last row.
+	wait(`(() => {
+		const session = document.querySelector('.term-session.active').getBoundingClientRect();
+		const screen = document.querySelector('.term-session.active .xterm-screen').getBoundingClientRect();
+		return session.height - screen.height >= 0 && session.height - screen.height < 24 && screen.width > session.width * 0.9;
+	})()`, "the terminal to fill its panel")
+	// xterm draws its own overlay scrollbar; the native one under it showed up as
+	// a small white mark in the corner, so the viewport must not have one.
+	wait(`(() => { const v = document.querySelector('.term-session.active .xterm-viewport'); return v.offsetWidth === v.clientWidth; })()`, "the native scrollbar to stay hidden")
+	// SendKeys fires both a key event and an input event for each character, which
+	// xterm answers twice; inserting the text is what typing into the focused
+	// textarea amounts to.
+	if err := chromedp.Run(ctx,
+		chromedp.Focus(`.term-session.active .xterm-helper-textarea`, chromedp.ByQuery),
+		chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("hello-terminal\r").Do(ctx) }),
+	); err != nil {
+		t.Fatalf("type into the terminal: %v", err)
+	}
+	wait(`document.querySelector('.term-session.active .xterm-rows').innerText.includes('hello-terminal')`, "typed text echoed by the shell")
+
+	// Files: the in-memory SFTP root starts empty.
+	wait(`document.querySelector('#term-path').value === '/' && document.querySelector('#term-file-rows .term-empty-row') !== null`, "an empty root listing")
+	if err := chromedp.Run(ctx, chromedp.SetUploadFiles(`#term-upload-input`, []string{upload}, chromedp.ByQuery)); err != nil {
+		t.Fatalf("choose a file: %v", err)
+	}
+	wait(`!!document.querySelector('#term-file-rows tr[data-name="upload-me.txt"]')`, "the uploaded file in the listing")
+
+	if err := chromedp.Run(ctx, chromedp.Click(`#term-mkdir`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`!!document.querySelector('#term-file-rows tr[data-name="newdir"]')`, "the new folder in the listing")
+	// Folders sort before files.
+	var first string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#term-file-rows tr[data-name]').dataset.name`, &first)); err != nil || first != "newdir" {
+		t.Fatalf("first row = %q (%v), want the folder first", first, err)
+	}
+
+	// Select the file and delete it (the confirm dialog is accepted above).
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`#term-file-rows tr[data-name="upload-me.txt"]`, chromedp.ByQuery),
+		chromedp.Click(`#term-delete`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	wait(`!document.querySelector('#term-file-rows tr[data-name="upload-me.txt"]')`, "the file to disappear after deleting it")
+
+	// Opening the folder moves the path and the tree.
+	if err := chromedp.Run(ctx, chromedp.DoubleClick(`#term-file-rows tr[data-name="newdir"]`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`document.querySelector('#term-path').value === '/newdir' && !!document.querySelector('.term-tree-row.active[data-path="/newdir"]')`, "the folder to open")
+	if err := chromedp.Run(ctx, chromedp.Click(`#term-up`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`document.querySelector('#term-path').value === '/'`, "the parent folder")
+
+	// The command tab lists the command sets and sends one to the shell.
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`[data-term-pane="commands"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`[data-send-flow="flow-0"]`, chromedp.ByQuery),
+		chromedp.Click(`[data-send-flow="flow-0"]`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("send a command set: %v", err)
+	}
+	wait(`document.querySelector('.term-session.active .xterm-rows').innerText.includes('df -h')`, "the command set to reach the shell")
+
+	// Closing the tab ends the session.
+	if err := chromedp.Run(ctx, chromedp.Click(`.term-tab-close`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`document.querySelectorAll('.term-tab').length === 0 && !document.querySelector('#term-empty').classList.contains('hidden')`, "the session to close")
+}
+
+func filepathJoinTemp(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

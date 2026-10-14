@@ -7,7 +7,8 @@
     <title>Log Agent</title>
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="preload" href="loading.gif" as="image" type="image/gif" />
-    <link rel="stylesheet" href="styles.css?v=rail-nav-132" />
+    <link rel="stylesheet" href="third_party/xterm/xterm.css" />
+    <link rel="stylesheet" href="styles.css?v=rail-nav-136" />
   </head>
   <body>
     <nav class="menubar" id="menubar" aria-label="应用菜单" data-i18n-aria-label="menu.label">
@@ -25,7 +26,8 @@
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='overview']" data-i18n="nav.overview">实时日志流</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='rules']" data-i18n="nav.rules">处理规则</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='connections']" data-i18n="nav.connections">连接管理</button>
-          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='commands']" data-i18n="nav.commands">服务器指令</button>
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='commands']" data-i18n="nav.commands">指令集组</button>
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='terminal']" data-i18n="nav.terminal">服务器指令</button>
           <div class="menu-separator" role="separator"></div>
           <button class="menu-item" type="button" role="menuitem" data-click="#theme-toggle" data-label-from="#theme-toggle">切换主题</button>
           <button class="menu-item" type="button" role="menuitem" data-click="#language-toggle" data-i18n="menu.language">语言：English / 中文</button>
@@ -64,7 +66,10 @@
           <span class="nav-icon">⌘</span><span data-i18n="nav.connections">连接管理</span>
         </button>
         <button class="nav-item" data-view="commands">
-          <span class="nav-icon">▤</span><span data-i18n="nav.commands">服务器指令</span>
+          <span class="nav-icon">▤</span><span data-i18n="nav.commands">指令集组</span>
+        </button>
+        <button class="nav-item" data-view="terminal">
+          <span class="nav-icon">&gt;_</span><span data-i18n="nav.terminal">服务器指令</span>
         </button>
       </nav>
       <aside class="sidebar">
@@ -314,6 +319,54 @@
           </div>
         </div>
 
+        <div class="page-content page-view hidden" id="terminal-view">
+          <div class="term-shell" id="term-shell">
+            <div class="term-bar">
+              <label class="term-server-pick"><span data-i18n="terminal.server">服务器</span><select id="term-server-select"></select></label>
+              <button class="primary-button compact-button" id="term-connect" type="button" data-i18n="terminal.connect">连接</button>
+              <button class="text-button" id="term-manage-servers" type="button" data-i18n="terminal.manageServers">管理服务器</button>
+              <div class="term-tabs" id="term-tabs" role="tablist"></div>
+            </div>
+            <div class="term-workspace" id="term-workspace">
+              <div class="term-screen" id="term-screen">
+                <div class="term-empty" id="term-empty"><strong data-i18n="terminal.emptyTitle">选择服务器并点击连接</strong><span data-i18n="terminal.emptyBody">这里是一个 SSH 终端，下方可以浏览、上传和下载服务器上的文件。</span></div>
+              </div>
+              <div class="term-splitter" id="term-splitter" role="separator" aria-orientation="horizontal"></div>
+              <section class="term-lower" id="term-lower">
+                <div class="term-lower-tabs">
+                  <button class="active" type="button" data-term-pane="files" data-i18n="terminal.pane.files">文件</button>
+                  <button type="button" data-term-pane="commands" data-i18n="terminal.pane.commands">命令</button>
+                </div>
+                <div class="term-pane term-files" id="term-pane-files">
+                  <div class="term-file-toolbar">
+                    <input id="term-path" type="text" spellcheck="false" autocomplete="off" data-i18n-placeholder="terminal.file.pathPlaceholder" placeholder="服务器路径" />
+                    <button class="secondary-button compact-button" id="term-refresh" type="button" data-i18n="terminal.file.refresh">刷新</button>
+                    <button class="secondary-button compact-button" id="term-up" type="button" data-i18n="terminal.file.up">上级目录</button>
+                    <button class="secondary-button compact-button" id="term-mkdir" type="button" data-i18n="terminal.file.mkdir">新建文件夹</button>
+                    <button class="secondary-button compact-button" id="term-rename" type="button" data-i18n="terminal.file.rename">重命名</button>
+                    <button class="secondary-button compact-button" id="term-upload" type="button" data-i18n="terminal.file.upload">上传</button>
+                    <button class="secondary-button compact-button" id="term-download" type="button" data-i18n="terminal.file.download">下载</button>
+                    <button class="danger-button compact-button" id="term-delete" type="button" data-i18n="terminal.file.delete">删除</button>
+                  </div>
+                  <div class="term-file-body">
+                    <div class="term-tree" id="term-tree"></div>
+                    <div class="term-table-wrap" id="term-table-wrap">
+                      <table class="term-table">
+                        <thead><tr><th data-i18n="terminal.file.name">文件名</th><th data-i18n="terminal.file.size">大小</th><th data-i18n="terminal.file.type">类型</th><th data-i18n="terminal.file.modified">修改时间</th><th data-i18n="terminal.file.perms">权限</th><th data-i18n="terminal.file.owner">用户/用户组</th></tr></thead>
+                        <tbody id="term-file-rows"></tbody>
+                      </table>
+                      <div class="term-drop-hint" data-i18n="terminal.file.dropHint">松开鼠标，上传到当前文件夹</div>
+                    </div>
+                  </div>
+                  <div class="term-status" id="term-status"></div>
+                </div>
+                <div class="term-pane term-cmds hidden" id="term-pane-commands"><div class="term-cmd-list" id="term-cmd-list"></div></div>
+              </section>
+            </div>
+            <input id="term-upload-input" type="file" multiple hidden />
+          </div>
+        </div>
+
         <div class="page-content page-view hidden" id="connections-view">
           <section class="page-intro">
             <div>
@@ -429,5 +482,8 @@
     <script src="assistant-ui.js?v=modal-dismiss-3"></script>
     <script src="bootstrap.js?v=admin-token-deadlock-4"></script>
     <script src="menubar.js?v=1"></script>
+    <script src="third_party/xterm/xterm.js"></script>
+    <script src="third_party/xterm/addon-fit.js"></script>
+    <script src="terminal.js?v=2"></script>
   </body>
 </html>

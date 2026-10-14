@@ -14,6 +14,7 @@ Highlights:
 - Time-window history loading with automatic older-page loading after the per-container browse limit is reached.
 - Processing pipeline for sensitive-data masking, structured-field extraction, and health-check filtering.
 - AI log analysis with selectable context, image/text attachments, model profiles, and browser-local conversation history.
+- Command Groups page for ordered, reusable server command sets, and a Server Commands page that is an SSH terminal (xterm.js) with an SFTP file browser, in the style of FinalShell.
 - Local node/model storage for localhost use, with browser-local storage for remote visitors.
 - No database required; frontend assets are embedded into the Go executable.
 
@@ -110,6 +111,7 @@ Build output is written to `dist/`; local binaries and caches are intentionally 
 - `main.go` — HTTP API, Dozzle connectors, SSE ingestion, history paging, cache policy, and embedded frontend.
 - `app.js` — dashboard state, node/container selection, log stream, filtering, paging, and export.
 - `assistant-ui.js` — AI assistant conversations, context, attachments, and session history.
+- `term_api.go` / `terminal.js` — the Server Commands page: SSH shell sessions and SFTP over one connection, and the xterm.js front end. xterm.js is vendored in `third_party/xterm/` (MIT).
 - `bootstrap.js` — application initialization after frontend modules load.
 - `styles.css` — dashboard styling and responsive layout.
 
@@ -140,6 +142,7 @@ Log Agent 是一个面向 Dozzle 的自托管日志聚合、检索、加工和�
 - 按时间窗口拉取历史日志；单容器浏览缓存达到上限后，滚动到顶部会自动加载更早日志。
 - 提供敏感信息脱敏、结构化字段提取和健康检查过滤等日志加工规则。
 - 支持 AI 日志分析、上下文选择、图片/文本附件、模型配置和浏览器本地会话历史。
+- 「指令集组」页编排可复用的服务器指令集；「服务器指令」页是类似 FinalShell 的 SSH 终端（xterm.js），下方带 SFTP 文件管理（浏览、上传、下载、新建、重命名、删除）和指令集快捷发送。
 - 本机访问时使用可执行文件旁的本地 JSON 配置；远程访问时使用访客浏览器的 localStorage。
 - 无需数据库，前端资源直接嵌入 Go 可执行文件。
 
@@ -162,7 +165,7 @@ go run .
 
 ## 配置和安全
 
-节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`，服务器指令页的指令集、指令集组、服务器库和收藏保存在 `data/commands.json`，每次运行的指令与服务器返回日志保存在 `data/command-logs.json`（保留最近 200 次运行）（本机访问时只读写该文件，不再使用浏览器 localStorage；其他机器访问时仍保存在各自浏览器中。旧版本留在浏览器里的指令集会在首次启动时自动迁移进该文件）。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_DEBUG`、`LOG_AGENT_MAX_STORED_LOGS` 和 `LOG_AGENT_NO_SHORTCUT` 覆盖默认设置。
+节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`，指令集组页的指令集、指令集组、服务器库和收藏保存在 `data/commands.json`，每次运行的指令与服务器返回日志保存在 `data/command-logs.json`（保留最近 200 次运行）（本机访问时只读写该文件，不再使用浏览器 localStorage；其他机器访问时仍保存在各自浏览器中。旧版本留在浏览器里的指令集会在首次启动时自动迁移进该文件）。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_DEBUG`、`LOG_AGENT_MAX_STORED_LOGS` 和 `LOG_AGENT_NO_SHORTCUT` 覆盖默认设置。
 
 `models.json` 会以明文保存 API key，`commands.json` 会以明文保存使用密码登录的服务器密码，请勿提交到公开仓库，也不要共享导出的敏感配置、私钥或管理员 token。服务不会修改 Nginx 或主机系统配置。
 
@@ -179,6 +182,7 @@ go test ./...
 - `main.go`：HTTP API、Dozzle 连接、SSE 日志接收、历史分页、缓存策略和嵌入式前端。
 - `app.js`：页面状态、节点/容器选择、日志流、筛选、分页和导出。
 - `assistant-ui.js`：AI 助手会话、上下文、附件和历史记录。
+- `term_api.go`、`terminal.js`：「服务器指令」页——同一条连接上的 SSH shell 与 SFTP，以及基于 xterm.js 的前端；xterm.js 随仓库放在 `third_party/xterm/`（MIT）。
 - `bootstrap.js`：前端模块加载完成后的初始化。
 - `styles.css`：面板样式和响应式布局。
 
