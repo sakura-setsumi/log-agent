@@ -8,7 +8,9 @@
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="preload" href="loading.gif" as="image" type="image/gif" />
     <link rel="stylesheet" href="third_party/xterm/xterm.css" />
+    <link rel="stylesheet" href="third_party/database/tabulator.min.css" />
     <link rel="stylesheet" href="styles.css?v=rail-nav-136" />
+    <link rel="stylesheet" href="database.css?v=1" />
   </head>
   <body>
     <nav class="menubar" id="menubar" aria-label="应用菜单" data-i18n-aria-label="menu.label">
@@ -28,6 +30,7 @@
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='connections']" data-i18n="nav.connections">连接管理</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='commands']" data-i18n="nav.commands">指令集组</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='terminal']" data-i18n="nav.terminal">服务器指令</button>
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='database']" data-i18n="nav.database">数据库</button>
           <div class="menu-separator" role="separator"></div>
           <button class="menu-item" type="button" role="menuitem" data-click="#theme-toggle" data-label-from="#theme-toggle">切换主题</button>
           <button class="menu-item" type="button" role="menuitem" data-click="#language-toggle" data-i18n="menu.language">语言：English / 中文</button>
@@ -37,9 +40,24 @@
         <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="menu.nodes">节点</button>
         <div class="menu-panel" role="menu">
           <button class="menu-item" type="button" role="menuitem" data-call="openNodeModal" data-i18n="sidebar.addNode">添加 Dozzle 节点</button>
+          <button class="menu-item" type="button" role="menuitem" data-call="openNodeManager" data-i18n="menu.manageNodes">管理节点…</button>
           <button class="menu-item" type="button" role="menuitemcheckbox" aria-checked="false" data-click="#node-multi-select-toggle" data-checked-from="#node-multi-select-toggle" data-i18n="menu.multiSelect">节点多选</button>
           <div class="menu-separator" role="separator"></div>
           <button class="menu-item" type="button" role="menuitem" data-click="#refresh-button" data-i18n="menu.refresh">刷新状态</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="menu.servers">服务器</button>
+        <div class="menu-panel" role="menu">
+          <button class="menu-item" id="commands-add-server" type="button" role="menuitem" data-i18n="commands.addServer">新增服务器</button>
+          <button class="menu-item" type="button" role="menuitem" data-call="openServerManager" data-i18n="menu.manageServers">管理服务器…</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="nav.database">数据库</button>
+        <div class="menu-panel" role="menu">
+          <button class="menu-item" type="button" role="menuitem" data-call="openDatabaseConnection" data-i18n="db.newConnection">新建连接…</button>
+          <button class="menu-item" type="button" role="menuitem" data-call="newDatabaseQuery" data-i18n="db.newQuery">SQL / 跨库查询</button>
         </div>
       </div>
       <div class="menu">
@@ -70,6 +88,9 @@
         </button>
         <button class="nav-item" data-view="terminal">
           <span class="nav-icon">&gt;_</span><span data-i18n="nav.terminal">服务器指令</span>
+        </button>
+        <button class="nav-item" data-view="database">
+          <span class="nav-icon">▤</span><span data-i18n="nav.database">数据库</span>
         </button>
       </nav>
       <aside class="sidebar">
@@ -203,29 +224,6 @@
               </div>
               <div class="stream-footer"><span data-i18n="stream.footerLatest">最新日志在底部</span><span><span class="keyboard-hint">Space</span> <span data-i18n="stream.footerShortcut">暂停 / 继续</span></span></div>
             </div>
-
-            <aside class="right-rail">
-              <section class="processing-panel panel">
-                <div class="panel-heading compact-heading">
-                  <div><div class="section-kicker">PROCESSING PIPELINE</div><h2 data-i18n="rules.panelTitle">日志加工</h2></div>
-                  <div class="pipeline-actions" id="pipeline-actions"><button class="more-button" id="pipeline-more-button" type="button" data-i18n-aria-label="pipeline.more" aria-label="更多加工操作">•••</button><div class="pipeline-menu hidden" id="pipeline-menu"><button type="button" data-pipeline-action="enable-all" data-i18n="pipeline.enableAll">启用全部规则</button><button type="button" data-pipeline-action="disable-all" data-i18n="pipeline.disableAll">停用全部规则</button><button type="button" data-pipeline-action="reset" data-i18n="pipeline.reset">恢复默认设置</button></div></div>
-                </div>
-                <p class="panel-description" data-i18n="pipeline.description">在日志进入存储前，按顺序执行清洗和结构化。</p>
-                <div class="pipeline-list">
-                  <div class="pipeline-item" data-rule="mask"><span class="drag-handle">⁙</span><span class="rule-icon orange">✦</span><div class="rule-copy"><strong data-i18n="rules.mask">敏感信息脱敏</strong><span data-i18n="pipeline.maskHint">IP、Token、邮箱</span></div><button class="toggle" data-rule-toggle="mask" data-i18n-aria-label="pipeline.toggleMask" aria-label="切换敏感信息脱敏"></button></div>
-                  <div class="pipeline-item" data-rule="structure"><span class="drag-handle">⁙</span><span class="rule-icon teal">⌘</span><div class="rule-copy"><strong data-i18n="rules.structure">提取结构化字段</strong><span data-i18n="pipeline.structureHint">level / service / trace_id</span></div><button class="toggle" data-rule-toggle="structure" data-i18n-aria-label="pipeline.toggleStructure" aria-label="切换提取结构化字段"></button></div>
-                  <div class="pipeline-item" data-rule="noise"><span class="drag-handle">⁙</span><span class="rule-icon muted">∿</span><div class="rule-copy"><strong data-i18n="rules.noise">过滤健康检查</strong><span data-i18n="pipeline.noiseHint">忽略 /healthz 请求</span></div><button class="toggle" data-rule-toggle="noise" data-i18n-aria-label="pipeline.toggleNoise" aria-label="切换过滤健康检查"></button></div>
-                </div>
-                <button class="add-rule-button" id="add-rule-button" type="button"><span>＋</span> <span data-i18n="rules.addRule">添加加工规则</span></button>
-                <div class="pipeline-result"><div class="result-label"><span data-i18n="pipeline.preview">加工预览</span><span class="result-badge" data-i18n="pipeline.previewActive">已生效</span></div><code id="preview-code">暂无日志数据</code></div>
-              </section>
-              <section class="node-detail-panel panel" id="node-detail-panel">
-                <div class="panel-heading compact-heading"><div><div class="section-kicker">SELECTED NODE</div><h2 data-i18n="rules.nodeStatus">节点状态</h2></div><span class="healthy-badge" id="detail-node-status"><i></i></span></div>
-                <div class="selected-node-row"><span class="node-avatar logo-avatar" aria-hidden="true"><img src="favicon.png" alt="" /></span><div><strong id="detail-node-name" data-i18n="nodeDetail.noSelection">未选择节点</strong><span id="detail-node-url" data-i18n="nodeDetail.noConnection">暂无连接</span></div><div class="selected-node-actions"><button class="secondary-button compact-button" id="edit-node-button" type="button" data-i18n="nodeDetail.edit">编辑</button><button class="danger-button compact-button" id="unbind-node-button" type="button" data-i18n="nodeDetail.unbind">解绑</button></div></div>
-                <div class="detail-stats"><div><span data-i18n="nodeDetail.latency">延迟</span><strong id="detail-latency">—</strong></div><div><span data-i18n="nodeDetail.containers">容器</span><strong id="detail-containers">—</strong></div><div><span data-i18n="nodeDetail.version">版本</span><strong id="detail-version">—</strong></div></div>
-                <div class="last-heartbeat"><span class="heartbeat-bars"><i></i><i></i><i></i><i></i><i></i></span><span id="detail-heartbeat" data-i18n="nodeDetail.noHeartbeat">暂无心跳数据</span></div>
-              </section>
-            </aside>
           </section>
         </div>
 
@@ -281,18 +279,19 @@
             <button class="primary-button" id="rules-add-rule" type="button"><span>＋</span> <span data-i18n="rules.addRule">添加加工规则</span></button>
           </section>
           <section class="rules-overview panel">
-            <div class="panel-heading compact-heading"><div><div class="section-kicker">RULE PIPELINE</div><h2 data-i18n="rules.currentRules">当前规则</h2></div><span class="healthy-badge"><i></i> <span data-i18n="rules.liveApplied">实时生效</span></span></div>
-            <div class="rule-settings-list">
-              <article class="rule-setting" data-rule-card="mask"><div class="rule-icon orange">✦</div><div class="rule-setting-copy"><strong data-i18n="rules.mask">敏感信息脱敏</strong><span data-i18n="rules.maskBody">隐藏 IP、Token、邮箱、用户标识等敏感字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="mask" data-i18n-aria-label="pipeline.toggleMask" aria-label="切换敏感信息脱敏"></button></article>
-              <article class="rule-setting" data-rule-card="structure"><div class="rule-icon teal">⌘</div><div class="rule-setting-copy"><strong data-i18n="rules.structure">提取结构化字段</strong><span data-i18n="rules.structureBody">从日志中提取 level、service、trace_id 等字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="structure" data-i18n-aria-label="pipeline.toggleStructure" aria-label="切换提取结构化字段"></button></article>
-              <article class="rule-setting" data-rule-card="noise"><div class="rule-icon muted">∿</div><div class="rule-setting-copy"><strong data-i18n="rules.noise">过滤健康检查</strong><span data-i18n="rules.noiseBody">忽略 /healthz 等周期性探活请求，减少日志噪声。</span></div><button class="toggle rule-toggle" data-rule-toggle="noise" data-i18n-aria-label="pipeline.toggleNoise" aria-label="切换过滤健康检查"></button></article>
+            <div class="panel-heading compact-heading"><div><div class="section-kicker">RULE PIPELINE</div><h2 data-i18n="rules.currentRules">当前规则</h2></div><div class="panel-heading-actions"><span class="healthy-badge"><i></i> <span data-i18n="rules.liveApplied">实时生效</span></span><div class="pipeline-actions" id="pipeline-actions"><button class="more-button" id="pipeline-more-button" type="button" data-i18n-aria-label="pipeline.more" aria-label="更多加工操作">•••</button><div class="pipeline-menu hidden" id="pipeline-menu"><button type="button" data-pipeline-action="enable-all" data-i18n="pipeline.enableAll">启用全部规则</button><button type="button" data-pipeline-action="disable-all" data-i18n="pipeline.disableAll">停用全部规则</button><button type="button" data-pipeline-action="reset" data-i18n="pipeline.reset">恢复默认设置</button></div></div></div></div>
+            <div class="rule-settings-list pipeline-list">
+              <article class="rule-setting pipeline-item" data-rule-card="mask" data-rule="mask"><span class="drag-handle">⁙</span><div class="rule-icon orange">✦</div><div class="rule-setting-copy"><strong data-i18n="rules.mask">敏感信息脱敏</strong><span data-i18n="rules.maskBody">隐藏 IP、Token、邮箱、用户标识等敏感字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="mask" data-i18n-aria-label="pipeline.toggleMask" aria-label="切换敏感信息脱敏"></button></article>
+              <article class="rule-setting pipeline-item" data-rule-card="structure" data-rule="structure"><span class="drag-handle">⁙</span><div class="rule-icon teal">⌘</div><div class="rule-setting-copy"><strong data-i18n="rules.structure">提取结构化字段</strong><span data-i18n="rules.structureBody">从日志中提取 level、service、trace_id 等字段。</span></div><button class="toggle rule-toggle active" data-rule-toggle="structure" data-i18n-aria-label="pipeline.toggleStructure" aria-label="切换提取结构化字段"></button></article>
+              <article class="rule-setting pipeline-item" data-rule-card="noise" data-rule="noise"><span class="drag-handle">⁙</span><div class="rule-icon muted">∿</div><div class="rule-setting-copy"><strong data-i18n="rules.noise">过滤健康检查</strong><span data-i18n="rules.noiseBody">忽略 /healthz 等周期性探活请求，减少日志噪声。</span></div><button class="toggle rule-toggle" data-rule-toggle="noise" data-i18n-aria-label="pipeline.toggleNoise" aria-label="切换过滤健康检查"></button></article>
             </div>
+            <div class="pipeline-result"><div class="result-label"><span data-i18n="pipeline.preview">加工预览</span><span class="result-badge" data-i18n="pipeline.previewActive">已生效</span></div><code id="preview-code">暂无日志数据</code></div>
           </section>
           <section class="rule-note panel"><strong data-i18n="rules.noteTitle">处理顺序</strong><span id="rule-order-summary" data-i18n="rules.order">日志接收 → 敏感信息脱敏 → 结构化字段提取 → 健康检查过滤 → 日志缓存</span></section>
         </div>
 
         <div class="page-content page-view hidden" id="commands-view">
-          <section class="page-intro"><div><div class="eyebrow"><span class="eyebrow-line"></span> SERVER COMMANDS</div><h1 data-i18n="commands.title">服务器指令</h1><p data-i18n="commands.subtitle">编排服务器操作步骤，按顺序逐行执行并保留每一步结果。</p></div><div class="intro-actions command-intro-actions"><button class="primary-button" id="commands-add-server" type="button"><span>＋</span> <span data-i18n="commands.addServer">新增服务器</span></button><span class="sync-time"><span class="status-dot"></span> <span id="commands-run-status" data-i18n="commands.ready">就绪</span></span><input id="commands-file-input" type="file" accept=".txt,.sh,.bash,.command,.log" hidden /></div></section>
+          <section class="page-intro"><div><div class="eyebrow"><span class="eyebrow-line"></span> SERVER COMMANDS</div><h1 data-i18n="commands.title">服务器指令</h1><p data-i18n="commands.subtitle">编排服务器操作步骤，按顺序逐行执行并保留每一步结果。</p></div><div class="intro-actions command-intro-actions"><span class="sync-time"><span class="status-dot"></span> <span id="commands-run-status" data-i18n="commands.ready">就绪</span></span><input id="commands-file-input" type="file" accept=".txt,.sh,.bash,.command,.log" hidden /></div></section>
           <section class="commands-columns">
             <div class="commands-board panel commands-column-center" id="commands-board"><aside class="command-groups-drawer" id="command-groups-drawer"><button class="command-groups-rail" id="command-groups-open" type="button" aria-expanded="false" data-i18n-title="commands.groups.open" title="展开指令集组"><span class="command-groups-rail-icon">»</span><span class="command-groups-rail-label" data-i18n="commands.groups.title">指令集组</span><b id="command-groups-rail-count">0</b></button><div class="command-groups-panel"><div class="command-groups-heading"><div><div class="section-kicker">FLOW GROUPS</div><h3 data-i18n="commands.groups.title">指令集组</h3></div><div class="command-groups-heading-actions"><button class="secondary-button compact-button" id="command-groups-add" type="button"><span>＋</span> <span data-i18n="commands.groups.add">新增组</span></button><button class="command-groups-close" id="command-groups-close" type="button" data-i18n-title="commands.groups.close" title="收起指令集组" data-i18n-aria-label="commands.groups.close" aria-label="收起指令集组">«</button></div></div><div class="command-groups-list" id="command-groups-list"></div><input id="command-group-file-input" type="file" hidden /></div></aside><div class="commands-board-main"><div class="panel-heading compact-heading"><div><div class="section-kicker">COMMAND FLOWS</div><h2 data-i18n="commands.flows">指令集</h2></div><div class="command-board-actions"><button class="command-parallel-toggle" id="commands-parallel" type="button" aria-pressed="true" data-i18n-title="commands.parallelHint" title="开启后，「运行全部」会同时启动所有指令集；关闭后按顺序逐个运行，遇到失败即停止"><i aria-hidden="true"></i><span data-i18n="commands.parallel">并行</span></button><button class="secondary-button compact-button command-board-utility" id="commands-run-all" type="button"><span>▶</span> <span data-i18n="commands.runAll">运行全部</span></button><button class="command-favorite-button" id="commands-favorite" type="button" data-i18n-aria-label="commands.favorite" aria-label="收藏指令集组" data-i18n-title="commands.favorite" title="收藏指令集组"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" /></svg></button><button class="primary-button compact-button" id="commands-add-flow" type="button"><span>＋</span> <span data-i18n="commands.addFlow">新增指令集</span></button></div></div><div class="commands-flow-list" id="commands-flow-list"></div><div class="commands-board-footer"><span data-i18n="commands.flowFooter">拖动左侧手柄调整顺序，将上方服务器拖到绑定槽；选中后 Ctrl+C / Ctrl+V 复制</span><span id="commands-flow-count" data-i18n="commands.flowCountZero">0 个</span></div></div></div>
             <aside class="commands-editor panel commands-column-right" id="commands-editor"><div class="panel-heading compact-heading"><div><div class="section-kicker">FLOW EDITOR</div><h2 id="commands-editor-title" data-i18n="commands.editor">运行指令</h2></div><div class="command-editor-actions"><button class="secondary-button compact-button command-editor-utility" id="commands-import-button" type="button"><span>⇧</span> <span data-i18n="commands.import">导入指令</span></button><button class="text-button" id="commands-duplicate" type="button" data-i18n="commands.duplicate">复制</button><button class="danger-button" id="commands-delete" type="button" data-i18n="commands.delete">删除</button></div></div><div class="command-flow-meta"><label><span data-i18n="commands.flowName">指令集名称</span><input id="command-flow-name" type="text" data-i18n-placeholder="commands.flowNamePlaceholder" placeholder="例如：发布前检查" /></label></div><div class="command-editor-body"><div class="command-editor-divider"><span data-i18n="commands.runLines">运行指令</span><button class="secondary-button compact-button" id="commands-add-line" type="button"><span>＋</span> <span data-i18n="commands.addLine">添加一行</span></button></div><div class="command-lines" id="command-lines"></div><div class="command-error hidden" id="command-error"><strong data-i18n="commands.runFailed">执行失败</strong><span id="command-error-text"></span><button class="command-error-unrestrict hidden" id="command-error-unrestrict" type="button" data-i18n="commands.allowAndContinue">允许此服务器执行任意命令并继续</button></div></div><div class="command-editor-footer"><span id="command-progress" data-i18n="commands.notRunYet">尚未运行</span><button class="secondary-button command-pause-button hidden" id="commands-pause" type="button"><span>❚❚</span> <span id="commands-pause-label" data-i18n="commands.pause">暂停</span></button><button class="primary-button" id="commands-run-current" type="button"><span>▶</span> <span id="commands-run-current-label" data-i18n="commands.runFromHere">从当前行运行</span></button></div></aside>
@@ -344,7 +343,8 @@
                     <button class="secondary-button compact-button" id="term-up" type="button" data-i18n="terminal.file.up">上级目录</button>
                     <button class="secondary-button compact-button" id="term-mkdir" type="button" data-i18n="terminal.file.mkdir">新建文件夹</button>
                     <button class="secondary-button compact-button" id="term-rename" type="button" data-i18n="terminal.file.rename">重命名</button>
-                    <button class="secondary-button compact-button" id="term-upload" type="button" data-i18n="terminal.file.upload">上传</button>
+                    <button class="secondary-button compact-button" id="term-upload" type="button" data-i18n="terminal.file.upload">上传文件</button>
+                    <button class="secondary-button compact-button" id="term-upload-folder" type="button" data-i18n="terminal.file.uploadFolder">上传文件夹</button>
                     <button class="secondary-button compact-button" id="term-download" type="button" data-i18n="terminal.file.download">下载</button>
                     <button class="danger-button compact-button" id="term-delete" type="button" data-i18n="terminal.file.delete">删除</button>
                   </div>
@@ -355,7 +355,7 @@
                         <thead><tr><th data-i18n="terminal.file.name">文件名</th><th data-i18n="terminal.file.size">大小</th><th data-i18n="terminal.file.type">类型</th><th data-i18n="terminal.file.modified">修改时间</th><th data-i18n="terminal.file.perms">权限</th><th data-i18n="terminal.file.owner">用户/用户组</th></tr></thead>
                         <tbody id="term-file-rows"></tbody>
                       </table>
-                      <div class="term-drop-hint" data-i18n="terminal.file.dropHint">松开鼠标，上传到当前文件夹</div>
+                      <div class="term-drop-hint" data-i18n="terminal.file.dropHint">将文件或文件夹拖到这里，上传到当前目录</div>
                     </div>
                   </div>
                   <div class="term-status" id="term-status"></div>
@@ -364,6 +364,57 @@
               </section>
             </div>
             <input id="term-upload-input" type="file" multiple hidden />
+            <input id="term-upload-folder-input" type="file" webkitdirectory directory multiple hidden />
+          </div>
+        </div>
+
+        <div class="page-content page-view hidden" id="database-view">
+          <header class="db-toolbar"><div><h1 data-i18n="nav.database">数据库</h1><p data-i18n="db.subtitle">连接多个数据库，用一条 SQL 汇总查询结果。</p></div><div class="db-actions"><button class="secondary-button" id="db-new-connection" type="button" data-i18n="db.newConnection">新建连接…</button><button class="primary-button" id="db-new-query" type="button" data-i18n="db.newQuery">SQL / 跨库查询</button></div></header>
+          <div class="db-workspace">
+            <div class="db-target-picker hidden" id="db-target-picker" role="dialog" aria-labelledby="db-target-picker-title"><div class="db-target-picker-heading"><strong id="db-target-picker-title" data-i18n="db.chooseTargets">选择目标数据库</strong><button class="text-button" id="db-target-picker-clear" type="button" data-i18n="db.clearTargets">清空勾选</button><button class="text-button" id="db-target-picker-close" type="button" aria-label="Close">×</button></div><input id="db-target-search" class="db-target-search" type="search" autocomplete="off" data-i18n-placeholder="db.searchTargets" placeholder="搜索连接或数据库"/><div class="db-target-tree" id="db-target-tree"></div><div class="db-target-picker-status" id="db-target-picker-status" role="status"></div></div>
+            <aside class="db-browser panel"><div class="db-tree-heading"><strong data-i18n="db.connections">连接与结构</strong><button class="text-button" id="db-tree-create-table" type="button" data-i18n-title="db.createTable" title="新建表">＋</button><button class="text-button" id="db-refresh-tree" type="button" data-i18n="db.refresh">刷新</button></div><div class="db-tree" id="db-tree"></div></aside>
+            <section class="db-content panel">
+              <div class="db-workspace-tabbar db-sql-tabbar"><span class="db-tabbar-label">SQL</span><div id="db-sql-tabs" class="db-session-tabs" role="tablist" aria-label="SQL tabs"></div><button id="db-add-sql-tab" class="text-button db-add-tab" type="button" data-i18n-title="db.addSqlTab" title="新建 SQL 页签">＋</button></div>
+              <div class="db-sql-pane" id="db-panel-sql">
+                <div class="db-query-target-row"><div class="db-sql-targets" id="db-sql-targets"><button class="db-target-select" id="db-target-select" type="button" aria-expanded="false" aria-haspopup="dialog" aria-controls="db-target-picker"><strong id="db-target-count"></strong><span id="db-target-summary"></span><span aria-hidden="true">▾</span></button></div><label class="db-single-target"><span data-i18n="db.singleTarget">单库目标</span><select id="db-single-target"></select></label></div>
+                <div class="db-actions"><button class="primary-button compact-button" id="db-run-query" type="button" data-i18n="db.runQuery">执行 SQL · Ctrl+Enter</button><button class="secondary-button compact-button" id="db-execute" type="button" data-i18n="db.execute">执行语句（单库）</button><button class="danger-button compact-button" id="db-cancel-query" type="button" disabled data-i18n="db.cancel">取消</button><select id="db-query-limit" aria-label="Rows per database"><option value="100">100 / DB</option><option value="500" selected>500 / DB</option><option value="1000">1000 / DB</option><option value="2500">2500 / DB</option></select><button class="text-button" id="db-clear-targets" type="button" data-i18n="db.clearTargets">清空勾选</button><button class="text-button" id="db-export-query" type="button" data-i18n="db.exportCsv">导出 CSV</button><button class="secondary-button compact-button db-template-toggle" id="db-toggle-templates" type="button" aria-expanded="false" aria-controls="db-template-panel" data-i18n="db.templates">模板语句</button></div>
+                <div class="db-sql-workspace">
+                  <div class="db-sql-main">
+                    <div class="db-sql-editor" id="db-sql-editor"></div>
+
+                  </div>
+
+                </div>
+              </div>
+
+              <div class="db-workspace-tabbar db-table-tabbar"><span class="db-tabbar-label" data-i18n="db.tableTabs">表 / 结果</span><div id="db-table-tabs" class="db-session-tabs" role="tablist" aria-label="Tables and results"></div></div>
+              <div class="db-object-header"><strong class="db-object-title" id="db-object-title" data-i18n="db.chooseObject">选择数据表，或勾选多个库查询</strong><span class="db-hint" id="db-engine-label"></span></div>
+              <nav class="db-tabs hidden" id="db-table-subtabs"><button type="button" class="active" data-db-tab="data" data-i18n="db.data">数据</button><button type="button" data-db-tab="structure" data-i18n="db.structure">结构</button></nav>
+              <div class="db-panel" id="db-panel-data">
+                <div class="db-actions"><button class="secondary-button compact-button" id="db-add-row" type="button" data-i18n="db.addRow">新增行</button><button class="danger-button compact-button" id="db-delete-row" type="button" data-i18n="db.deleteRows">删除选中行</button><button class="primary-button compact-button" id="db-save-rows" type="button" disabled data-i18n="db.saveRows">保存修改</button><button class="secondary-button compact-button" id="db-reload-table" type="button" data-i18n="db.reload">重新加载</button><span class="db-hint" data-i18n="db.editHint">双击编辑，右键可设为 NULL；保存后写入数据库。</span></div>
+                <div class="db-grid" id="db-data-grid"></div>
+                <footer class="db-footer"><span id="db-data-count"></span><div class="db-actions"><button class="secondary-button compact-button" id="db-page-prev" type="button" data-i18n="db.previous">上一页</button><span id="db-page-label"></span><button class="secondary-button compact-button" id="db-page-next" type="button" data-i18n="db.next">下一页</button><select id="db-page-size" aria-label="Page size"><option>100</option><option>250</option><option>500</option><option>1000</option></select></div></footer>
+              </div>
+              <div class="db-panel hidden" id="db-panel-structure">
+                <div class="db-actions"><button class="primary-button compact-button" id="db-create-table" type="button" data-i18n="db.createTable">新建表</button><button class="secondary-button compact-button" id="db-add-column" type="button" data-i18n="db.addColumn">添加字段</button><button class="secondary-button compact-button" id="db-alter-column" type="button" data-i18n="db.alterColumn">修改字段</button><button class="secondary-button compact-button" id="db-create-index" type="button" data-i18n="db.createIndex">新增索引</button><button class="danger-button compact-button" id="db-drop-index" type="button" data-i18n="db.dropIndex">删除索引</button></div>
+                <h3 class="db-structure-title" data-i18n="db.columns">字段（选中后可修改）</h3><div class="db-grid" id="db-structure-grid"></div>
+                <h3 class="db-structure-title" data-i18n="db.indexes">索引</h3><div class="db-grid" id="db-index-grid"></div>
+              </div>
+
+              <div class="db-panel hidden" id="db-panel-result">
+                    <div class="db-query-summary" id="db-query-summary"><span data-i18n="db.queryHint">勾选左侧数据库，同一条 SQL 分别执行，按列名对齐并合并结果。</span></div>
+                    <div class="db-grid" id="db-query-grid"></div>
+              </div>
+              <div class="db-table-empty" id="db-table-empty" data-i18n="db.emptyWorkspace">打开左侧数据表，或在上方执行 SQL 查询。</div>
+              <div class="db-status" id="db-status" role="status" aria-live="polite"></div>
+            </section>
+                  <aside class="db-template-panel hidden" id="db-template-panel" role="dialog" aria-labelledby="db-template-title">
+                    <div class="db-template-heading"><strong id="db-template-title" data-i18n="db.templates">模板语句</strong><button class="text-button" id="db-close-templates" type="button" aria-label="Close">×</button></div>
+                    <p class="db-template-hint" data-i18n="db.templateHint">选择表和字段，点击模板填入编辑区，可继续修改。</p>
+                    <div class="db-template-list" id="db-template-list"></div>
+                    <p class="db-template-hint" data-i18n="db.templateWriteHint">模板会替换编辑区内容；写入模板中的值和 WHERE 条件需自行修改。</p>
+                  </aside>
+            <div class="db-inline-picker hidden" id="db-inline-picker" role="dialog" aria-labelledby="db-inline-title"><div class="db-template-heading"><strong id="db-inline-title"></strong><button class="text-button" type="button" id="db-inline-close" aria-label="Close">×</button></div><div id="db-inline-body"></div><div class="db-template-status" id="db-inline-status" role="status"></div><div class="db-inline-actions"><button class="primary-button compact-button" type="button" id="db-inline-apply" data-i18n="db.applyInline">填入 SQL</button></div></div>
           </div>
         </div>
 
@@ -381,17 +432,60 @@
       </main>
     </div>
 
+    <div class="modal-backdrop hidden" id="db-connection-modal" role="dialog" aria-modal="true" aria-labelledby="db-connection-title">
+      <div class="modal-card db-dialog"><div class="modal-header"><div><div class="section-kicker">DATABASE CONNECTION</div><h2 id="db-connection-title" data-i18n="db.connection">数据库连接</h2></div><button class="close-button" type="button" data-db-close="connection">×</button></div>
+        <form id="db-connection-form">
+          <div class="form-grid"><label><span data-i18n="db.connectionName">连接名称</span><input name="name" required autocomplete="off" /></label><label><span data-i18n="db.engine">数据库类型</span><select name="engine"><option value="mysql">MySQL / MariaDB</option><option value="postgres">PostgreSQL</option><option value="sqlite">SQLite</option></select></label></div>
+          <div class="form-grid db-connection-network"><label><span data-i18n="db.host">主机</span><input name="host" value="127.0.0.1" /></label><label><span data-i18n="db.port">端口</span><input name="port" type="number" min="1" max="65535" value="3306" /></label><label><span data-i18n="db.user">用户名</span><input name="user" autocomplete="off" /></label><label><span data-i18n="db.password">密码（留空保留已保存密码）</span><input name="password" type="password" autocomplete="new-password" /></label><label><span data-i18n="db.defaultDatabase">默认数据库（可留空）</span><input name="database" /></label><label><span>TLS</span><select name="tls"><option value="disable" data-i18n="db.tlsDisable">不启用</option><option value="require" data-i18n="db.tlsRequire">加密连接</option><option value="verify-full" data-i18n="db.tlsVerify">加密并验证证书</option></select></label></div>
+          <label class="hidden" id="db-sqlite-path"><span data-i18n="db.sqliteFile">SQLite 文件绝对路径（不存在时创建）</span><input name="file" placeholder="D:\data\app.db" /></label>
+          <div class="db-dialog-status" id="db-connection-status" role="status"></div>
+          <div class="modal-actions"><button class="danger-button db-delete-connection" type="button" id="db-delete-connection" data-i18n="db.deleteConnection">删除连接</button><button class="secondary-button" type="button" id="db-test-connection" data-i18n="db.testConnection">测试连接</button><button class="secondary-button" type="button" data-db-close="connection" data-i18n="db.cancel">取消</button><button class="primary-button" type="submit" data-i18n="db.save">保存</button></div>
+        </form>
+      </div>
+    </div>
+    <div class="modal-backdrop hidden" id="db-schema-modal" role="dialog" aria-modal="true" aria-labelledby="db-schema-title">
+      <div class="modal-card db-dialog"><div class="modal-header"><div><div class="section-kicker">SCHEMA DESIGNER</div><h2 id="db-schema-title" data-i18n="db.designer">结构设计器</h2></div><button class="close-button" type="button" data-db-close="schema">×</button></div>
+        <form id="db-schema-form"><div class="form-grid"><label><span data-i18n="db.operation">操作</span><select name="action"><option value="createTable" data-i18n="db.createTable">新建表</option><option value="addColumn" data-i18n="db.addColumn">添加字段</option><option value="alterColumn" data-i18n="db.alterColumn">修改字段</option><option value="renameColumn" data-i18n="db.renameColumn">重命名字段</option><option value="dropColumn" data-i18n="db.dropColumn">删除字段</option><option value="createIndex" data-i18n="db.createIndex">新增索引</option><option value="dropIndex" data-i18n="db.dropIndex">删除索引</option><option value="renameTable" data-i18n="db.renameTable">重命名表</option><option value="dropTable" data-i18n="db.dropTable">删除表</option></select></label><label><span data-i18n="db.currentObject">当前对象</span><input id="db-schema-target" readonly /></label></div>
+          <div id="db-schema-fields"></div><pre class="db-schema-preview hidden" id="db-schema-preview"></pre><div class="db-dialog-status" id="db-schema-status" role="status"></div>
+          <div class="modal-actions"><button class="secondary-button" type="button" data-db-close="schema" data-i18n="db.cancel">取消</button><button class="secondary-button" type="submit" data-i18n="db.previewSql">预览 SQL</button><button class="primary-button" type="button" id="db-apply-schema" disabled data-i18n="db.applySchema">应用结构变更</button></div>
+        </form>
+      </div>
+    </div>
+
     <div class="modal-backdrop hidden" id="add-node-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <div class="modal-card">
+      <div class="modal-card node-settings-card">
         <div class="modal-header"><div><div class="section-kicker" id="modal-kicker">NEW CONNECTION</div><h2 id="modal-title" data-i18n="modal.addNodeTitle">添加 Dozzle 节点</h2></div><button class="close-button" data-close-modal>×</button></div>
         <p class="modal-description" data-i18n="modal.addNodeDescription">录入一个 Dozzle 实例后，日志流会自动纳入统一视图。</p>
+        <div class="node-settings-layout">
+          <aside class="node-manager-sidebar">
+            <div class="node-manager-heading"><strong data-i18n="modal.allNodes">全部节点</strong><span id="node-manager-count">0</span></div>
+            <div class="node-manager-list" id="node-manager-list"></div>
+            <button class="secondary-button" id="node-manager-add" type="button" data-i18n="sidebar.addNode">添加 Dozzle 节点</button>
+          </aside>
         <form id="add-node-form">
           <label><span data-i18n="modal.nodeName">节点名称</span><input name="name" required data-i18n-placeholder="modal.nodeNamePlaceholder" placeholder="例如：预发集群" /></label>
           <label><span data-i18n="modal.nodeUrl">Dozzle 地址</span><input name="url" type="url" required placeholder="https://logs.staging.internal" /></label>
           <div class="form-grid"><label><span data-i18n="modal.protocol">连接方式</span><select name="protocol"><option>HTTP / WebSocket</option><option>HTTPS / WebSocket</option><option>HTTP / SSE</option><option>HTTPS / SSE</option></select></label><label><span data-i18n="modal.interval">刷新频率</span><select name="interval"><option data-i18n="modal.intervalRealtime">实时</option></select></label></div>
           <div class="form-note"><span>⌁</span> <span data-i18n="modal.nodeNote">服务端会连接 Dozzle 并读取容器日志；节点配置会保存到数据库。</span></div>
-          <div class="modal-actions"><button type="button" class="secondary-button" data-close-modal data-i18n="modal.cancel">取消</button><button class="primary-button" id="node-submit-button" type="submit" data-i18n="modal.connectAndAdd">连接并添加</button></div>
+          <div class="modal-actions"><button type="button" class="danger-button" id="node-unbind-button" data-i18n="connections.unbind" disabled>解绑节点</button><button type="button" class="secondary-button" data-close-modal data-i18n="modal.cancel">取消</button><button class="primary-button" id="node-submit-button" type="submit" data-i18n="modal.connectAndAdd">连接并添加</button></div>
         </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="server-settings-modal" role="dialog" aria-modal="true" aria-labelledby="server-settings-title">
+      <div class="modal-card server-settings-card">
+        <div class="modal-header"><div><div class="section-kicker">SERVER MANAGEMENT</div><h2 id="server-settings-title" data-i18n="servers.title">管理服务器</h2></div><button class="close-button" type="button" data-close-server-settings aria-label="关闭" data-i18n-aria-label="favorites.close">×</button></div>
+        <p class="modal-description" data-i18n="servers.description">从左侧选择服务器，修改后自动保存。</p>
+        <div class="server-settings-layout">
+          <aside class="server-manager-sidebar">
+            <div class="server-manager-heading"><strong data-i18n="servers.allServers">全部服务器</strong><span id="server-manager-count">0</span></div>
+            <div class="server-manager-list" id="server-manager-list"></div>
+            <button class="secondary-button" id="server-manager-add" type="button" data-i18n="commands.addServer">新增服务器</button>
+          </aside>
+          <div class="server-manager-editor" id="server-manager-editor"></div>
+        </div>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-server-settings data-i18n="favorites.close">关闭</button></div>
       </div>
     </div>
 
@@ -480,6 +574,8 @@
     <script src="i18n.js?v=group-run-buttons-4"></script>
     <script src="app.js?v=group-run-buttons-72"></script>
     <script src="assistant-ui.js?v=modal-dismiss-3"></script>
+    <script src="third_party/database/database-vendor.js"></script>
+    <script src="database.js?v=1"></script>
     <script src="bootstrap.js?v=admin-token-deadlock-4"></script>
     <script src="menubar.js?v=1"></script>
     <script src="third_party/xterm/xterm.js"></script>

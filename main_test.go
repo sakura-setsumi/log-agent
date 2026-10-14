@@ -1565,6 +1565,8 @@ func TestConfigInfoHidesFileAccessFromRemoteCaller(t *testing.T) {
 func TestAIProfileWriteNeedsNoTokenWhenNoneConfigured(t *testing.T) {
 	configRoot := t.TempDir()
 	t.Setenv("LOG_AGENT_CONFIG_DIR", configRoot)
+	t.Setenv("LOG_AGENT_SETTINGS_FILE", filepath.Join(configRoot, "settings.json"))
+	t.Setenv("LOG_AGENT_ADMIN_TOKEN", "")
 	resetConfigDirCache(t)
 
 	s := newServer()

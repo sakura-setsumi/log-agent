@@ -286,7 +286,7 @@ function dropContainersFromScope(keys) {
   loadedContainerSelectionKey = '';
   state.selectedLog = 0;
   resetLogPagination();
-  updateDetailPanel();
+  renderNodeManagerList();
   renderLogs();
   persistSelection();
   loadSelectedContainerLogs();
@@ -2084,7 +2084,7 @@ function setMultiSelect(enabled) {
     state.selectedLog = 0;
     resetLogPagination();
     renderNodes();
-    updateDetailPanel();
+    renderNodeManagerList();
     renderLogs();
     loadSelectedContainerLogs();
   }
@@ -2190,7 +2190,7 @@ function renderNodes() {
     state.selectedLog = 0;
     resetLogPagination();
     renderNodes();
-    updateDetailPanel();
+    renderNodeManagerList();
     renderLogs();
     persistSelection();
     const nodeName = getNode(nodeId)?.name || t('common.node');
@@ -2237,7 +2237,7 @@ function renderNodes() {
     state.selectedLog = 0;
     resetLogPagination();
     renderNodes();
-    updateDetailPanel();
+    renderNodeManagerList();
     renderLogs();
     persistSelection();
     loadSelectedContainerLogs();
@@ -2537,47 +2537,24 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   syncLogFlowVisibility(stream);
 }
 
-function updateDetailPanel() {
-  if (!$('#node-detail-panel')) return;
-  const detailNodeId = state.selectedNodes.length ? state.selectedNodes[0] : nodes[0]?.id;
-  const node = detailNodeId ? getNode(detailNodeId) : null;
-  const selectedNodeAvatar = $('.selected-node-row .node-avatar');
-  const unbindButton = $('#unbind-node-button');
-  const editButton = $('#edit-node-button');
-  if (!node) {
-    $('#detail-node-name').textContent = t('nodeDetail.noSelection');
-    $('#detail-node-url').textContent = t('nodeDetail.noConnection');
-    selectedNodeAvatar.classList.remove('orange-bg');
-    selectedNodeAvatar.style.background = '';
-    $('#detail-latency').textContent = '—';
-    $('#detail-containers').textContent = '—';
-    $('#detail-version').textContent = '—';
-    $('#detail-heartbeat').textContent = t('nodeDetail.noHeartbeat');
-    $('#detail-node-status').className = 'healthy-badge status-offline';
-    $('#detail-node-status').innerHTML = '<i></i>';
-    $('#detail-node-status').title = t('stream.status.disconnected');
-    unbindButton.disabled = true;
-    delete unbindButton.dataset.nodeId;
-    editButton.disabled = true;
-    delete editButton.dataset.nodeId;
+function renderNodeManagerList() {
+  const modal = $('#add-node-modal');
+  if (!modal || modal.classList.contains('hidden') || modal.dataset.manage !== 'true') return;
+  const nodeId = modal.dataset.nodeId;
+  if (nodeId && !getNode(nodeId)) {
+    openNodeModal(nodes[0] || null, { manage: true });
     return;
   }
-  $('#detail-node-name').textContent = node.name;
-  $('#detail-node-url').textContent = node.url;
-  selectedNodeAvatar.classList.remove('orange-bg');
-  selectedNodeAvatar.style.background = '';
-  $('#detail-node-status').className = `healthy-badge status-${nodeStatusClass(node)}`;
-  $('#detail-node-status').innerHTML = '<i></i>';
-  $('#detail-node-status').title = nodeStatusLabel(node);
-  $('#detail-node-status').setAttribute('aria-label', nodeStatusLabel(node));
-  unbindButton.disabled = false;
-  unbindButton.dataset.nodeId = node.id;
-  editButton.disabled = false;
-  editButton.dataset.nodeId = node.id;
-  $('#detail-latency').textContent = node.latency > 0 ? `${node.latency} ms` : '—';
-  $('#detail-containers').textContent = node.count ?? '—';
-  $('#detail-version').textContent = node.version || '—';
-  $('#detail-heartbeat').textContent = node.error || (node.status === 'connected' ? t('stream.waitingLogs') : t('connections.syncIdle'));
+  const list = $('#node-manager-list');
+  const renderKey = JSON.stringify([activeLanguage(), nodeId, nodes.map(({ id, name, url }) => [id, name, url])]);
+  if (list.dataset.renderKey === renderKey) return;
+  list.dataset.renderKey = renderKey;
+  $('#node-manager-count').textContent = String(nodes.length);
+  list.innerHTML = nodes.length ? nodes.map((node) => `
+    <button class="node-manager-item ${node.id === nodeId ? 'active' : ''}" type="button" data-manage-node-id="${escapeHtml(node.id)}" aria-pressed="${node.id === nodeId}">
+      <strong>${escapeHtml(node.name)}</strong><span title="${escapeHtml(node.url)}">${escapeHtml(node.url)}</span>
+    </button>
+  `).join('') : `<p class="node-manager-empty">${t('modal.noNodes')}</p>`;
 }
 
 function updatePreview() {
@@ -2680,7 +2657,7 @@ async function syncGoBackend({ connectStream = false, incremental = false } = {}
       renderLogs({ renderLimit });
     }
     if (updateLogView) scheduleInitialLogCompletion();
-    updateDetailPanel(); updatePreview();
+    renderNodeManagerList(); updatePreview();
     persistSelection();
     if (!state.paused && (connectStream || !eventStream || eventStream.readyState === EventSource.CLOSED)) connectGoStream();
     if (!state.paused && state.selectedContainers.length) loadSelectedContainerLogs();
@@ -2787,10 +2764,17 @@ function connectGoStream() {
   };
 }
 
-function openNodeModal(node = null) {
+function openNodeManager() {
+  openNodeModal(nodes[0] || null, { manage: true });
+}
+
+function openNodeModal(node = null, { manage = Boolean(node) } = {}) {
   const modal = $('#add-node-modal');
   const form = $('#add-node-form');
   modal.dataset.nodeId = node?.id || '';
+  modal.dataset.manage = String(manage);
+  modal.classList.toggle('node-management', manage);
+  $('#node-unbind-button').disabled = !node;
   form.elements.name.value = node?.name || '';
   form.elements.url.value = node?.url || '';
   form.elements.protocol.value = node?.style || 'HTTP / WebSocket';
@@ -2798,12 +2782,15 @@ function openNodeModal(node = null) {
   $('#modal-title').textContent = node ? t('modal.editNodeTitle') : t('modal.addNodeTitle');
   $('#node-submit-button').textContent = node ? t('modal.saveChanges') : t('modal.connectAndAdd');
   modal.classList.remove('hidden');
+  renderNodeManagerList();
 }
 
 function closeNodeModal() {
   const modal = $('#add-node-modal');
   modal.classList.add('hidden');
   delete modal.dataset.nodeId;
+  delete modal.dataset.manage;
+  modal.classList.remove('node-management');
   $('#add-node-form').reset();
   $('#modal-kicker').textContent = 'NEW CONNECTION';
   $('#modal-title').textContent = t('modal.addNodeTitle');
@@ -2919,7 +2906,7 @@ async function persistNodeToGo(name, url, style) {
     nodes.push(node);
     persistBrowserNodes();
     renderNodes();
-    updateDetailPanel();
+    renderNodeManagerList();
     showToast(t('modal.toast.addedToBrowser'));
     return node;
   }
@@ -2941,7 +2928,7 @@ async function persistNodeToGo(name, url, style) {
     const index = nodes.findIndex((item) => item.id === node.id);
     if (index === -1) nodes.push(node); else nodes[index] = node;
     renderNodes();
-    updateDetailPanel();
+    renderNodeManagerList();
     return node;
   } catch (error) {
     showToast(error.message === 'node already exists' ? t('modal.toast.nodeExists') : t('modal.toast.addFailed', { error: apiErrorMessage(error, error.message) }));
@@ -2956,7 +2943,7 @@ async function updateNodeToGo(id, name, url, style) {
     nodes[index] = { ...nodes[index], name, url, style: style || nodes[index].style, initial: String(name || '?').trim().charAt(0) || '?' };
     persistBrowserNodes();
     renderNodes();
-    updateDetailPanel();
+    renderNodeManagerList();
     showToast(t('modal.toast.nodeUpdated'));
     return nodes[index];
   }
@@ -2978,7 +2965,7 @@ async function updateNodeToGo(id, name, url, style) {
     const index = nodes.findIndex((item) => item.id === node.id);
     if (index >= 0) nodes[index] = node; else nodes.push(node);
     renderNodes();
-    updateDetailPanel();
+    renderNodeManagerList();
     showToast(t('modal.toast.nodeReconnecting'));
     return node;
   } catch (error) {
@@ -3000,7 +2987,7 @@ async function unbindNode(node) {
     persistBrowserNodes();
     renderNodes();
     renderLogs();
-    updateDetailPanel();
+    renderNodeManagerList();
     updatePreview();
     persistSelection();
     showToast(t('modal.toast.removedFromBrowser'));
@@ -3026,7 +3013,7 @@ async function unbindNode(node) {
     resetLogPagination();
     renderNodes();
     renderLogs();
-    updateDetailPanel();
+    renderNodeManagerList();
     updatePreview();
     persistSelection();
     showToast(t('modal.toast.unbound', { name: node.name }));
@@ -3043,6 +3030,7 @@ const commandGroupsStorageKey = 'log-agent-command-groups';
 const commandGroupsOpenStorageKey = 'log-agent-command-groups-open';
 const commandParallelStorageKey = 'log-agent-command-parallel';
 const commandLogsStorageKey = 'log-agent-command-logs';
+let commandDataLoadPromise = null;
 
 function commandDefaults() {
   return [{ id: `flow-${Date.now()}`, name: t('commands.defaultFlowName'), serverId: '', lines: [
@@ -3057,7 +3045,6 @@ function loadCommandFlows() {
   state.commandRuns = state.commandRuns || new Map();
   state.commandRunningGroups = state.commandRunningGroups || new Set();
   try { state.commandParallel = localStorage.getItem(commandParallelStorageKey) !== 'false'; } catch { state.commandParallel = true; }
-  state.expandedCommandServers = state.expandedCommandServers || new Set();
   try { state.commandGroupsOpen = localStorage.getItem(commandGroupsOpenStorageKey) === 'true'; } catch { state.commandGroupsOpen = false; }
   // The data itself arrives from loadCommandData(); until then the page shows
   // nothing rather than a stale copy.
@@ -3459,24 +3446,80 @@ function bindCommandDock() {
     if (event.key !== 'Escape' || !$('.command-dock-popup:not(.hidden)')) return;
     setCommandPopup('');
   });
-  // A new server is edited in the library, so show the library when adding one.
-  $('#commands-add-server')?.addEventListener('click', () => setCommandPopup('command-popup-servers'));
 }
 function renderCommandServers() {
   const list = $('#server-card-list');
   if (!list) return;
-  if (!state.commandServers.length) {
+  list.innerHTML = state.commandServers.length ? state.commandServers.map((server) => {
+    const status = ['success', 'failed'].includes(server.connectionStatus) ? server.connectionStatus : 'untested';
+    return `<article class="reusable-server-card server-library-card connection-${status}" draggable="${status === 'success'}" data-server-id="${escapeHtml(server.id)}">
+      <div class="reusable-server-heading"><span class="server-drag-handle">⁙</span><strong>${escapeHtml(server.name || server.host || t('commands.unnamedServer'))}</strong><button type="button" class="server-test-button" ${state.testingCommandServers?.has(server.id) ? 'disabled' : ''}>${t(state.testingCommandServers?.has(server.id) ? 'commands.testing' : status === 'success' ? 'nodeStatus.connected' : status === 'failed' ? 'commands.retry' : 'commands.testConnection')}</button></div>
+      <div class="server-library-address">${escapeHtml([server.user, server.host].filter(Boolean).join('@'))}:${escapeHtml(server.port || '22')}</div>
+      ${server.connectionError ? `<div class="server-library-error">${escapeHtml(server.connectionError)}</div>` : ''}
+    </article>`;
+  }).join('') : `<div class="server-library-empty">${t('commands.noServerYet')}</div>`;
+  list.querySelectorAll('.reusable-server-card').forEach((card) => {
+    card.addEventListener('dragstart', (event) => {
+      const server = commandServer(card.dataset.serverId);
+      if (server?.connectionStatus !== 'success') { event.preventDefault(); showToast(t('commands.pickKeyFirst')); return; }
+      const preview = document.createElement('div'); preview.className = 'server-drag-preview';
+      preview.innerHTML = `<span>⁙</span><strong>${escapeHtml(server.name || server.host || t('commands.unnamedServer'))}</strong>`;
+      document.body.appendChild(preview); event.dataTransfer.setDragImage(preview, 18, 17); setTimeout(() => preview.remove(), 0);
+      card.classList.add('dragging'); event.dataTransfer.setData('text/server-id', server.id); event.dataTransfer.effectAllowed = 'copy';
+    });
+    card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    card.querySelector('.server-test-button').addEventListener('click', (event) => testCommandServerConnection(card.dataset.serverId, event.currentTarget));
+  });
+  renderServerManagerList();
+}
+
+async function openServerManager(serverId = '') {
+  await commandDataLoadPromise;
+  state.managedCommandServerId = commandServer(serverId)?.id || commandServer(state.managedCommandServerId)?.id || state.commandServers[0]?.id || '';
+  setCommandPopup('');
+  $('#server-settings-modal').classList.remove('hidden');
+  renderServerManagerList();
+  renderCommandServerEditor();
+}
+
+function closeServerManager() {
+  $('#server-settings-modal').classList.add('hidden');
+}
+
+async function addCommandServer() {
+  await commandDataLoadPromise;
+  const server = { id: `server-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: t('commands.newServerName', { index: state.commandServers.length + 1 }), host: '', port: '22', user: '', auth: 'key', secret: '', connectionStatus: 'untested', connectionError: '' };
+  state.commandServers.push(server);
+  saveCommandFlows(); renderCommandServers();
+  if (typeof renderTerminalView === 'function') renderTerminalView();
+  await openServerManager(server.id);
+}
+
+function renderServerManagerList() {
+  const modal = $('#server-settings-modal');
+  if (!modal || modal.classList.contains('hidden')) return;
+  if (!commandServer(state.managedCommandServerId)) state.managedCommandServerId = state.commandServers[0]?.id || '';
+  const list = $('#server-manager-list');
+  const key = JSON.stringify([activeLanguage(), state.managedCommandServerId, state.commandServers.map(({ id, name, host, port }) => [id, name, host, port])]);
+  if (list.dataset.renderKey === key) return;
+  list.dataset.renderKey = key;
+  $('#server-manager-count').textContent = String(state.commandServers.length);
+  list.innerHTML = state.commandServers.length ? state.commandServers.map((server) => `<button class="server-manager-item ${server.id === state.managedCommandServerId ? 'active' : ''}" type="button" data-manage-server-id="${escapeHtml(server.id)}" aria-pressed="${server.id === state.managedCommandServerId}"><strong>${escapeHtml(server.name || t('commands.unnamedServer'))}</strong><span>${escapeHtml(server.host || '—')}:${escapeHtml(server.port || '22')}</span></button>`).join('') : `<p class="server-manager-empty">${t('commands.noServerYet')}</p>`;
+}
+
+function renderCommandServerEditor() {
+  const list = $('#server-manager-editor');
+  const servers = [commandServer(state.managedCommandServerId)].filter(Boolean);
+  if (!list) return;
+  if (!servers.length) {
     list.innerHTML = `<div class="server-library-empty">${t('commands.noServerYet')}</div>`;
     return;
   }
-  list.innerHTML = state.commandServers.map((server) => {
+  list.innerHTML = servers.map((server) => {
     const connectionStatus = ['success', 'failed'].includes(server.connectionStatus) ? server.connectionStatus : 'untested';
-    // Connected servers fold down to their heading row until expanded.
-    const collapsible = connectionStatus === 'success';
-    const collapsed = collapsible && !state.expandedCommandServers.has(server.id);
     return `
-    <article class="reusable-server-card connection-${connectionStatus}${server.unrestricted ? ' unrestricted' : ''}${collapsible ? ' collapsible' : ''}${collapsed ? ' collapsed' : ''}" draggable="${connectionStatus === 'success'}" data-server-id="${escapeHtml(server.id)}" title="${escapeHtml(server.connectionError || '')}">
-      <div class="reusable-server-heading"><span class="server-drag-handle">⁙</span><input data-server-field="name" value="${escapeHtml(server.name || '')}" placeholder="${t('commands.serverNamePlaceholder')}" /><button type="button" class="server-test-button" data-test-server="${escapeHtml(server.id)}">${connectionStatus === 'success' ? t('nodeStatus.connected') : connectionStatus === 'failed' ? t('commands.retry') : t('commands.testConnection')}</button><button type="button" class="server-expand-button" data-expand-server aria-expanded="${!collapsed}" aria-label="${t(collapsed ? 'commands.expandServer' : 'commands.collapseServer')}" title="${t(collapsed ? 'commands.expandServer' : 'commands.collapseServer')}"><svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" class="server-remove-button" aria-label="${t('commands.deleteServer')}">×</button></div>
+    <article class="reusable-server-card connection-${connectionStatus}${server.unrestricted ? ' unrestricted' : ''}" data-server-id="${escapeHtml(server.id)}">
+      <div class="reusable-server-heading"><input data-server-field="name" value="${escapeHtml(server.name || '')}" aria-label="${t('commands.serverNamePlaceholder')}" placeholder="${t('commands.serverNamePlaceholder')}" /><button type="button" class="server-test-button" data-test-server="${escapeHtml(server.id)}" ${state.testingCommandServers?.has(server.id) ? 'disabled' : ''}>${t(state.testingCommandServers?.has(server.id) ? 'commands.testing' : connectionStatus === 'success' ? 'nodeStatus.connected' : connectionStatus === 'failed' ? 'commands.retry' : 'commands.testConnection')}</button><button type="button" class="server-remove-button" aria-label="${t('commands.deleteServer')}">${t('common.delete')}</button></div>
       <div class="reusable-server-fields">
         <label>${t('commands.address')}<input data-server-field="host" value="${escapeHtml(server.host || '')}" placeholder="192.168.1.20" /></label>
         <label>${t('commands.port')}<input data-server-field="port" type="number" min="1" max="65535" value="${escapeHtml(server.port || '22')}" /></label>
@@ -3485,13 +3528,12 @@ function renderCommandServers() {
       </div>
       ${server.auth === 'password' ? `<input class="reusable-server-secret" data-server-field="secret" type="password" value="${escapeHtml(server.secret || '')}" placeholder="${t('commands.loginPassword')}" />` : `<label class="server-key-picker"><span>${t('commands.chooseKeyFile')}</span><small>${escapeHtml(server.keyName || t('commands.noFileChosen'))}</small><input data-server-key-file type="file" accept=".key,.pem,.ppk,application/x-pem-file" hidden /></label>`}
       <label class="server-unrestricted" title="${t('commands.unrestrictedHint')}"><input type="checkbox" data-server-unrestricted ${server.unrestricted ? 'checked' : ''} /><span>${t('commands.unrestricted')}</span><small>${t('commands.unrestrictedHint')}</small></label>
+      ${server.connectionError ? `<div class="server-library-error">${escapeHtml(server.connectionError)}</div>` : ''}
     </article>`;
   }).join('');
   list.querySelectorAll('.reusable-server-card').forEach((card) => {
-    card.addEventListener('dragstart', (event) => { const server = commandServer(card.dataset.serverId); if (server?.connectionStatus !== 'success') { event.preventDefault(); showToast(t('commands.pickKeyFirst')); return; } const preview = document.createElement('div'); preview.className = 'server-drag-preview'; preview.innerHTML = `<span>⁙</span><strong>${escapeHtml(server.name || server.host || t('commands.unnamedServer'))}</strong>`; document.body.appendChild(preview); event.dataTransfer.setDragImage(preview, 18, 17); setTimeout(() => preview.remove(), 0); card.classList.add('dragging'); event.dataTransfer.setData('text/server-id', card.dataset.serverId); event.dataTransfer.effectAllowed = 'copy'; });
-    card.addEventListener('dragend', () => card.classList.remove('dragging'));
     card.querySelectorAll('[data-server-field]').forEach((input) => {
-      const updateServer = () => { const server = commandServer(card.dataset.serverId); const field = input.dataset.serverField; server[field] = input.value; server.connectionStatus = 'untested'; server.connectionError = ''; if (field === 'host' || field === 'port') server.hostFingerprint = ''; card.classList.remove('connection-success', 'connection-failed', 'collapsible', 'collapsed'); card.classList.add('connection-untested'); card.draggable = false; const testButton = card.querySelector('.server-test-button'); if (testButton) testButton.textContent = t('commands.testConnection'); saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); if (field === 'auth' && input.matches('select')) renderCommandServers(); };
+      const updateServer = () => { const server = commandServer(card.dataset.serverId); const field = input.dataset.serverField; server[field] = input.value; server.connectionStatus = 'untested'; server.connectionError = ''; if (field === 'host' || field === 'port') server.hostFingerprint = ''; card.classList.remove('connection-success', 'connection-failed', 'collapsible', 'collapsed'); card.classList.add('connection-untested'); card.draggable = false; const testButton = card.querySelector('.server-test-button'); if (testButton) testButton.textContent = t('commands.testConnection'); saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); renderCommandServers(); if (typeof renderTerminalView === 'function') renderTerminalView(); if (field === 'auth' && input.matches('select')) renderCommandServerEditor(); };
       input.addEventListener('input', updateServer);
       input.addEventListener('change', updateServer);
       input.addEventListener('pointerdown', (event) => event.stopPropagation());
@@ -3499,25 +3541,26 @@ function renderCommandServers() {
     const unrestrictedToggle = card.querySelector('[data-server-unrestricted]');
     unrestrictedToggle.addEventListener('pointerdown', (event) => event.stopPropagation());
     unrestrictedToggle.addEventListener('change', () => { const server = commandServer(card.dataset.serverId); server.unrestricted = unrestrictedToggle.checked; card.classList.toggle('unrestricted', server.unrestricted); saveCommandFlows(); });
-    card.querySelector('[data-server-key-file]')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const server = commandServer(card.dataset.serverId); try { state.commandServerKeys[server.id] = await file.text(); server.keyName = file.name; server.connectionStatus = 'untested'; server.connectionError = ''; saveCommandFlows(); renderCommandServers(); renderCommandFlows(); showToast(t('commands.toast.keyChosen', { name: file.name })); } catch (error) { showToast(t('commands.toast.keyReadFailed', { error: error.message })); } });
-    const expandButton = card.querySelector('[data-expand-server]');
-    expandButton.addEventListener('pointerdown', (event) => event.stopPropagation());
-    expandButton.addEventListener('click', () => { const id = card.dataset.serverId; if (state.expandedCommandServers.has(id)) state.expandedCommandServers.delete(id); else state.expandedCommandServers.add(id); renderCommandServers(); });
-    card.querySelector('.server-test-button').addEventListener('click', () => testCommandServerConnection(card.dataset.serverId));
+    card.querySelector('[data-server-key-file]')?.addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (!file) return; const server = commandServer(card.dataset.serverId); try { state.commandServerKeys[server.id] = await file.text(); server.keyName = file.name; server.connectionStatus = 'untested'; server.connectionError = ''; saveCommandFlows(); renderCommandServers(); renderCommandServerEditor(); renderCommandFlows(); showToast(t('commands.toast.keyChosen', { name: file.name })); } catch (error) { showToast(t('commands.toast.keyReadFailed', { error: error.message })); } });
+    card.querySelector('.server-test-button').addEventListener('click', (event) => testCommandServerConnection(card.dataset.serverId, event.currentTarget));
     card.querySelector('.server-remove-button').addEventListener('click', () => {
       const id = card.dataset.serverId;
       state.commandServers = state.commandServers.filter((server) => server.id !== id);
+      delete state.commandServerKeys[id];
       allCommandFlows().forEach((flow) => { if (flow.serverId === id) flow.serverId = ''; });
-      saveCommandFlows(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
+      saveCommandFlows(); renderCommandServers(); renderCommandServerEditor(); renderCommandFlows(); renderCommandEditor(); if (typeof renderTerminalView === 'function') renderTerminalView();
     });
   });
 }
 
-async function testCommandServerConnection(serverId) {
+async function testCommandServerConnection(serverId, button = null) {
   const server = commandServer(serverId);
   const card = document.querySelector(`.reusable-server-card[data-server-id="${CSS.escape(serverId)}"]`);
-  const button = card?.querySelector('.server-test-button');
+  button = button || card?.querySelector('.server-test-button');
   if (!server || !button) return;
+  state.testingCommandServers = state.testingCommandServers || new Set();
+  if (state.testingCommandServers.has(serverId)) return;
+  state.testingCommandServers.add(serverId);
   button.disabled = true; button.textContent = t('commands.testing');
   try {
     const requestConnection = () => fetch('/api/commands/test', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ host: server.host || '', port: server.port || '22', user: server.user || '', auth: server.auth || 'key', secret: server.auth === 'password' ? (server.secret || '') : (state.commandServerKeys?.[server.id] || ''), fingerprint: server.hostFingerprint || '' }) });
@@ -3536,7 +3579,8 @@ async function testCommandServerConnection(serverId) {
     server.connectionStatus = 'failed'; server.connectionError = error.message || t('commands.toast.connectFailed');
     showToast(server.connectionError);
   } finally {
-    saveCommandFlows(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
+    state.testingCommandServers.delete(serverId);
+    saveCommandFlows(); renderCommandServers(); renderCommandServerEditor(); renderCommandFlows(); renderCommandEditor();
   }
 }
 
@@ -4202,9 +4246,18 @@ function bindCommandGroups() {
 
 function bindCommandEvents() {
   loadCommandFlows(); bindCommandFileShelf(); bindCommandDock(); bindCommandGroups(); renderCommandServers(); renderCommandFlows(); renderCommandEditor();
-  loadCommandData();
+  commandDataLoadPromise = loadCommandData();
   $('#command-flow-name')?.addEventListener('input', (event) => { const flow = activeCommandFlow(); flow.name = event.target.value; saveCommandFlows(); $('#commands-editor-title').textContent = flow.name || t('commands.editor'); renderCommandFlows(); });
-  $('#commands-add-server')?.addEventListener('click', () => { state.commandServers.push({ id: `server-${Date.now()}`, name: t('commands.newServerName', { index: state.commandServers.length + 1 }), host: '', port: '22', user: '', auth: 'key', secret: '', connectionStatus: 'untested', connectionError: '' }); saveCommandFlows(); renderCommandServers(); });
+  $('#commands-add-server')?.addEventListener('click', addCommandServer);
+  $('#server-manager-add').addEventListener('click', addCommandServer);
+  $('#server-manager-list').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-manage-server-id]');
+    if (!item) return;
+    state.managedCommandServerId = item.dataset.manageServerId;
+    renderServerManagerList(); renderCommandServerEditor();
+  });
+  $$('[data-close-server-settings]').forEach((button) => button.addEventListener('click', closeServerManager));
+  bindBackdropDismissal($('#server-settings-modal'), closeServerManager);
   $('#commands-add-flow')?.addEventListener('click', () => { const flow = { id: `flow-${Date.now()}`, name: t('commands.newFlowName', { index: state.commandFlows.length + 1 }), serverId: '', lines: [{ text: '', status: 'idle' }] }; state.commandFlows.push(flow); state.activeCommandFlowId = flow.id; saveCommandFlows(); renderCommandFlows(); renderCommandEditor(); });
   $('#commands-duplicate')?.addEventListener('click', () => duplicateCommandFlow(activeCommandFlow()?.id));
   $('#commands-delete')?.addEventListener('click', () => {
@@ -4248,10 +4301,10 @@ function onLanguageChanged() {
   const view = $('.nav-item.active')?.dataset.view || 'overview';
   renderNodes();
   renderLogs();
-  updateDetailPanel();
+  renderNodeManagerList();
   updatePreview();
   renderConnectionsView();
-  if (typeof renderCommandServers === 'function') { renderCommandServers(); renderCommandFlows(); renderCommandEditor(); }
+  if (typeof renderCommandServers === 'function') { renderCommandServers(); renderCommandServerEditor(); renderCommandFlows(); renderCommandEditor(); }
   if (typeof renderTerminalView === 'function') renderTerminalView();
   if (typeof renderAssistant === 'function') renderAssistant();
   if (typeof refreshCommandLogs === 'function') refreshCommandLogs();
@@ -4262,11 +4315,12 @@ function setView(view) {
   // The breadcrumb label comes from the same table the sidebar uses, so the two
   // cannot drift apart in either language.
   $('#view-breadcrumb').textContent = t(`nav.${view}`);
-  Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view', commands: '#commands-view', terminal: '#terminal-view' }).forEach(([name, selector]) => {
+  Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view', commands: '#commands-view', terminal: '#terminal-view', database: '#database-view' }).forEach(([name, selector]) => {
     $(selector).classList.toggle('hidden', name !== view);
   });
   if (view === 'rules') syncRuleButtons();
   if (view === 'terminal' && typeof renderTerminalView === 'function') renderTerminalView({ shown: true });
+  if (view === 'database' && typeof renderDatabaseView === 'function') renderDatabaseView();
   if (view === 'connections') renderConnectionsView();
   if (view === 'rules') showToast(t('view.toast.rules'));
   if (view === 'connections') showToast(t('view.toast.connections'));
@@ -4492,15 +4546,16 @@ function bindEvents() {
   }));
   bindPipelineDragAndDrop();
   bindCommandEvents();
-  if ($('#add-rule-button')) $('#add-rule-button').addEventListener('click', () => showToast(t('rules.toast.templatesSoon'))); 
   $('#rules-add-rule').addEventListener('click', () => showToast(t('rules.toast.templatesSoon')));
   $('#connections-add-node').addEventListener('click', () => openNodeModal());
-  if ($('#edit-node-button')) $('#edit-node-button').addEventListener('click', (event) => {
-    const node = getNode(event.currentTarget.dataset.nodeId);
-    if (node) openNodeModal(node);
+  $('#node-manager-list').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-manage-node-id]');
+    const node = item && getNode(item.dataset.manageNodeId);
+    if (node) openNodeModal(node, { manage: true });
   });
-  if ($('#unbind-node-button')) $('#unbind-node-button').addEventListener('click', async (event) => {
-    const node = getNode(event.currentTarget.dataset.nodeId);
+  $('#node-manager-add').addEventListener('click', () => openNodeModal(null, { manage: true }));
+  $('#node-unbind-button').addEventListener('click', async () => {
+    const node = getNode($('#add-node-modal').dataset.nodeId);
     if (node) await unbindNode(node);
   });
   $$('[data-close-modal]').forEach((button) => button.addEventListener('click', closeNodeModal));
@@ -4511,10 +4566,15 @@ function bindEvents() {
     const name = String(form.get('name') || '').trim();
     const url = String(form.get('url') || '').trim();
     const style = String(form.get('protocol') || 'HTTP / WebSocket').trim();
-    const nodeId = $('#add-node-modal').dataset.nodeId;
+    const modal = $('#add-node-modal');
+    const nodeId = modal.dataset.nodeId;
+    const manage = modal.dataset.manage === 'true';
     const node = nodeId ? await updateNodeToGo(nodeId, name, url, style) : await persistNodeToGo(name, url, style);
     if (!node) return;
-    closeNodeModal();
+    if (!modal.classList.contains('hidden') && modal.dataset.nodeId === nodeId) {
+      if (manage) openNodeModal(node, { manage: true });
+      else closeNodeModal();
+    }
     showToast(nodeId ? t('modal.toast.connectionSaved') : t('modal.toast.addedConnecting', { name }));
   });
   document.addEventListener('keydown', (event) => {
@@ -4523,6 +4583,7 @@ function bindEvents() {
       if (!$('#ai-admin-token-modal').classList.contains('hidden')) closeAIAdminTokenPrompt();
       else if (!$('#app-settings-modal').classList.contains('hidden')) closeAppSettings();
       else if (!$('#ai-settings-modal').classList.contains('hidden')) closeAISettings();
+      else if (!$('#server-settings-modal').classList.contains('hidden')) closeServerManager();
       else closeNodeModal();
     }
     if (event.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA' && !document.activeElement.isContentEditable) { event.preventDefault(); $('#global-search').focus(); }

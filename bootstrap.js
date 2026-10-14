@@ -20,7 +20,7 @@ renderNodes();
 // initial checked state are bound here, after the node list exists.
 bindMultiSelectToggle();
 renderLogs();
-updateDetailPanel();
+renderNodeManagerList();
 updatePreview();
 renderAssistant();
 bindEvents();

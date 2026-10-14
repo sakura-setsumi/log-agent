@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1370,26 +1372,26 @@ type commandsColumnView struct {
 	IntroLeft   float64 `json:"introLeft"`
 	IntroRight  float64 `json:"introRight"`
 	// The dock: two buttons at the bottom-left, the mirror of the AI launcher.
-	FilesLeft      float64 `json:"filesLeft"`
-	FilesTop       float64 `json:"filesTop"`
-	ServersLeft    float64 `json:"serversLeft"`
-	ServersTop     float64 `json:"serversTop"`
-	AIRight        float64 `json:"aiRight"`
-	AITop          float64 `json:"aiTop"`
-	MainLeft       float64 `json:"mainLeft"`
-	MainRight      float64 `json:"mainRight"`
-	AddServerInBar bool    `json:"addServerInBar"`
-	NodePanelShown bool    `json:"nodePanelShown"`
-	LibraryHidden  bool    `json:"libraryHidden"`
-	ShelfHidden    bool    `json:"shelfHidden"`
-	BodyScrollW    float64 `json:"bodyScrollW"`
-	ViewportW      float64 `json:"viewportW"`
+	FilesLeft       float64 `json:"filesLeft"`
+	FilesTop        float64 `json:"filesTop"`
+	ServersLeft     float64 `json:"serversLeft"`
+	ServersTop      float64 `json:"serversTop"`
+	AIRight         float64 `json:"aiRight"`
+	AITop           float64 `json:"aiTop"`
+	MainLeft        float64 `json:"mainLeft"`
+	MainRight       float64 `json:"mainRight"`
+	AddServerInMenu bool    `json:"addServerInMenu"`
+	NodePanelShown  bool    `json:"nodePanelShown"`
+	LibraryHidden   bool    `json:"libraryHidden"`
+	ShelfHidden     bool    `json:"shelfHidden"`
+	BodyScrollW     float64 `json:"bodyScrollW"`
+	ViewportW       float64 `json:"viewportW"`
 }
 
 // TestE2ECommandsColumnsLayout asserts the server-commands page lays out as two
 // equal-height columns -- the flow list at ~44% and the editor at ~56% -- with
 // the server library and the file shelf out of the page: "new server" sits in the
-// page toolbar and the two panels are popups behind a pair of buttons at the
+// application menu and the two panels are popups behind a pair of buttons at the
 // bottom-left, mirroring the AI launcher at the bottom-right.
 func TestE2ECommandsColumnsLayout(t *testing.T) {
 	browserPath := firstExistingPath(
@@ -1466,7 +1468,7 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 			serversLeft: servers.left, serversTop: servers.top,
 			aiRight: ai.right, aiTop: ai.top,
 			mainLeft: main.left, mainRight: main.right,
-			addServerInBar: !!addServer && !!addServer.closest('#commands-view > .page-intro'),
+			addServerInMenu: !!addServer && !!addServer.closest('#menubar .menu-panel'),
 			nodePanelShown: getComputedStyle(document.querySelector('.sidebar')).display !== 'none',
 			libraryHidden: hidden('.server-library'), shelfHidden: hidden('#command-file-shelf'),
 			bodyScrollW: document.documentElement.scrollWidth, viewportW: window.innerWidth,
@@ -1528,10 +1530,10 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 		t.Fatalf("the node panel should be hidden on the server-commands page (%+v)", v)
 	}
 
-	// "New server" lives in the page toolbar; the library and the shelf are
+	// "New server" lives in the application menu; the library and the shelf are
 	// closed popups until their buttons are used.
-	if !v.AddServerInBar {
-		t.Fatalf("新增服务器 should be a button in the page toolbar (%+v)", v)
+	if !v.AddServerInMenu {
+		t.Fatalf("新增服务器 should be an item in the application menu (%+v)", v)
 	}
 	if !v.LibraryHidden || !v.ShelfHidden {
 		t.Fatalf("server library / file shelf should start closed (%+v)", v)
@@ -2796,7 +2798,7 @@ func TestE2EFlowListKeepsItsWidthWithGroupsOpen(t *testing.T) {
 
 // TestE2ETerminalPage drives the server terminal page against an in-process SSH
 // server: the rail labels, connecting, typing into the shell, and the file
-// browser (upload, new folder, open, delete).
+// browser (file/folder uploads, directory drops, new folder, open, delete).
 func TestE2ETerminalPage(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
@@ -2979,6 +2981,126 @@ func TestE2ETerminalPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait(`document.querySelector('#term-path').value === '/'`, "the parent folder")
+
+	// Choosing a folder keeps the root name, nested paths and duplicate basenames.
+	folder := filepath.Join(t.TempDir(), "picked-folder")
+	if err := os.MkdirAll(filepath.Join(folder, "子目录"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"same.txt": "root content", "子目录/same.txt": "nested content"} {
+		if err := os.WriteFile(filepath.Join(folder, filepath.FromSlash(name)), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := chromedp.Run(ctx, chromedp.SetUploadFiles(`#term-upload-folder-input`, []string{folder}, chromedp.ByQuery)); err != nil {
+		t.Fatalf("choose a folder: %v", err)
+	}
+	wait(`!!document.querySelector('#term-file-rows tr[data-name="picked-folder"]')`, "the selected folder to finish uploading")
+
+	termSessions.mu.Lock()
+	var sessionID string
+	for id := range termSessions.sessions {
+		sessionID = id
+	}
+	termSessions.mu.Unlock()
+	readRemote := func(action, path string) []byte {
+		t.Helper()
+		response, err := http.Get(web.URL + "/api/term/fs/" + action + "?" + url.Values{"id": {sessionID}, "path": {path}}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		data, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("read remote %s: HTTP %d, %s (%v)", path, response.StatusCode, data, err)
+		}
+		return data
+	}
+	for path, want := range map[string]string{"/picked-folder/same.txt": "root content", "/picked-folder/子目录/same.txt": "nested content"} {
+		if got := string(readRemote("download", path)); got != want {
+			t.Fatalf("remote %s = %q, want %q", path, got, want)
+		}
+	}
+
+	// A dropped directory reader may return several batches. Empty directories
+	// and loose files in the same drop must also reach the remote file system.
+	dropFolder := `(() => {
+		const file = (name, content) => ({ name, isFile: true, file: (resolve) => resolve(new File([content], name)) });
+		const directory = (name, batches) => ({ name, isDirectory: true, createReader: () => {
+			let index = 0;
+			return { readEntries: (resolve) => setTimeout(() => resolve(batches[index++] || []), 5) };
+		}});
+		const first = Array.from({length: 100}, (_, i) => file('file-' + i + '.txt', String(i)));
+		const root = directory('dropped-folder', [first, [file('after-100.txt', 'last batch'), directory('empty', []), directory('nested', [[file('zero.txt', '')]])]]);
+		const loose = new File(['loose content'], 'loose.txt');
+		const transfer = new DataTransfer();
+		transfer.items.add(loose);
+		Object.defineProperty(transfer, 'items', { value: [
+			{kind: 'file', webkitGetAsEntry: () => root, getAsFile: () => null},
+			{kind: 'file', webkitGetAsEntry: () => null, getAsFile: () => loose}
+		] });
+		document.querySelector('#term-table-wrap').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+	})()`
+	if err := chromedp.Run(ctx, chromedp.Evaluate(dropFolder, nil)); err != nil {
+		t.Fatalf("drop a folder: %v", err)
+	}
+	wait(`!!document.querySelector('#term-file-rows tr[data-name="dropped-folder"]') && !!document.querySelector('#term-file-rows tr[data-name="loose.txt"]')`, "the dropped folder and loose file")
+	for path, want := range map[string]string{"/dropped-folder/file-99.txt": "99", "/dropped-folder/after-100.txt": "last batch", "/dropped-folder/nested/zero.txt": "", "/loose.txt": "loose content"} {
+		if got := string(readRemote("download", path)); got != want {
+			t.Fatalf("remote %s = %q, want %q", path, got, want)
+		}
+	}
+	var emptyDir termListResponse
+	if err := json.Unmarshal(readRemote("list", "/dropped-folder/empty"), &emptyDir); err != nil || len(emptyDir.Entries) != 0 {
+		t.Fatalf("empty directory was not preserved: %+v (%v)", emptyDir, err)
+	}
+
+	// Reading a dropped directory is asynchronous. Navigating meanwhile must not
+	// change its upload destination or move the user back after completion.
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const transfer = new DataTransfer();
+		transfer.items.add(new File([], 'snapshot-folder'));
+		const root = { name: 'snapshot-folder', isDirectory: true, createReader: () => {
+			let sent = false;
+			return { readEntries: (resolve) => setTimeout(() => {
+				resolve(sent ? [] : [{ name: 'target.txt', isFile: true, file: (done) => done(new File(['original destination'], 'target.txt')) }]);
+				sent = true;
+			}, 100) };
+		}};
+		Object.defineProperty(transfer, 'items', { value: [{kind: 'file', webkitGetAsEntry: () => root, getAsFile: () => null}] });
+		document.querySelector('#term-table-wrap').dispatchEvent(new DragEvent('drop', {bubbles: true, cancelable: true, dataTransfer: transfer}));
+		const path = document.querySelector('#term-path');
+		path.value = '/newdir';
+		path.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+	})()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`document.querySelector('#term-path').value === '/newdir' && document.querySelector('#term-status').textContent === 'Uploaded 1 file(s) and 1 folder(s)'`, "uploading to the original directory while browsing another")
+	if got := string(readRemote("download", "/snapshot-folder/target.txt")); got != "original destination" {
+		t.Fatalf("upload destination changed: %q", got)
+	}
+
+	// Directory failures stop the batch and remain visible rather than being
+	// replaced with a success message for earlier files.
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const original = window.fetch;
+		window.__blockedUploads = 0;
+		window.fetch = (input, init) => {
+			const target = String(input);
+			if (target.includes('/fs/mkdir?') && target.includes('denied-folder')) return Promise.resolve(new Response(JSON.stringify({error: 'upload_failed', detail: 'blocked fixture'}), {status: 403}));
+			if (target.includes('/fs/upload?') && target.includes('denied-folder')) window.__blockedUploads++;
+			return original(input, init);
+		};
+		const file = new File(['not uploaded'], 'blocked.txt');
+		Object.defineProperty(file, 'webkitRelativePath', {value: 'denied-folder/blocked.txt'});
+		const transfer = new DataTransfer(); transfer.items.add(file);
+		const input = document.querySelector('#term-upload-folder-input');
+		input.files = transfer.files;
+		input.dispatchEvent(new Event('change', {bubbles: true}));
+	})()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`document.querySelector('#term-status').textContent.includes('blocked fixture') && window.__blockedUploads === 0`, "the folder creation failure without uploading child files")
 
 	// The command tab lists the command sets and sends one to the shell.
 	if err := chromedp.Run(ctx,

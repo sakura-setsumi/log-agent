@@ -14,13 +14,14 @@ Highlights:
 - Time-window history loading with automatic older-page loading after the per-container browse limit is reached.
 - Processing pipeline for sensitive-data masking, structured-field extraction, and health-check filtering.
 - AI log analysis with selectable context, image/text attachments, model profiles, and browser-local conversation history.
-- Command Groups page for ordered, reusable server command sets, and a Server Commands page that is an SSH terminal (xterm.js) with an SFTP file browser, in the style of FinalShell.
+- Command Groups page for ordered, reusable server command sets, and a Server Commands page that is an SSH terminal (xterm.js) with an SFTP file browser, in the style of FinalShell. Select or drop whole folders to upload them with their directory structure.
+- Database workspace for MySQL, PostgreSQL and SQLite: connection/schema tree, paged editable tables, a visual table/column/index designer, and one SQL query across multiple databases with combined results and source labels.
 - Local node/model storage for localhost use, with browser-local storage for remote visitors.
 - No database required; frontend assets are embedded into the Go executable.
 
 ## Quick start
 
-Requires Go 1.22 or newer for development:
+Requires Go 1.26.4 or newer for development:
 
 ```bash
 go run .
@@ -49,7 +50,8 @@ data/
 ├─ nodes.json
 ├─ models.json
 ├─ commands.json
-└─ command-logs.json
+├─ command-logs.json
+└─ databases.json
 ```
 
 When the dashboard is opened through localhost, this local directory is used. When it is opened from another machine, that visitor's browser `localStorage` is used instead. This keeps remote visitors' connections and API keys isolated from the host machine.
@@ -73,7 +75,33 @@ $env:LOG_AGENT_CONFIG_DIR = 'D:\log-agent-config'
 .\log-agent.exe
 ```
 
-`models.json` contains API keys in plain text, and `commands.json` (flows, flow groups, the server library and favourites) contains SSH passwords for servers that use password login. Keep both outside public repositories and backups that are shared with others.
+`models.json` contains API keys in plain text, `commands.json` contains SSH passwords for servers that use password login, and `databases.json` contains database connection credentials. Keep these files outside public repositories and backups that are shared with others.
+
+## Database workspace
+
+Create a connection from the Database menu or tab. SQLite accepts an absolute file path and creates the file if it does not exist. Expand connections to browse databases, schemas, tables and views. Tables with primary keys support double-click editing, inserting rows and deleting selected rows; Save changes commits the batch in a transaction and rejects conflicting updates. Views and existing rows in tables without primary keys are read-only.
+
+For multi-database execution, choose databases from the target dropdown above the SQL editor, enter one SQL statement and click Run SQL (Ctrl+Enter). The same SQL executes separately on each selected database, including SELECT, INSERT, UPDATE, DELETE and DDL. Result sets are combined by column name, missing columns become NULL, and every row includes its connection, database and engine. Statements without result columns show a per-database execution report with status, affected rows, duration and errors; reports can also be exported as CSV. Affected counts that a driver does not provide are marked as not reported. SQL must be supported by each target; there are no joins between connections or automatic dialect translations. Up to 16 targets run with concurrency 4; each source is bounded by a 60-second timeout, an 8 MiB result limit and the selected row limit (up to 2,500). Selecting multiple statements in one action is rejected.
+
+The left tree browses connections and table structures without selection checkboxes. SQL targets are chosen in a separate tree dropdown grouped by connection and database. Select a connection to check all its databases, or check databases individually; partly selected connections show a mixed checkbox state. Search preserves selections hidden by the filter. The limit is 16 databases, and a group that exceeds it is rejected without changing the selection. Each SQL tab retains its targets. Clearing the dropdown leaves zero targets even when browsing a table.
+
+SQL editor execution permits changes on one or several databases. Each destination executes independently using its database's autocommit behavior: failure on one database does not roll back successful changes elsewhere. Check the individual reports before retrying a partially successful write. Cancellation does not undo completed changes, and in-flight outcomes may need verification. Explicit transaction-control statements (BEGIN/COMMIT/ROLLBACK/savepoints) are rejected because SQL executions do not hold a persistent connection between actions. The legacy API query mode remains database-enforced read-only. Structure changes offer a SQL preview before applying; PostgreSQL and SQLite plans use transactions, while MySQL DDL can auto-commit. Primary key changes and advanced constraints can be written in SQL.
+
+The workspace has SQL tabs above the editor and table/result tabs below it. Use + or New SQL tab to create an independent editor; SQL text, cursor/undo state, query targets and results are retained when switching tabs. Queries can run in the background and their results stay with the originating SQL tab. Opening a table reuses its tab; each table retains its data/structure view, paging, selection and pending row edits. Closing a table with pending edits asks before discarding them. Tabs are kept for the current application session.
+
+The template button opens a floating panel above the workspace, without reducing the SQL editor width or limiting the panel to the editor height. Click a select/filter/sort/count/distinct/group/insert/update/delete template to fill the current SQL tab. Underlined table names and column expressions can be clicked directly inside the text to choose a schema source, table or columns. Filter operators are also selectable, including NULL checks, comparisons, LIKE, IN and BETWEEN; edit their arguments directly in the SQL text. Long SQL lines wrap automatically. Multi-column choices and repeated GROUP BY fields stay aligned. All generated content remains editable SQL. Filling a template does not execute it or change checked query targets.
+
+The editor recognizes queries, writes and DDL separated by semicolons (the last statement can omit one). Single-database and multi-database execution icons appear on the right of each statement's final line. The single-database icon and Execute statement (one DB) use the Single-database target selector and preserve checked targets; the multi-database icon uses checked databases and requires at least two. Typing never executes SQL. Ctrl+Enter and Run SQL execute selected text, or the statement at the cursor when nothing is selected, on checked databases. Statement recognition follows the chosen single-database target's dialect and respects quoted semicolons, comments and nested queries.
+
+Data edits use one transaction for each Save changes batch on the current table/database: successful changes commit together and a failed statement or conflicting update rolls the batch back. MySQL tables must use a transactional engine such as InnoDB for this guarantee. There is no manually held editing transaction or distributed transaction spanning connections.
+
+The editor and grids use CodeMirror 6 and Tabulator; schema inspection and migration planning use Atlas, with go-sql-driver/mysql, pgx and modernc SQLite drivers. All browser assets are embedded and work offline. To rebuild the pinned browser dependencies (Node.js and pnpm required):
+
+```bash
+pnpm --dir scripts/database-ui install --frozen-lockfile --ignore-scripts
+pnpm --dir scripts/database-ui test
+node scripts/database-ui/build.mjs
+```
 
 ## Development and tests
 
@@ -112,6 +140,7 @@ Build output is written to `dist/`; local binaries and caches are intentionally 
 - `app.js` — dashboard state, node/container selection, log stream, filtering, paging, and export.
 - `assistant-ui.js` — AI assistant conversations, context, attachments, and session history.
 - `term_api.go` / `terminal.js` — the Server Commands page: SSH shell sessions and SFTP over one connection, and the xterm.js front end. xterm.js is vendored in `third_party/xterm/` (MIT).
+- `database.go` / `database_schema.go` / `database.js` / `database.css` — database connections, multi-target query merging, transactional row changes and the schema designer. Browser libraries and their licenses are vendored in `third_party/database/`.
 - `bootstrap.js` — application initialization after frontend modules load.
 - `styles.css` — dashboard styling and responsive layout.
 
@@ -142,13 +171,14 @@ Log Agent 是一个面向 Dozzle 的自托管日志聚合、检索、加工和�
 - 按时间窗口拉取历史日志；单容器浏览缓存达到上限后，滚动到顶部会自动加载更早日志。
 - 提供敏感信息脱敏、结构化字段提取和健康检查过滤等日志加工规则。
 - 支持 AI 日志分析、上下文选择、图片/文本附件、模型配置和浏览器本地会话历史。
-- 「指令集组」页编排可复用的服务器指令集；「服务器指令」页是类似 FinalShell 的 SSH 终端（xterm.js），下方带 SFTP 文件管理（浏览、上传、下载、新建、重命名、删除）和指令集快捷发送。
+- 「指令集组」页编排可复用的服务器指令集；「服务器指令」页是类似 FinalShell 的 SSH 终端（xterm.js），下方带 SFTP 文件管理（浏览、上传、下载、新建、重命名、删除）和指令集快捷发送，支持选择或拖入整个文件夹上传并保留目录结构。
+- 「数据库」页支持 MySQL、PostgreSQL、SQLite，提供连接和结构树、数据查看与编辑、可视化建表及字段和索引管理；支持一条 SQL 在多个库执行并合并结果。
 - 本机访问时使用可执行文件旁的本地 JSON 配置；远程访问时使用访客浏览器的 localStorage。
 - 无需数据库，前端资源直接嵌入 Go 可执行文件。
 
 ## 快速启动
 
-开发环境需要 Go 1.22 或更高版本：
+开发环境需要 Go 1.26.4 或更高版本：
 
 ```bash
 go run .
@@ -167,7 +197,27 @@ go run .
 
 节点和 AI 供应商默认保存在可执行文件旁的 `data/nodes.json` 与 `data/models.json`，指令集组页的指令集、指令集组、服务器库和收藏保存在 `data/commands.json`，每次运行的指令与服务器返回日志保存在 `data/command-logs.json`（保留最近 200 次运行）（本机访问时只读写该文件，不再使用浏览器 localStorage；其他机器访问时仍保存在各自浏览器中。旧版本留在浏览器里的指令集会在首次启动时自动迁移进该文件）。可使用 `LOG_AGENT_CONFIG_DIR`、`LOG_AGENT_SETTINGS_FILE`、`LOG_AGENT_ADMIN_TOKEN`、`LOG_AGENT_ENVIRONMENT`、`LOG_AGENT_DEBUG`、`LOG_AGENT_MAX_STORED_LOGS` 和 `LOG_AGENT_NO_SHORTCUT` 覆盖默认设置。
 
-`models.json` 会以明文保存 API key，`commands.json` 会以明文保存使用密码登录的服务器密码，请勿提交到公开仓库，也不要共享导出的敏感配置、私钥或管理员 token。服务不会修改 Nginx 或主机系统配置。
+数据库连接保存在 `data/databases.json`。`models.json` 会以明文保存 API key，`commands.json` 会以明文保存使用密码登录的服务器密码，`databases.json` 会保存数据库连接凭据，请勿提交到公开仓库，也不要共享导出的敏感配置、私钥或管理员 token。服务不会修改 Nginx 或主机系统配置。
+
+## 数据库与多库查询
+
+在「数据库」菜单或页签中新增连接，展开左侧结构树可浏览库、Schema、表和视图。SQLite 使用绝对文件路径，文件不存在时会创建。有主键的表可双击单元格编辑、新增行、选择行删除，点击「保存修改」后以事务提交；遇到并发修改会回滚。视图和无主键表的已有记录只读。
+
+在 SQL 区上方的目标数据库下拉框中多选数据库，输入一条语句后点击「执行 SQL」或按 Ctrl+Enter。同一条 SQL 分别在各库执行，支持查询、INSERT、UPDATE、DELETE 和 DDL。有返回列的结果按列名对齐合并，缺失列填 NULL，并保留连接、数据库和引擎来源；无返回列时显示逐库执行报告，包括状态、影响行数、耗时和错误，也可导出 CSV。驱动没有提供影响行数时明确显示「未报告」。各库需支持相同语法及表结构；不进行连接之间的 JOIN 或 SQL 方言转换。最多选择 16 个库、并发 4 个，每库超时 60 秒、结果上限 8 MiB，行数上限可选至 2,500；单次选择多条 SQL 执行会被拒绝。
+
+左侧结构树用于浏览连接和表结构，不显示复选框。SQL 目标在独立的树形多选下拉框中选择，按「连接 → 数据库」分组；可勾选整个连接或逐库选择，部分选中时连接显示半选状态。搜索不会丢失被筛选隐藏的选择。最多选择 16 个库，连接整组选中若超过限制则保持原选择。每个 SQL 页签各自保存目标库；清空下拉框后保持 0 个目标，不会自动回退到左侧正在浏览的表。
+
+SQL 编辑器允许单库、多库修改，各目标按数据库自身的自动提交行为独立执行；某库失败不会回滚其他库已经成功的修改。部分成功后应逐库检查再重试；取消也不会撤销已完成的修改，仍在执行的库需核实最终结果。由于各次操作之间没有持续占用的连接，不支持通过 BEGIN/COMMIT/ROLLBACK 或保存点手动控制跨次事务，会明确报错。旧 API 的 query 模式仍强制只读。结构页支持可视化建表、添加/修改/重命名/删除字段、新增/删除索引、重命名/删除表，先预览 SQL 再应用。PostgreSQL 和 SQLite 使用事务，MySQL DDL 可能自动提交。主键变更和高级约束可在 SQL 编辑器中操作。
+
+工作区上方是 SQL 页签，下方是表与查询结果页签。点击「＋」或「新建 SQL 页签」可创建独立编辑区；切换时保留各自的 SQL 文本、光标与撤销状态、目标库和结果。查询可以在后台运行，结果只写回发起查询的页签。打开同一个表会复用其页签；每张表独立保留数据/结构视图、分页、选中行和未保存修改。关闭有未保存修改的表时会先确认。页签在本次应用会话中保留。
+
+模板按钮打开覆盖工作区的独立浮层，不挤占 SQL 文本区宽度，也不受文本区高度限制。点击查询、条件、排序、统计、去重、分组或增删改模板后，内容填入当前 SQL 页签。在文本中点击带下划线的表名、字段表达式即可选择结构来源、表和字段；条件运算符也支持选择，包括 NULL 判断、比较、LIKE、IN、BETWEEN 等，对应的值可直接在 SQL 文本中编辑。长 SQL 自动换行显示。多列选择和 GROUP BY 中重复的字段会同步更新。生成的内容仍是可直接编辑的 SQL，填入模板不会自动执行，也不会改变已勾选的查询目标。
+
+编辑器会识别以分号分隔的查询、增删改和 DDL 语句（最后一条可不写分号），并在每段语句末行右侧显示单库、多库执行图标。单库图标和「执行语句（单库）」使用「单库目标」下拉框所选的库，并保留多库勾选；多库图标使用目标数据库下拉框中勾选的库，至少需要勾选两个。输入文字不会自动执行。Ctrl+Enter 和「执行 SQL」优先执行选中的文本，否则执行光标所在语句，目标为下拉框中勾选的库。识别采用「单库目标」对应的 SQL 方言，处理字符串中的分号、注释和嵌套语句。
+
+数据编辑以每次「保存修改」为一个事务，范围为当前库、当前表的本批操作；成功时统一提交，任一操作失败或检测到并发修改时整批回滚。MySQL 表需使用 InnoDB 等事务型引擎。当前没有手动保持编辑事务或跨连接的分布式事务功能。
+
+采用 CodeMirror 6、Tabulator、Atlas 以及成熟的 MySQL、pgx、modernc SQLite 驱动，浏览器依赖随程序离线打包。依赖版本和构建脚本位于 `scripts/database-ui/`，许可证位于 `third_party/database/LICENSES.txt`。
 
 ## 开发测试
 

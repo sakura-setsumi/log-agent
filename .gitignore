@@ -4,6 +4,7 @@
 # Agent working memory (session notes, screenshots) - not project source.
 .workbuddy-ai/
 .workbuddy/
+**/node_modules/
 
 # Build artifacts
 log-agent.exe

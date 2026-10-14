@@ -375,34 +375,68 @@
     for (const entry of files) await downloadEntry(entry);
   }
 
-  async function uploadFiles(files) {
-    if (!usable()) return;
-    const session = active;
-    let done = 0;
-    for (const file of files) {
-      setStatus(t('terminal.file.uploading', { name: file.name }));
-      const path = joinPath(session.cwd, file.name);
-      const response = await api(`fs/upload?${query({ id: session.sid, path })}`, { method: 'POST', body: file }).catch(() => null);
-      if (response && response.ok) { done += 1; continue; }
-      showToast(response ? await errorText(response, t('terminal.file.uploadFailed', { name: file.name })) : t('terminal.file.uploadFailed', { name: file.name }));
-      break;
-    }
-    if (done) {
-      setStatus(t('terminal.file.uploaded', { count: done }));
-      showToast(t('terminal.file.uploaded', { count: done }));
-    } else {
-      setStatus('');
-    }
-    loadDir(session, session.cwd);
+  function uploadTarget() {
+    if (!usable() || !active.cwd) return null;
+    return { session: active, directory: active.cwd };
   }
 
-  // Dropped folders cannot be read as files, so only real files are uploaded.
-  function droppedFiles(event) {
-    const items = [...(event.dataTransfer.items || [])];
-    if (items.length && items[0].webkitGetAsEntry) {
-      return items.filter((item) => item.kind === 'file' && item.webkitGetAsEntry()?.isFile).map((item) => item.getAsFile()).filter(Boolean);
+  // Both picker paths and dropped folders include the root folder name.
+  function uploadEntries(items) {
+    const entries = items.flatMap((item) => item.folder
+      ? [{ path: item.name, directory: true }, ...item.entries.map((entry) => ({ ...entry, path: `${item.name}/${entry.path}` }))]
+      : [{ path: item.webkitRelativePath || item.name, file: item }]);
+    const directories = new Set();
+    for (const entry of entries) {
+      const parts = entry.path.split('/');
+      if (parts.some((part) => !part || part === '.' || part === '..' || /[\\\0]/.test(part))) throw new Error(t('api.invalid_path'));
+      const count = entry.directory ? parts.length : parts.length - 1;
+      for (let i = 1; i <= count; i += 1) directories.add(parts.slice(0, i).join('/'));
     }
-    return [...event.dataTransfer.files];
+    return { directories: [...directories], files: entries.filter((entry) => !entry.directory) };
+  }
+
+  function uploadFiles(source, target) {
+    if (!target) return;
+    // Read drag entries immediately, even when another upload is still queued.
+    const collected = Promise.resolve(source).then((items) => ({ items }), (error) => ({ error }));
+    const { session, directory } = target;
+    const status = (message) => { if (session === active) setStatus(message); };
+    session.uploadQueue = (session.uploadQueue || Promise.resolve()).then(async () => {
+      const result = await collected;
+      if (result.error) throw new Error(t('terminal.file.readFailed', { error: result.error.message || String(result.error) }));
+      const plan = uploadEntries(result.items);
+      if (!plan.directories.length && !plan.files.length) return;
+      const request = async (action, relativePath, body) => {
+        if (session.closed || session.status === 'ended') throw new Error(t('terminal.needSession'));
+        const name = relativePath;
+        const response = await api(`fs/${action}?${query({ id: session.sid, path: joinPath(directory, relativePath) })}`, { method: 'POST', body }).catch(() => null);
+        if (!response || !response.ok) throw new Error(response ? await errorText(response, t('terminal.file.uploadFailed', { name })) : t('terminal.file.uploadFailed', { name }));
+      };
+      try {
+        for (const path of plan.directories) {
+          status(t('terminal.file.creatingFolder', { name: path }));
+          await request('mkdir', path);
+        }
+        for (const { path, file } of plan.files) {
+          status(t('terminal.file.uploading', { name: path }));
+          await request('upload', path, file);
+        }
+        const message = plan.directories.length
+          ? t('terminal.file.uploadedItems', { files: plan.files.length, folders: plan.directories.length })
+          : t('terminal.file.uploaded', { count: plan.files.length });
+        status(message);
+        showToast(message);
+      } finally {
+        if (!session.closed && session.status !== 'ended') {
+          session.tree.clear();
+          await loadDir(session, session.cwd);
+        }
+      }
+    }).catch((error) => {
+      const message = error.message || t('terminal.file.loadFailed');
+      status(message);
+      showToast(message);
+    });
   }
 
   // ----------------------------------------------------------------- commands
@@ -458,10 +492,7 @@
 
   function bind() {
     $v('#term-connect').addEventListener('click', connect);
-    $v('#term-manage-servers').addEventListener('click', () => {
-      setView('commands');
-      if (typeof setCommandPopup === 'function') setCommandPopup('command-popup-servers');
-    });
+    $v('#term-manage-servers').addEventListener('click', () => openServerManager());
     $v('#term-tabs').addEventListener('click', (event) => {
       const close = event.target.closest('[data-close]');
       if (close) {
@@ -481,8 +512,22 @@
     $v('#term-rename').addEventListener('click', renameSelected);
     $v('#term-delete').addEventListener('click', deleteSelected);
     $v('#term-download').addEventListener('click', downloadSelected);
-    $v('#term-upload').addEventListener('click', () => { if (usable()) $v('#term-upload-input').click(); });
-    $v('#term-upload-input').addEventListener('change', (event) => { const files = [...event.target.files]; event.target.value = ''; if (files.length) uploadFiles(files); });
+    [['#term-upload', '#term-upload-input'], ['#term-upload-folder', '#term-upload-folder-input']].forEach(([button, selector]) => {
+      const input = $v(selector);
+      let target = null;
+      $v(button).addEventListener('click', () => {
+        target = uploadTarget();
+        if (target) input.click();
+      });
+      input.addEventListener('change', () => {
+        const files = [...input.files];
+        const destination = target || uploadTarget();
+        target = null;
+        input.value = '';
+        if (files.length) uploadFiles(files, destination);
+      });
+      input.addEventListener('cancel', () => { target = null; });
+    });
     $v('#term-path').addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || !usable()) return;
       const value = event.target.value.trim();
@@ -534,8 +579,8 @@
       if (!hasFiles(event)) return;
       event.preventDefault();
       wrap.classList.remove('drag-active');
-      const files = droppedFiles(event);
-      if (files.length) uploadFiles(files);
+      const target = uploadTarget();
+      if (target) uploadFiles(collectCommandTransferFiles(event.dataTransfer), target);
     });
 
     // The divider between the terminal and the lower panel.
