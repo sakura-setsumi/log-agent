@@ -33,7 +33,7 @@ function actionMarkers(state, statements, context, execute) {
   return RangeSet.of(statements.map(statement => new QueryActions(statement, context, execute).range(state.doc.lineAt(Math.max(statement.from, statement.to - 1)).from)), true);
 }
 
-let copiedSlots = null, pasteSequence = 0;
+let copiedSlots = null, pasteSequence = 0, conditionSequence = 0;
 function copySlots(event, view) {
   const state = view.state, range = state.selection.main;
   let { from, to } = range;
@@ -110,6 +110,16 @@ window.DatabaseUI = {
       slotRect(id) { const slot = editor.state.field(inlineSlots).find(slot => slot.id === id); return slot ? editor.coordsAtPos(slot.from) : null; },
       replaceSlots(values) {
         const transaction = replaceSlotValues(editor.state, values, activeTemplate); if (transaction) editor.dispatch(transaction);
+      },
+      // Turn a bare condition slot into "<field> IS NOT NULL" with selectable field and operator slots.
+      replaceCondition(id, field, labels) {
+        const state = editor.state, slots = state.field(inlineSlots), slot = slots.find(item => item.id === id); if (!slot) return;
+        const group = { ...slot.template, id: slot.template?.id + '-where-' + ++conditionSequence }, insert = field + ' IS NOT NULL';
+        const changes = state.changes({ from: slot.from, to: slot.to, insert });
+        const others = slots.filter(item => item !== slot).map(item => ({ ...item, from: changes.mapPos(item.from, -1), to: changes.mapPos(item.to, 1) }));
+        const created = [{ id: group.id + '-field', kind: 'field', template: group, from: slot.from, to: slot.from + field.length, label: labels.field }, { id: group.id + '-operator', kind: 'operator', template: group, from: slot.from + field.length + 1, to: slot.from + insert.length, label: labels.operator }];
+        activeTemplate = group.id;
+        editor.dispatch({ changes, effects: setSlots.of([...others, ...created].sort((a, b) => a.from - b.from)) });
       },
       replacePredicate(operator, operand, label) { const transaction = replacePredicate(editor.state, operator, operand, label, activeTemplate); if (transaction) editor.dispatch(transaction); },
       snapshot: () => ({ state: editor.state, activeTemplate, top: editor.scrollDOM.scrollTop, left: editor.scrollDOM.scrollLeft }),

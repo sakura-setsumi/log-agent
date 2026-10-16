@@ -110,10 +110,12 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     picker.style.top = Math.max(8, Math.min(anchor.bottom + 5, innerHeight - Math.min(390, picker.scrollHeight) - 12)) + 'px';
   }
   async function openInlinePicker(slot, requestedKind = slot.kind) {
-    if (['value', 'values', 'filterValue', 'condition'].includes(slot.kind)) { closeInlinePicker(); ui.editor.selectSlot(slot.id); return; }
+    // A bare condition (DELETE/UPDATE ... WHERE) is picked as field + operator, like the WHERE template.
+    const isCondition = slot.kind === 'condition'; if (isCondition && requestedKind === 'condition') requestedKind = 'field';
+    if (!isCondition && ['value', 'values', 'filterValue'].includes(slot.kind)) { closeInlinePicker(); ui.editor.selectSlot(slot.id); return; }
     const tab = sqlSession(); if (!tab) return;
     if (slot.template) { tab.templateId = slot.template.templateId; tab.templateContext = slot.template.context ? clone(slot.template.context) : null; }
-    closeInlinePicker(); inline.open = true; inline.sqlId = tab.id; inline.slotId = slot.id; inline.kind = requestedKind; inline.pendingKind = null;
+    closeInlinePicker(); inline.open = true; inline.sqlId = tab.id; inline.slotId = slot.id; inline.condition = isCondition; inline.kind = requestedKind; inline.pendingKind = null;
     if (requestedKind === 'operator') {
       el('db-inline-title').textContent = text('inlineOperator');
       const operators = ['IS NOT NULL', 'IS NULL', '=', '<>', '>', '>=', '<', '<=', 'LIKE', 'NOT LIKE', 'IN', 'NOT IN', 'BETWEEN', 'NOT BETWEEN'];
@@ -220,7 +222,8 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     else {
       const selected = [...el('db-inline-body').querySelectorAll('[name="inline-column"]:checked')].map(input => input.value);
       if (!selected.length && !star) return;
-      if (kind === 'field') ui.editor.replaceSlots({ field: quote(engine, selected[0]) });
+      if (kind === 'field' && inline.condition) ui.editor.replaceCondition(slotId, quote(engine, selected[0]), { field: text('inlineField'), operator: text('inlineOperator') });
+      else if (kind === 'field') ui.editor.replaceSlots({ field: quote(engine, selected[0]) });
       else { const useStar = star || (tab.templateId !== 'insert' && selected.length === context.columns.length); context.selectedFields = useStar ? [] : selected; tab.templateContext = context; ui.editor.replaceSlots({ columns: useStar ? '*' : selected.map(name => quote(engine, name)).join(', '), values: Array(Math.max(1, selected.length)).fill('NULL').join(', ') }); }
     }
     ui.editor.setTemplateContext(tab.templateContext ? clone(tab.templateContext) : null);

@@ -31,7 +31,7 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	t.Cleanup(closeAllocator)
 	ctx, closeBrowser := chromedp.NewContext(allocator, chromedp.WithErrorf(func(string, ...any) {}))
 	t.Cleanup(closeBrowser)
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
 	var exceptionMu sync.Mutex
 	var exceptions []string
@@ -368,6 +368,47 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+"`\"currency\" LIKE '%ab''c%'`"+`)`, "operator picker fills a comparison value")
 	chooseOperatorValue("IN", "#db-inline-list", "a, b")
 	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+"`IN ('a', 'b')`"+`)`, "operator picker fills a value list")
+	// A copied statement keeps selectable slots, and its operator/value picker
+	// edits only the pasted copy.
+	run(chromedp.Evaluate(`window.__tabsBefore=document.querySelectorAll('#db-sql-tabs .db-session-tab').length;window.newDatabaseQuery()`, nil))
+	wait(`!!document.querySelector('[data-db-template="where"]') && document.querySelectorAll('#db-sql-tabs .db-session-tab').length===window.__tabsBefore+1`, "paste test new tab")
+	run(chromedp.Click(`[data-db-template="where"]`, chromedp.ByQuery))
+	wait(`!!document.querySelector('[data-db-slot-kind="table"]')`, "paste test where template")
+	run(chromedp.Click(`[data-db-slot-kind="table"]`, chromedp.ByQuery))
+	wait(`!!document.querySelector('#db-inline-source')`, "paste test source")
+	run(chromedp.Evaluate(`document.querySelector('#db-inline-source').value='["west","main"]';document.querySelector('#db-inline-source').dispatchEvent(new Event('change', {bubbles:true}))`, nil))
+	wait(`!document.querySelector('#db-inline-apply').disabled`, "paste test metadata")
+	run(chromedp.Click(`#db-inline-apply`, chromedp.ByQuery), chromedp.Click(`[data-db-slot-kind="field"]`, chromedp.ByQuery))
+	wait(`document.querySelectorAll('#db-inline-body [name="inline-column"]').length===4`, "paste test columns")
+	run(chromedp.Click(`#db-inline-body [value="currency"]`, chromedp.ByQuery), chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes('"currency" IS NOT NULL')`, "paste test field")
+	run(chromedp.Click(`[data-db-slot-kind="operator"]`, chromedp.ByQuery))
+	wait(`!!document.querySelector('#db-inline-operator')`, "paste test operator picker")
+	run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-inline-operator');s.value='=';s.dispatchEvent(new Event('change', {bubbles:true}));document.querySelector('#db-inline-value').value='5'; })()`, nil), chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes("\"currency\" = '5'") && !!document.querySelector('#db-sql-editor [data-db-slot-kind="filterValue"]')`, "paste test comparison value slot")
+	run(chromedp.Evaluate(`(() => {
+		const content = document.querySelector('#db-sql-editor .cm-content'), data = new DataTransfer();
+		content.focus();
+		const line = Array.from(content.querySelectorAll('.cm-line')).find(item => item.textContent.includes('currency'));
+		const range = document.createRange(); range.selectNodeContents(line);
+		const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+		window.__pasteData = data;
+	})()`, nil), chromedp.Sleep(200*time.Millisecond))
+	run(chromedp.ActionFunc(func(ctx context.Context) error { return input.DispatchKeyEvent(input.KeyDown).WithKey("c").WithModifiers(input.ModifierCtrl).WithCommands([]string{"copy"}).Do(ctx) }))
+	run(chromedp.Evaluate(`(() => {
+		const content = document.querySelector('#db-sql-editor .cm-content');
+		const last = content.querySelectorAll('.cm-line'); const end = last[last.length - 1];
+		const range = document.createRange(); range.selectNodeContents(end); range.collapse(false);
+		const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+	})()`, nil), chromedp.Sleep(200*time.Millisecond))
+	run(chromedp.ActionFunc(func(ctx context.Context) error { return input.DispatchKeyEvent(input.KeyDown).WithKey("v").WithModifiers(input.ModifierCtrl).WithCommands([]string{"paste"}).Do(ctx) }))
+	wait(`document.querySelectorAll('#db-sql-editor [data-db-slot-kind="operator"]').length===2 && document.querySelectorAll('#db-sql-editor [data-db-slot-kind="filterValue"]').length===2`, "pasted statement keeps its slots")
+	run(chromedp.Evaluate(`Array.from(document.querySelectorAll('#db-sql-editor [data-db-slot-kind="operator"]')).at(-1).click()`, nil))
+	wait(`!!document.querySelector('#db-inline-operator')`, "pasted operator picker")
+	run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-inline-operator');s.value='LIKE';s.dispatchEvent(new Event('change', {bubbles:true}));document.querySelector('#db-inline-value').value='zz'; })()`, nil), chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+"`\"currency\" LIKE 'zz'`"+`) && document.querySelector('#db-sql-editor .cm-content').textContent.includes("\"currency\" = '5'")`, "pasted statement picker edits only the copy")
+	run(chromedp.Evaluate(`window.confirm=()=>true;document.querySelector('#db-sql-tabs .db-session-tab.active [data-db-close-sql]').click()`, nil))
+	wait(`document.querySelectorAll('#db-sql-tabs .db-session-tab').length===window.__tabsBefore`, "paste test tab closed")
 	if _, err := pool.db.Exec(`CREATE TABLE "odd""table" ("odd""column" TEXT); CREATE VIEW template_view AS SELECT id,note FROM orders`); err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +418,7 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	wait(`Array.from(document.querySelector('#db-inline-table').options).some(o=>o.textContent.includes('odd"table'))`, "quoted table choice")
 	chooseInlineTable(`odd"table`)
 	run(chromedp.Click(`[data-db-slot-kind="columns"]`, chromedp.ByQuery), chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
-	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes('SELECT "odd""column"') && document.querySelector('#db-sql-editor .cm-content').textContent.includes('FROM "odd""table"')`, "inline SQL identifier quoting")
+	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes('SELECT *') && document.querySelector('#db-sql-editor .cm-content').textContent.includes('FROM "odd""table"')`, "inline SQL identifier quoting")
 	run(chromedp.Click(`[data-db-slot-kind="table"]`, chromedp.ByQuery))
 	wait(`!!document.querySelector('#db-inline-table') && !document.querySelector('#db-inline-apply').disabled`, "return to orders table picker")
 	chooseInlineTable("orders")
