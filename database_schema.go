@@ -180,6 +180,17 @@ func handleDatabaseTable(w http.ResponseWriter, r *http.Request, pool *databaseP
 	if offset < 0 {
 		offset = 0
 	}
+	if r.URL.Query().Get("last") == "1" {
+		// Jump to the final page: the offset comes from the current row count.
+		var total int64
+		if err := pool.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM "+databaseTableName(pool.profile.Engine, target)).Scan(&total); err != nil {
+			return err
+		}
+		offset = 0
+		if total > 0 {
+			offset = int((total - 1) / int64(limit) * int64(limit))
+		}
+	}
 	meta := databaseStructure{Columns: []databaseColumn{}, Indexes: []databaseIndex{}, ForeignKeys: []string{}}
 	driver, err := databaseAtlas(pool.db, pool.profile.Engine)
 	if err != nil {

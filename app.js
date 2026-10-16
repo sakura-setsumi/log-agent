@@ -1896,8 +1896,10 @@ async function clearLogCache() {
     if (!response.ok) throw new Error(payload.error || t('stream.toast.cacheClearFailed'));
     state.logs = [];
     state.containerLogCache = {};
+    loadedContainerSelectionKey = '';
     resetLogPagination();
     renderLogs();
+    loadSelectedContainerLogs();
     updateStorage(payload.storage);
     const cleared = Number(payload.cleared) || 0;
     showToast(cleared ? t('stream.toast.cacheCleared', { count: cleared.toLocaleString(activeLanguage() === 'zh' ? 'zh-CN' : 'en-US') }) : t('stream.toast.cacheEmpty'));
@@ -3376,7 +3378,7 @@ function bindCommandFileShelf() {
   document.addEventListener('paste', (event) => { if ($('#commands-view')?.classList.contains('hidden')) return; if (!event.clipboardData?.files?.length) return; event.preventDefault(); collectCommandTransferFiles(event.clipboardData).then(addCommandFiles).catch((error) => showToast(error.message || String(error))); });
 }
 // The upload shelf and the server library live in popups opened from two buttons
-// in the bottom-left corner, mirroring the AI launcher at the bottom-right. One
+// in the bottom-right corner. One
 // popup is open at a time; they stay open while a card is dragged out of them.
 function setCommandPopup(id) {
   $$('.command-dock-popup').forEach((popup) => {

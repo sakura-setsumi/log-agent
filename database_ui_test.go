@@ -98,7 +98,7 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	run(chromedp.Click(`[data-db-database='["east","main"]']`, chromedp.ByQuery))
 	toggleDatabase("east")
 	toggleDatabase("west")
-	run(chromedp.Click(`#db-new-query`, chromedp.ByQuery))
+	run(chromedp.Click(`#db-add-sql-tab`, chromedp.ByQuery))
 	setSQL := func(text string) {
 		t.Helper()
 		run(chromedp.Focus(`#db-sql-editor .cm-content`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error {
@@ -118,6 +118,45 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	run(chromedp.Text(`#db-query-grid`, &merged, chromedp.ByQuery))
 	if !strings.Contains(merged, "华东") || !strings.Contains(merged, "华西") || !strings.Contains(merged, "9223372036854775807") || !strings.Contains(merged, "currency") {
 		t.Fatalf("merged grid lost provenance, columns or integer precision: %s", merged)
+	}
+	// Editing a merged row writes only to that row's source, then retains NULL
+	// handling and reports an optimistic-lock conflict without losing data.
+	run(chromedp.DoubleClick(`#db-query-grid .tabulator-row:first-child [tabulator-field="v3"]`, chromedp.ByQuery))
+	var missingColumnReadOnly bool
+	run(chromedp.Evaluate(`!document.querySelector('#db-query-grid .tabulator-editing input')`, &missingColumnReadOnly))
+	if !missingColumnReadOnly {
+		t.Fatal("a column missing from this source is editable")
+	}
+	editResultNote := func(value string) {
+		t.Helper()
+		run(chromedp.DoubleClick(`#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-query-grid .tabulator-editing input`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText(value).Do(ctx) }), chromedp.KeyEvent(kb.Enter))
+	}
+	editResultNote("result edit")
+	wait(`document.querySelector('#db-query-summary .db-query-edit-status').textContent.includes('Saved:') && document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]').textContent==='result edit' && !document.querySelector('#db-query-grid').inert`, "query result cell saved")
+	resultEastPool, _ := databases.pool(context.Background(), databaseTarget{ID: "east", Database: "main"})
+	resultWestPool, _ := databases.pool(context.Background(), databaseTarget{ID: "west", Database: "main"})
+	var resultEastNote, resultWestNote any
+	if err := resultEastPool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&resultEastNote); err != nil || resultEastNote != nil {
+		t.Fatalf("result edit touched east: %v %v", resultEastNote, err)
+	}
+	if err := resultWestPool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&resultWestNote); err != nil || resultWestNote != "result edit" {
+		t.Fatalf("result edit did not reach west: %v %v", resultWestNote, err)
+	}
+	run(chromedp.Evaluate(`(() => { const cell=document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]'), r=cell.getBoundingClientRect();cell.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2,clientX:r.x+10,clientY:r.y+10})); })()`, nil), chromedp.WaitVisible(`.tabulator-menu-item`, chromedp.ByQuery), chromedp.Click(`.tabulator-menu-item`, chromedp.ByQuery))
+	wait(`!document.querySelector('#db-query-grid').inert && !!document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"] .db-cell-null')`, "query result set to NULL")
+	if err := resultWestPool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&resultWestNote); err != nil || resultWestNote != nil {
+		t.Fatalf("result NULL was not saved: %v %v", resultWestNote, err)
+	}
+	if _, err := resultWestPool.db.Exec("UPDATE orders SET note='external edit' WHERE id=1"); err != nil {
+		t.Fatal(err)
+	}
+	editResultNote("stale edit")
+	wait(`document.querySelector('#db-query-summary .db-query-edit-status.db-error')?.textContent.includes('record changed') && !document.querySelector('#db-query-grid').inert && !!document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"] .db-cell-null')`, "failed result edit restores the displayed value")
+	if err := resultWestPool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&resultWestNote); err != nil || resultWestNote != "external edit" {
+		t.Fatalf("stale result overwrote live data: %v %v", resultWestNote, err)
+	}
+	if _, err := resultWestPool.db.Exec("UPDATE orders SET note=NULL WHERE id=1"); err != nil {
+		t.Fatal(err)
 	}
 	setSQL("-- semicolon ; in a comment\nSELECT 'left;right' AS marker;\n\nSELECT id FROM orders ORDER BY id;")
 	wait(`document.querySelectorAll('.db-statement-action[data-scope="single"]').length===2 && document.querySelectorAll('.db-statement-action[data-scope="multi"]:enabled').length===2`, "per-statement single and multi query actions")
@@ -194,6 +233,12 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	wait(`!!document.querySelector('[data-db-table]')`, "table tree")
 	run(chromedp.Click(`[data-db-table='["east","main"]']`, chromedp.ByQuery))
 	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===2`, "editable table")
+	run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-page-size');s.add(new Option('1','1'));s.value='1';s.dispatchEvent(new Event('change', {bubbles:true})); })()`, nil))
+	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===1 && !document.querySelector('#db-page-last').disabled`, "single-row pages")
+	run(chromedp.Evaluate(`window.__firstPageId=document.querySelector('#db-data-grid .tabulator-row [tabulator-field="v0"]').textContent`, nil), chromedp.Click(`#db-page-last`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-data-grid .tabulator-row [tabulator-field="v0"]').textContent!==window.__firstPageId && document.querySelector('#db-page-label').textContent.includes('2') && document.querySelector('#db-page-last').disabled`, "last page")
+	run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-page-size');s.value='100';s.dispatchEvent(new Event('change', {bubbles:true})); })()`, nil))
+	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===2`, "page size restored")
 	run(chromedp.DoubleClick(`#db-data-grid .tabulator-row:first-child [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-data-grid .tabulator-cell.tabulator-editing input`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("browser edit").Do(ctx) }))
 	run(chromedp.KeyEvent(kb.Enter))
 	wait(`!document.querySelector('#db-save-rows').disabled`, "pending edit")
@@ -228,7 +273,7 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	wait(`!document.querySelector('#db-apply-schema').disabled`, "create-index preview")
 	run(chromedp.Click(`#db-apply-schema`, chromedp.ByQuery))
 	wait(`document.querySelector('#db-schema-modal').classList.contains('hidden') && document.querySelector('#db-index-grid').textContent.includes('idx_ui_name')`, "index in designer")
-	run(chromedp.Click(`#db-new-query`, chromedp.ByQuery))
+	run(chromedp.Click(`#db-add-sql-tab`, chromedp.ByQuery))
 	setSQL("SELECT name FROM ui_created")
 	run(chromedp.Click(`#db-run-query`, chromedp.ByQuery))
 	wait(`document.querySelector('#db-query-summary').textContent.includes('1/2') && document.querySelector('#db-query-summary .error') !== null`, "visible partial-source failure")
@@ -270,6 +315,16 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 		fragment, _ := json.Marshal(template.fragment)
 		wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+string(fragment)+`)`, template.id+" template")
 	}
+	// Templates add a new statement on blank lines and replace the occupied line.
+	run(chromedp.Click(`[data-db-template="where"]`, chromedp.ByQuery), chromedp.Evaluate(`window.__firstTemplateSQL=document.querySelector('#db-sql-editor .cm-line').textContent`, nil), chromedp.Focus(`#db-sql-editor .cm-content`, chromedp.ByQuery), chromedp.KeyEvent(kb.Control+kb.End), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("\n").Do(ctx) }), chromedp.Click(`[data-db-template="order"]`, chromedp.ByQuery))
+	wait(`(() => {const lines=[...document.querySelectorAll('#db-sql-editor .cm-line')].filter(line=>line.textContent.trim());return lines.length===2 && lines[0].textContent===window.__firstTemplateSQL && lines[1].textContent.includes('ORDER BY');})()`, "blank line inserts a second template")
+	run(chromedp.Click(`[data-db-template="count"]`, chromedp.ByQuery))
+	wait(`(() => {const lines=[...document.querySelectorAll('#db-sql-editor .cm-line')].filter(line=>line.textContent.trim());return lines.length===2 && lines[0].textContent===window.__firstTemplateSQL && lines[1].textContent.includes('COUNT(*)') && !lines[1].textContent.includes('ORDER BY');})()`, "occupied line replaces only its template")
+	run(chromedp.Click(`#db-sql-editor .cm-line:nth-child(2) [data-db-slot-kind="table"]`, chromedp.ByQuery))
+	wait(`!!document.querySelector('#db-inline-table') && !document.querySelector('#db-inline-apply').disabled`, "second statement table picker")
+	chooseInlineTable("orders")
+	wait(`document.querySelector('#db-sql-editor .cm-line').textContent===window.__firstTemplateSQL`, "editing the second statement preserves the first")
+	setSQL("SELECT 1;")
 	var noAutomaticQuery bool
 	run(chromedp.Evaluate(`window.__templateQueries===0 && document.querySelector('#db-target-select').dataset.count==='2'`, &noAutomaticQuery))
 	if !noAutomaticQuery {
@@ -300,6 +355,19 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes('BETWEEN NULL AND NULL')`, "range operator arguments")
 	chooseOperator("IS NULL")
 	wait(`!document.querySelector('[data-db-slot-kind="filterValue"]') && document.querySelector('#db-sql-editor .cm-content').textContent.includes('"currency" IS NULL') && !document.querySelector('#db-sql-editor .cm-content').textContent.includes('AND NULL')`, "null operator removes its argument")
+	chooseOperatorValue := func(operator, field, value string) {
+		t.Helper()
+		op, _ := json.Marshal(operator)
+		id, _ := json.Marshal(field)
+		text, _ := json.Marshal(value)
+		run(chromedp.Click(`[data-db-slot-kind="operator"]`, chromedp.ByQuery))
+		wait(`!!document.querySelector('#db-inline-operator')`, "operator picker with value input")
+		run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-inline-operator');s.value=`+string(op)+`;s.dispatchEvent(new Event('change', {bubbles:true}));document.querySelector(`+string(id)+`).value=`+string(text)+`; })()`, nil), chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
+	}
+	chooseOperatorValue("LIKE", "#db-inline-value", "%ab'c%")
+	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+"`\"currency\" LIKE '%ab''c%'`"+`)`, "operator picker fills a comparison value")
+	chooseOperatorValue("IN", "#db-inline-list", "a, b")
+	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+"`IN ('a', 'b')`"+`)`, "operator picker fills a value list")
 	if _, err := pool.db.Exec(`CREATE TABLE "odd""table" ("odd""column" TEXT); CREATE VIEW template_view AS SELECT id,note FROM orders`); err != nil {
 		t.Fatal(err)
 	}
@@ -330,6 +398,19 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes('FROM "orders"') && document.querySelector('#db-target-select').dataset.count==='2' && document.querySelectorAll('#db-query-grid .tabulator-row').length===4`, "SQL text targets and result restored")
 	run(chromedp.Click(`[data-db-sql="`+secondSQL+`"]`, chromedp.ByQuery))
 	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes('other_tab') && document.querySelector('#db-target-select').dataset.count==='1'`, "second SQL context restored")
+	// Tabs and connections can be reordered by dragging.
+	dragTab := `(from, to, after) => { const tabs = [...document.querySelectorAll('#db-sql-tabs .db-session-tab')], find = id => tabs.findIndex(tab => tab.dataset.reorder === id), dt = new DataTransfer(), rect = tabs[find(to)].getBoundingClientRect(), point = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: after ? rect.right - 1 : rect.left + 1, clientY: rect.top + 1 }; tabs[find(from)].dispatchEvent(new DragEvent('dragstart', point)); tabs[find(to)].dispatchEvent(new DragEvent('dragover', point)); tabs[find(to)].dispatchEvent(new DragEvent('drop', point)); }`
+	var leadSQL string
+	run(chromedp.Evaluate(`document.querySelector('#db-sql-tabs [data-db-sql]').dataset.dbSql`, &leadSQL))
+	run(chromedp.Evaluate(`(`+dragTab+`)('`+secondSQL+`', '`+leadSQL+`', false)`, nil))
+	wait(`document.querySelector('#db-sql-tabs [data-db-sql]').dataset.dbSql==='`+secondSQL+`'`, "SQL tab dragged to the front")
+	run(chromedp.Evaluate(`(`+dragTab+`)('`+secondSQL+`', '`+firstSQL+`', true)`, nil))
+	wait(`document.querySelector('#db-sql-tabs [data-db-sql]').dataset.dbSql==='`+leadSQL+`' && [...document.querySelectorAll('#db-sql-tabs [data-db-sql]')].at(-1).dataset.dbSql==='`+secondSQL+`'`, "SQL tab dragged back")
+	var reordered bool
+	run(chromedp.Evaluate(`(async () => { const ids = async () => (await (await fetch('/api/database/profiles')).json()).map(p => p.id), before = await ids(); if (before.length < 2) return false; const reversed = [...before].reverse(); await fetch('/api/database/profiles', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ order: reversed }) }); const after = await ids(); await fetch('/api/database/profiles', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ order: before }) }); return JSON.stringify(after) === JSON.stringify(reversed) && JSON.stringify(await ids()) === JSON.stringify(before); })()`, &reordered, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }))
+	if !reordered {
+		t.Fatal("connection order was not persisted")
+	}
 	setSQL("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<3000000) SELECT sum(x) AS background_total FROM n;")
 	run(chromedp.Click(`#db-run-query`, chromedp.ByQuery), chromedp.Click(`[data-db-sql="`+firstSQL+`"]`, chromedp.ByQuery))
 	wait(`!document.querySelector('#db-run-query').disabled && document.querySelectorAll('#db-query-grid .tabulator-row').length===4`, "another tab remains usable during background query")
@@ -370,7 +451,7 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	if !orderedPanes {
 		t.Fatal("SQL and table tab strips were not arranged above and below the editor")
 	}
-	run(chromedp.Click(`#db-new-connection`, chromedp.ByQuery), chromedp.WaitVisible(`#db-connection-modal`, chromedp.ByQuery))
+	run(chromedp.Evaluate(`openDatabaseConnection()`, nil), chromedp.WaitVisible(`#db-connection-modal`, chromedp.ByQuery))
 	fileJSON, _ := json.Marshal(filepath.Join(t.TempDir(), "UI connection #中文.db"))
 	run(chromedp.Evaluate(`(() => { const f=document.querySelector('#db-connection-form'); f.elements.engine.value='sqlite'; f.elements.engine.dispatchEvent(new Event('change', {bubbles:true})); f.elements.name.value='UI connection'; f.elements.file.value=`+string(fileJSON)+`; })()`, nil), chromedp.Click(`#db-test-connection`, chromedp.ByQuery))
 	wait(`document.querySelector('#db-connection-status').textContent==='Connection successful'`, "new SQLite connection tested")

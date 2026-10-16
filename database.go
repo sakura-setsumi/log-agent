@@ -360,6 +360,37 @@ func handleDatabaseProfiles(w http.ResponseWriter, r *http.Request) {
 		p.HasPassword = p.Password != ""
 		p.Password = ""
 		writeJSON(w, 200, p)
+	case "PUT":
+		// Persist the order chosen by dragging connections in the tree.
+		var req struct {
+			Order []string `json:"order"`
+		}
+		if err = decodeDatabaseRequest(w, r, &req); err != nil {
+			databaseError(w, 400, err)
+			return
+		}
+		byID := make(map[string]databaseProfile, len(profiles))
+		for _, p := range profiles {
+			byID[p.ID] = p
+		}
+		ordered := make([]databaseProfile, 0, len(profiles))
+		for _, id := range req.Order {
+			if p, ok := byID[id]; ok {
+				ordered = append(ordered, p)
+				delete(byID, id)
+			}
+		}
+		// Connections missing from the request keep their relative order at the end.
+		for _, p := range profiles {
+			if _, ok := byID[p.ID]; ok {
+				ordered = append(ordered, p)
+			}
+		}
+		if err = writeJSONFile(databaseProfilesPath(), ordered); err != nil {
+			databaseError(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"ok": true})
 	case "DELETE":
 		id := r.URL.Query().Get("id")
 		found := false
@@ -512,15 +543,16 @@ func queryDatabase(ctx context.Context, q interface {
 }
 
 type databaseSourceResult struct {
-	Target       databaseTarget `json:"target"`
-	Name         string         `json:"name"`
-	Engine       string         `json:"engine"`
-	Result       databaseResult `json:"result"`
-	Error        string         `json:"error,omitempty"`
-	Milliseconds int64          `json:"milliseconds"`
-	RowCount     int            `json:"rowCount"`
-	Affected     *int64         `json:"affected,omitempty"`
-	Executed     bool           `json:"executed"`
+	Edit         *databaseQueryEdit `json:"edit,omitempty"`
+	Target       databaseTarget     `json:"target"`
+	Name         string             `json:"name"`
+	Engine       string             `json:"engine"`
+	Result       databaseResult     `json:"result"`
+	Error        string             `json:"error,omitempty"`
+	Milliseconds int64              `json:"milliseconds"`
+	RowCount     int                `json:"rowCount"`
+	Affected     *int64             `json:"affected,omitempty"`
+	Executed     bool               `json:"executed"`
 }
 type databaseMergedRow struct {
 	Source int   `json:"source"`
@@ -727,6 +759,9 @@ func handleDatabaseQuery(w http.ResponseWriter, r *http.Request) {
 					source.Executed = statementExecution
 				} else {
 					source.Result, e = databaseReadQuery(ctx, pool, text, req.Limit)
+				}
+				if e == nil && !source.Executed {
+					source.Edit = describeDatabaseQueryEdit(ctx, pool, source.Target, text, source.Result)
 				}
 				cancel()
 			}

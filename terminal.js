@@ -41,7 +41,7 @@
     term.open(host);
     const session = {
       key: ++sequence,
-      server,
+      server: { ...server },
       name: server.name || server.host,
       host,
       term,
@@ -57,6 +57,9 @@
       entries: [],
       selected: new Set(),
       tree: new Map(),
+      treeRequests: new Map(),
+      treeEpoch: 0,
+      dirRequest: 0,
       open: new Set(['/']),
       resizeTimer: 0,
     };
@@ -90,6 +93,7 @@
 
   function activate(session) {
     active = session;
+    if (session && [...$v('#term-server-select').options].some(option => option.value === session.server.id)) $v('#term-server-select').value = session.server.id;
     sessions.forEach((item) => item.host.classList.toggle('active', item === session));
     $v('#term-empty').classList.toggle('hidden', sessions.length > 0);
     renderTabs();
@@ -117,6 +121,8 @@
     if (response.status === 428 && payload.fingerprint) {
       if (!window.confirm(t('commands.confirmFingerprint', { fingerprint: payload.fingerprint }))) return false;
       server.hostFingerprint = payload.fingerprint;
+      const saved = (state.commandServers || []).find(item => item.id === server.id);
+      if (saved && saved.host === server.host && saved.user === server.user && String(saved.port || '22') === String(server.port || '22')) saved.hostFingerprint = payload.fingerprint;
       saveCommandFlows();
       response = await request();
       payload = await response.json().catch(() => ({}));
@@ -134,7 +140,7 @@
     button.textContent = t('terminal.connecting');
     const session = createSession(server);
     try {
-      if (!(await openServerSession(server, session))) { disposeSession(session); return; }
+      if (!(await openServerSession(session.server, session))) { disposeSession(session); return; }
       session.status = 'open';
       renderTabs();
       fitActive();
@@ -199,6 +205,10 @@
   }
 
   function disposeSession(session) {
+    const documents = textDocuments.filter(doc => doc.session === session);
+    if (documents.some(doc => doc.saving)) return false;
+    if (documents.some(doc => doc.dirty) && !window.confirm(et('discard'))) return false;
+    for (const doc of documents) removeTextDocument(doc, true);
     session.closed = true;
     clearTimeout(session.resizeTimer);
     session.abort?.abort();
@@ -216,9 +226,10 @@
     $v('#term-empty').classList.toggle('hidden', sessions.length > 0);
   }
 
+  const sessionAddress = session => `${session.server.user || ''}@${session.server.host || ''}:${session.server.port || '22'}`;
   function renderTabs() {
     const tabs = $v('#term-tabs');
-    tabs.innerHTML = sessions.map((session) => `<div class="term-tab ${session === active ? 'active' : ''} ${session.status}" role="tab" data-key="${session.key}"><i class="term-tab-dot"></i><span>${escapeHtml(session.name)}</span><button type="button" class="term-tab-close" data-close="${session.key}" title="${escapeHtml(t('terminal.closeTab'))}" aria-label="${escapeHtml(t('terminal.closeTab'))}">×</button></div>`).join('');
+    tabs.innerHTML = sessions.map((session) => `<div class="term-tab ${session === active ? 'active' : ''} ${session.status}" role="tab" data-key="${session.key}" data-server-id="${escapeHtml(session.server.id)}" title="${escapeHtml(sessionAddress(session))}"><i class="term-tab-dot"></i><span>${escapeHtml(session.name)} · ${escapeHtml(session.server.host)}</span><button type="button" class="term-tab-close" data-close="${session.key}" title="${escapeHtml(t('terminal.closeTab'))}" aria-label="${escapeHtml(t('terminal.closeTab'))}">×</button></div>`).join('');
   }
 
   // -------------------------------------------------------------------- files
@@ -233,12 +244,16 @@
 
   async function loadDir(session, path) {
     if (!session.sid) return false;
+    const request = ++session.dirRequest, sid = session.sid;
     const response = await api(`fs/list?${query({ id: session.sid, path })}`).catch(() => null);
+    if (request !== session.dirRequest || session.closed || sid !== session.sid) return false;
     if (!response || !response.ok) {
       if (session === active) showToast(response ? await errorText(response, t('terminal.file.loadFailed')) : t('terminal.file.loadFailed'));
       return false;
     }
     const data = await response.json();
+    if (request !== session.dirRequest || session.closed || sid !== session.sid) return false;
+    session.treeRequests.set(data.path, (session.treeRequests.get(data.path) || 0) + 1);
     session.cwd = data.path;
     session.entries = data.entries;
     session.selected = new Set();
@@ -252,17 +267,24 @@
     for (let i = 0; i <= parts.length; i += 1) {
       session.open.add(walk);
       if (!session.tree.has(walk)) missing.push(walk);
-      if (i < parts.length) walk = joinPath(walk, parts[i]);
+      if (i < parts.length) {
+        const children = session.tree.get(walk) || [];
+        if (!children.includes(parts[i])) session.tree.set(walk, [...children, parts[i]].sort((a, b) => a.localeCompare(b)));
+        walk = joinPath(walk, parts[i]);
+      }
     }
     await Promise.all(missing.map((dir) => loadTreeNode(session, dir)));
-    if (session === active) renderFiles();
-    return true;
+    if (session === active && request === session.dirRequest) renderFiles();
+    return request === session.dirRequest;
   }
 
   async function loadTreeNode(session, path) {
+    const epoch = session.treeEpoch, request = (session.treeRequests.get(path) || 0) + 1;
+    session.treeRequests.set(path, request);
     const response = await api(`fs/list?${query({ id: session.sid, path })}`).catch(() => null);
-    if (!response || !response.ok) { session.tree.set(path, []); return; }
+    if (!response || !response.ok) return false;
     const data = await response.json();
+    if (session.closed || epoch !== session.treeEpoch || request !== session.treeRequests.get(path)) return false;
     session.tree.set(path, data.entries.filter((entry) => entry.isDir).map((entry) => entry.name));
   }
 
@@ -292,6 +314,9 @@
     const rows = $v('#term-file-rows');
     const tree = $v('#term-tree');
     const path = $v('#term-path');
+    path.title = active ? sessionAddress(active) : '';
+    $v('#term-file-source').textContent = active ? sessionAddress(active) : '';
+    $v('#term-file-source').title = active ? sessionAddress(active) : '';
     if (!active) {
       rows.innerHTML = '';
       tree.innerHTML = '';
@@ -428,7 +453,7 @@
         showToast(message);
       } finally {
         if (!session.closed && session.status !== 'ended') {
-          session.tree.clear();
+          session.treeEpoch++; session.tree.clear();
           await loadDir(session, session.cwd);
         }
       }
@@ -465,7 +490,7 @@
 
   function renderServers() {
     const select = $v('#term-server-select');
-    const previous = select.value;
+    const previous = active?.server.id || select.value;
     const servers = state.commandServers || [];
     select.innerHTML = servers.length
       ? servers.map((server) => `<option value="${escapeHtml(server.id)}">${escapeHtml(`${server.name || server.host} · ${server.user || ''}@${server.host || ''}`)}</option>`).join('')
@@ -506,7 +531,7 @@
     });
     view.querySelectorAll('[data-term-pane]').forEach((button) => button.addEventListener('click', () => setPane(button.dataset.termPane)));
 
-    $v('#term-refresh').addEventListener('click', () => { if (usable()) { active.tree.clear(); loadDir(active, active.cwd); } });
+    $v('#term-refresh').addEventListener('click', () => { if (usable()) { active.treeEpoch++; active.tree.clear(); loadDir(active, active.cwd); } });
     $v('#term-up').addEventListener('click', () => { if (usable() && active.cwd) loadDir(active, parentPath(active.cwd)); });
     $v('#term-mkdir').addEventListener('click', makeDir);
     $v('#term-rename').addEventListener('click', renameSelected);
@@ -568,7 +593,7 @@
       if (!row || !active) return;
       const entry = active.entries.find((item) => item.name === row.dataset.name);
       if (!entry) return;
-      if (entry.isDir) loadDir(active, joinPath(active.cwd, entry.name)); else downloadEntry(entry);
+      if (entry.isDir) loadDir(active, joinPath(active.cwd, entry.name)); else openTextFile(active, entry);
     });
 
     const wrap = $v('#term-table-wrap');
@@ -613,5 +638,99 @@
     }
   }
 
+  const textLabels = {
+    title: ['Text editor', '文本编辑器'], save: ['Save · Ctrl+S', '保存 · Ctrl+S'], search: ['Search · Ctrl+F', '搜索 · Ctrl+F'], wrap: ['Word wrap', '自动换行'], download: ['Download', '下载'], close: ['Close', '关闭'], minimize: ['Minimize', '收起'], loading: ['Opening {name}…', '正在打开 {name}…'], saving: ['Saving…', '正在保存…'], saved: ['Saved to server', '已保存到服务器'], dirty: ['Unsaved changes', '尚未保存'], discard: ['Discard unsaved file changes?', '放弃未保存的文件修改吗？'], readOnly: ['Read-only', '只读'], preview: ['Large file: previewing the first 2 MiB, read-only. Download to view the complete file.', '大文件：仅预览前 2 MiB，当前只读，可下载查看完整内容。'], position: ['Line {line}, column {column} · {lines} lines', '第 {line} 行，第 {column} 列 · 共 {lines} 行'], failed: ['Could not open the text file', '无法打开文本文件'], saveFailed: ['Save failed', '保存失败'], conflict: ['The remote file changed. Your edits are retained; reopen the file to compare before saving.', '远端文件已变化，已保留当前编辑内容；请重新打开文件核对后再保存。'], disconnected: ['This SSH session has closed. Your edits are retained.', 'SSH 会话已关闭，当前编辑内容已保留。'],
+  };
+  for (const [key, [en, zh]] of Object.entries(textLabels)) { i18n.en['terminal.editor.' + key] = en; i18n.zh['terminal.editor.' + key] = zh; }
+  const et = (key, values) => t('terminal.editor.' + key, values);
+  const $e = id => document.getElementById(id);
+  const textDocuments = [], openingText = new Map();
+  let activeText = null, textSequence = 0;
+  function renderTextEditor() {
+    const doc = activeText;
+    $e('term-editor-tabs').innerHTML = textDocuments.map(item => `<div class="term-editor-tab ${item === doc ? 'active' : ''}"><button type="button" data-text-document="${item.id}" title="${escapeHtml(sessionAddress(item.session) + ' ' + item.path)}">${escapeHtml(item.name)}${item.dirty ? ' ●' : ''}</button><button type="button" data-text-close="${item.id}" aria-label="${escapeHtml(et('close'))}">×</button></div>`).join('');
+    textDocuments.forEach(item => item.host.classList.toggle('hidden', item !== doc));
+    $e('term-editor-title').textContent = doc ? `${sessionAddress(doc.session)} · ${doc.path}` : et('title');
+    for (const key of ['save', 'search', 'wrap', 'download']) $e('term-editor-' + key).textContent = et(key);
+    $e('term-editor-close').title = et('close'); $e('term-editor-minimize').title = et('minimize');
+    $e('term-editor-save').disabled = !doc || doc.readOnly || doc.saving || !doc.dirty || doc.session.closed;
+    $e('term-editor-wrap').setAttribute('aria-pressed', String(doc?.wrap !== false));
+    $e('term-editor-notice').textContent = doc?.truncated ? et('preview') : doc?.readOnly ? et('readOnly') : '';
+    $e('term-editor-notice').classList.toggle('hidden', !doc?.readOnly);
+    const message = doc?.error || (doc?.saving ? et('saving') : doc?.dirty ? et('dirty') : doc?.message || '');
+    $e('term-editor-message').textContent = message; $e('term-editor-message').classList.toggle('error', Boolean(doc?.error));
+    if (doc?.editor) { const position = doc.editor.position(); $e('term-editor-position').textContent = `${doc.editor.language} · ${doc.encoding} · ${et('position', position)}`; }
+    else $e('term-editor-position').textContent = '';
+  }
+  function activateTextDocument(doc) {
+    activeText = doc; $e('term-editor-window').classList.remove('hidden'); renderTextEditor();
+    requestAnimationFrame(() => { doc.editor.resize(); doc.editor.focus(); });
+  }
+  function removeTextDocument(doc, force = false) {
+    if (doc.saving || !force && doc.dirty && !window.confirm(et('discard'))) return false;
+    doc.editor.destroy(); doc.host.remove(); textDocuments.splice(textDocuments.indexOf(doc), 1);
+    if (activeText === doc) activeText = textDocuments.at(-1) || null;
+    if (activeText) activateTextDocument(activeText); else { $e('term-editor-window').classList.add('hidden'); renderTextEditor(); }
+    return true;
+  }
+  function closeTextEditor() {
+    if (textDocuments.some(doc => doc.saving)) return;
+    if (textDocuments.some(doc => doc.dirty) && !window.confirm(et('discard'))) return;
+    for (const doc of [...textDocuments]) removeTextDocument(doc, true);
+  }
+  async function saveTextDocument(doc = activeText) {
+    if (!doc || doc.readOnly || doc.saving || !doc.dirty) return;
+    if (doc.session.closed || doc.session.status === 'ended') { doc.error = et('disconnected'); renderTextEditor(); return; }
+    const content = doc.editor.value(); doc.saving = true; doc.error = ''; renderTextEditor();
+    try {
+      const response = await api(`fs/text?${query({ id: doc.session.sid, path: doc.path })}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: content, encoding: doc.encoding, etag: doc.etag }) });
+      if (!response.ok) throw new Error(response.status === 409 ? et('conflict') : await errorText(response, et('saveFailed')));
+      const result = await response.json(); doc.etag = result.etag; doc.size = result.size; doc.baseline = content; doc.dirty = doc.editor.value() !== content; doc.message = et('saved');
+      if (!doc.session.closed && parentPath(doc.path) === doc.session.cwd) await loadDir(doc.session, doc.session.cwd);
+    } catch (error) { doc.error = error.message || et('saveFailed'); }
+    finally { doc.saving = false; renderTextEditor(); }
+  }
+  async function downloadTextDocument() {
+    const doc = activeText; if (!doc || doc.session.closed) return;
+    const response = await api(`fs/download?${query({ id: doc.session.sid, path: doc.path })}`).catch(() => null);
+    if (!response?.ok) { showToast(response ? await errorText(response, et('failed')) : et('failed')); return; }
+    const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = doc.name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+  async function openTextFile(session, entry) {
+    const remotePath = joinPath(session.cwd, entry.name), key = `${session.key}:${remotePath}`;
+    const existing = textDocuments.find(doc => doc.key === key);
+    if (existing) { activateTextDocument(existing); return; }
+    if (openingText.has(key)) return;
+    // Archives, executables and media retain the existing download action.
+    if (/\.(?:zip|gz|tgz|bz2|xz|7z|rar|tar|jar|war|class|exe|dll|so|bin|png|jpe?g|gif|webp|ico|pdf|woff2?|ttf|mp[34]|wav|avi|sqlite|db|xlsx?|docx?|pptx?)$/i.test(entry.name)) { if (session === active) downloadEntry(entry); return; }
+    openingText.set(key, true); setStatus(et('loading', { name: entry.name }));
+    try {
+      const response = await api(`fs/text?${query({ id: session.sid, path: remotePath })}`);
+      if (response.status === 415) { if (session === active && session.cwd === parentPath(remotePath)) await downloadEntry(entry); return; }
+      if (!response.ok) throw new Error(await errorText(response, et('failed')));
+      const data = await response.json(); if (session.closed) return;
+      const doc = { ...data, id: `remote-text-${++textSequence}`, name: entry.name, session, key, host: document.createElement('div'), dirty: false, saving: false, wrap: true, error: '', message: '' };
+      doc.host.className = 'term-editor-document'; $e('term-editor-content').appendChild(doc.host);
+      doc.editor = DatabaseUI.createRemoteTextEditor(doc.host, { path: doc.path, text: doc.text, readOnly: doc.readOnly, save: () => saveTextDocument(doc), change: () => { if (!doc.editor) return; doc.dirty = doc.editor.value() !== doc.baseline; doc.message = ''; renderTextEditor(); } });
+      doc.baseline = doc.editor.value(); textDocuments.push(doc); activateTextDocument(doc);
+    } catch (error) { showToast(error.message || et('failed')); }
+    finally { openingText.delete(key); if (session === active) setStatus(''); }
+  }
+  function bindTextEditor() {
+    $e('term-editor-save').addEventListener('click', () => saveTextDocument());
+    $e('term-editor-search').addEventListener('click', () => activeText?.editor.search());
+    $e('term-editor-wrap').addEventListener('click', () => { if (!activeText) return; activeText.wrap = !activeText.wrap; activeText.editor.wrap(activeText.wrap); renderTextEditor(); });
+    $e('term-editor-download').addEventListener('click', downloadTextDocument);
+    $e('term-editor-close').addEventListener('click', closeTextEditor);
+    $e('term-editor-minimize').addEventListener('click', () => $e('term-editor-window').classList.add('hidden'));
+    $e('term-editor-tabs').addEventListener('click', event => { const close = event.target.closest('[data-text-close]'), select = event.target.closest('[data-text-document]'); const doc = textDocuments.find(item => item.id === (close?.dataset.textClose || select?.dataset.textDocument)); if (doc) { if (close) removeTextDocument(doc); else activateTextDocument(doc); } });
+    window.addEventListener('beforeunload', event => { if (textDocuments.some(doc => doc.dirty || doc.saving)) { event.preventDefault(); event.returnValue = ''; } });
+    const card = $e('term-editor-card'), handle = $e('term-editor-heading'); let drag = null;
+    handle.addEventListener('pointerdown', event => { if (event.button !== 0 || event.target.closest('button')) return; const rect = card.getBoundingClientRect(); drag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top }; handle.setPointerCapture(event.pointerId); event.preventDefault(); });
+    handle.addEventListener('pointermove', event => { if (!drag) return; card.style.transform = 'none'; card.style.left = Math.max(0, Math.min(innerWidth - card.offsetWidth, drag.left + event.clientX - drag.x)) + 'px'; card.style.top = Math.max(34, Math.min(innerHeight - 40, drag.top + event.clientY - drag.y)) + 'px'; });
+    for (const type of ['pointerup', 'pointercancel']) handle.addEventListener(type, () => { drag = null; });
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => activeText?.editor.resize()).observe(card);
+  }
   bind();
+  bindTextEditor();
 })();

@@ -1,3 +1,4 @@
+import { createRemoteTextEditor } from './remote-text-editor.js';
 import { EditorView, basicSetup } from 'codemirror';
 import { Compartment, StateEffect, StateField, RangeSet, Prec } from '@codemirror/state';
 import { keymap, gutter, GutterMarker } from '@codemirror/view';
@@ -5,7 +6,7 @@ import { sql } from '@codemirror/lang-sql';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { TabulatorFull } from 'tabulator-tables';
 import { recognizeStatements, queryAtCursor, sqlDialect } from './statements.js';
-import { inlineSlots, setSlots, expandTemplate, replaceSlotValues, replacePredicate } from './inline-slots.js';
+import { inlineSlots, setSlots, applyTemplate, replaceSlotValues, replacePredicate } from './inline-slots.js';
 
 const queryContext = StateEffect.define();
 class QueryActions extends GutterMarker {
@@ -33,9 +34,12 @@ function actionMarkers(state, statements, context, execute) {
 }
 
 window.DatabaseUI = {
+  createRemoteTextEditor,
   Tabulator: TabulatorFull,
   createEditor(parent, run, executeStatement, onChange, onSlot) {
     const language = new Compartment(), theme = new Compartment();
+    let activeTemplate;
+    const activeSlots = () => editor.state.field(inlineSlots).filter(slot => slot.template?.id === activeTemplate);
     const actions = StateField.define({
       create(state) { const context = { engine: 'mysql', singleLabel: 'Run on one database', multiLabel: 'Run on checked databases' }, statements = recognizeStatements(state.doc.toString()); return { context, statements, markers: actionMarkers(state, statements, context, executeStatement) }; },
       update(value, transaction) {
@@ -51,7 +55,7 @@ window.DatabaseUI = {
       extensions: [basicSetup, EditorView.lineWrapping, language.of(sql()), theme.of([]),
         actions, inlineSlots, gutter({ class: 'cm-query-actions', side: 'after', markers: view => view.state.field(actions).markers }),
         EditorView.updateListener.of(update => { if (update.docChanged) onChange?.(); }),
-        EditorView.domEventHandlers({ click(event, view) { const target = event.target.closest('[data-db-slot]'); if (target) { const slot = view.state.field(inlineSlots).find(item => item.id === target.dataset.dbSlot); if (slot) { onSlot?.(slot); return true; } } return false; } }),
+        EditorView.domEventHandlers({ click(event, view) { const target = event.target.closest('[data-db-slot]'); if (target) { const slot = view.state.field(inlineSlots).find(item => item.id === target.dataset.dbSlot); if (slot) { activeTemplate = slot.template?.id; onSlot?.(slot); return true; } } return false; } }),
         Prec.highest(keymap.of([{ key: 'Mod-Enter', run: () => { run(); return true; } }])),
         EditorView.theme({ '&': { height: '100%', fontSize: '13px' }, '.cm-scroller': { fontFamily: 'Consolas, monospace', overflow: 'auto' }, '.cm-content': { minHeight: '120px' } })],
     });
@@ -60,17 +64,28 @@ window.DatabaseUI = {
       value: () => editor.state.doc.toString(),
       selected: () => editor.state.sliceDoc(editor.state.selection.main.from, editor.state.selection.main.to),
       setValue: value => editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: value }, effects: setSlots.of([]), selection: { anchor: 0 }, scrollIntoView: true }),
-      setTemplate(template, values, labels) { const result = expandTemplate(template, values, labels); editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: result.sql }, effects: setSlots.of(result.slots), selection: { anchor: 0 }, scrollIntoView: true }); },
+      setTemplate(template, values, labels, metadata) {
+        const state = editor.state, statement = queryAtCursor(state.field(actions).statements, state.selection.main.head, state.doc.toString());
+        const result = applyTemplate(state, template, values, labels, metadata, statement);
+        activeTemplate = result.groupId; editor.dispatch(result.transaction);
+      },
+      setTemplateContext(context) { editor.dispatch({ effects: setSlots.of(editor.state.field(inlineSlots).map(slot => slot.template?.id === activeTemplate ? { ...slot, template: { ...slot.template, context } } : slot)) }); },
+      templateAtCursor() {
+        const state = editor.state, line = state.doc.lineAt(state.selection.main.head);
+        if (!line.text.trim()) return null;
+        const range = queryAtCursor(state.field(actions).statements, state.selection.main.head, state.doc.toString()) || line;
+        return state.field(inlineSlots).find(slot => slot.from >= range.from && slot.to <= range.to)?.template || null;
+      },
       slots: () => editor.state.field(inlineSlots),
-      slotText: kind => { const slot = editor.state.field(inlineSlots).find(slot => slot.kind === kind); return slot ? editor.state.sliceDoc(slot.from, slot.to) : null; },
+      slotText: kind => { const slot = activeSlots().find(slot => slot.kind === kind); return slot ? editor.state.sliceDoc(slot.from, slot.to) : null; },
       selectSlot(id) { const slot = editor.state.field(inlineSlots).find(slot => slot.id === id); if (slot) { editor.dispatch({ selection: { anchor: slot.from, head: slot.to }, scrollIntoView: true }); editor.focus(); } },
       slotRect(id) { const slot = editor.state.field(inlineSlots).find(slot => slot.id === id); return slot ? editor.coordsAtPos(slot.from) : null; },
       replaceSlots(values) {
-        const transaction = replaceSlotValues(editor.state, values); if (transaction) editor.dispatch(transaction);
+        const transaction = replaceSlotValues(editor.state, values, activeTemplate); if (transaction) editor.dispatch(transaction);
       },
-      replacePredicate(operator, operand, label) { const transaction = replacePredicate(editor.state, operator, operand, label); if (transaction) editor.dispatch(transaction); },
-      snapshot: () => ({ state: editor.state, top: editor.scrollDOM.scrollTop, left: editor.scrollDOM.scrollLeft }),
-      restore(snapshot) { configuration = ''; editor.setState(snapshot.state); requestAnimationFrame(() => { editor.scrollDOM.scrollTop = snapshot.top; editor.scrollDOM.scrollLeft = snapshot.left; }); },
+      replacePredicate(operator, operand, label) { const transaction = replacePredicate(editor.state, operator, operand, label, activeTemplate); if (transaction) editor.dispatch(transaction); },
+      snapshot: () => ({ state: editor.state, activeTemplate, top: editor.scrollDOM.scrollTop, left: editor.scrollDOM.scrollLeft }),
+      restore(snapshot) { configuration = ''; activeTemplate = snapshot.activeTemplate; editor.setState(snapshot.state); requestAnimationFrame(() => { editor.scrollDOM.scrollTop = snapshot.top; editor.scrollDOM.scrollLeft = snapshot.left; }); },
       configure(engine, schema = {}) { const next = JSON.stringify([engine, schema]); if (configuration === next) return; configuration = next; editor.dispatch({ effects: [language.reconfigure(sql({ dialect: sqlDialect(engine), schema, upperCaseKeywords: true })), queryContext.of({ engine })] }); },
       queryActions(context) { const current = editor.state.field(actions).context; if (Object.entries(context).some(([key, value]) => current[key] !== value)) editor.dispatch({ effects: queryContext.of(context) }); },
       currentStatement: () => queryAtCursor(editor.state.field(actions).statements, editor.state.selection.main.head, editor.state.doc.toString())?.sql || '',

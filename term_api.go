@@ -169,6 +169,8 @@ func (s *server) handleTerm(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case "fs/list":
 		handleTermList(w, r, t)
+	case "fs/text":
+		handleTermText(w, r, t)
 	case "fs/download":
 		handleTermDownload(w, r, t)
 	case "fs/upload":

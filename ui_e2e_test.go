@@ -1371,9 +1371,10 @@ type commandsColumnView struct {
 	IntroBottom float64 `json:"introBottom"`
 	IntroLeft   float64 `json:"introLeft"`
 	IntroRight  float64 `json:"introRight"`
-	// The dock: two buttons at the bottom-left, the mirror of the AI launcher.
+	// The dock: two buttons at the bottom-right.
 	FilesLeft       float64 `json:"filesLeft"`
 	FilesTop        float64 `json:"filesTop"`
+	ServersRight    float64 `json:"serversRight"`
 	ServersLeft     float64 `json:"serversLeft"`
 	ServersTop      float64 `json:"serversTop"`
 	AIRight         float64 `json:"aiRight"`
@@ -1392,7 +1393,7 @@ type commandsColumnView struct {
 // equal-height columns -- the flow list at ~44% and the editor at ~56% -- with
 // the server library and the file shelf out of the page: "new server" sits in the
 // application menu and the two panels are popups behind a pair of buttons at the
-// bottom-left, mirroring the AI launcher at the bottom-right.
+// bottom-right, aligned with the page gutter.
 func TestE2ECommandsColumnsLayout(t *testing.T) {
 	browserPath := firstExistingPath(
 		`C:/Program Files\Google\Chrome\Application\chrome.exe`,
@@ -1465,7 +1466,7 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 			rightLeft: right.left, rightRight: right.right, rightTop: right.top, rightBottom: right.bottom,
 			introBottom: intro.bottom, introLeft: intro.left, introRight: intro.right,
 			filesLeft: files.left, filesTop: files.top,
-			serversLeft: servers.left, serversTop: servers.top,
+			serversLeft: servers.left, serversRight: servers.right, serversTop: servers.top,
 			aiRight: ai.right, aiTop: ai.top,
 			mainLeft: main.left, mainRight: main.right,
 			addServerInMenu: !!addServer && !!addServer.closest('#menubar .menu-panel'),
@@ -1513,8 +1514,8 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 
 	// The columns begin below the page intro and keep the page's existing left
 	// margin. The reference is the intro's own left edge, not #commands-view's:
-	// the view IS .page-content and carries the 39px horizontal padding, so its
-	// border box sits 39px left of where its content actually starts.
+	// the view is .page-content and carries the shared horizontal gutter, so
+	// its border box starts before its padded content.
 	if !(v.MidTop >= v.IntroBottom-1) {
 		t.Fatalf("columns (top %.1f) should start below the intro (bottom %.1f) (%+v)", v.MidTop, v.IntroBottom, v)
 	}
@@ -1539,14 +1540,12 @@ func TestE2ECommandsColumnsLayout(t *testing.T) {
 		t.Fatalf("server library / file shelf should start closed (%+v)", v)
 	}
 
-	// The dock mirrors the AI launcher: the two buttons are side by side on the
-	// launcher's row, as far from the left edge of the page as the launcher is
-	// from the right one, and the columns end above them.
-	if d := v.FilesTop - v.AITop; d > 1 || d < -1 {
-		t.Fatalf("dock buttons are not on the AI launcher's row: files.top=%.1f ai.top=%.1f (%+v)", v.FilesTop, v.AITop, v)
+	// The command dock is aligned to the right page gutter.
+	if v.AIRight != 0 || v.AITop != 0 {
+		t.Fatalf("AI launcher should be hidden on the commands page (%+v)", v)
 	}
-	if left, right := v.FilesLeft-v.MainLeft, v.MainRight-v.AIRight; left-right > 1 || right-left > 1 {
-		t.Fatalf("dock sits %.1fpx from the left edge but the AI launcher is %.1fpx from the right (%+v)", left, right, v)
+	if inset := v.MainRight - v.ServersRight; inset < 23 || inset > 25 {
+		t.Fatalf("command dock right inset is %.1fpx, want 24px (%+v)", inset, v)
 	}
 	if !(v.FilesLeft < v.ServersLeft) || v.ServersTop != v.FilesTop {
 		t.Fatalf("dock buttons should sit side by side, files first (%+v)", v)
@@ -2641,10 +2640,10 @@ func TestE2ECommandPopupsCanBeDragged(t *testing.T) {
 	near := func(got, want float64) bool { return got-want < 2 && want-got < 2 }
 
 	before := measure()
-	drag(before, 200, -150)
+	drag(before, -200, -150)
 	after := measure()
-	if !near(after.Left-before.Left, 200) || !near(after.Top-before.Top, -150) {
-		t.Fatalf("popup moved by (%.1f, %.1f), want (200, -150): before=%+v after=%+v",
+	if !near(after.Left-before.Left, -200) || !near(after.Top-before.Top, -150) {
+		t.Fatalf("popup moved by (%.1f, %.1f), want (-200, -150): before=%+v after=%+v",
 			after.Left-before.Left, after.Top-before.Top, before, after)
 	}
 
@@ -3101,6 +3100,65 @@ func TestE2ETerminalPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait(`document.querySelector('#term-status').textContent.includes('blocked fixture') && window.__blockedUploads === 0`, "the folder creation failure without uploading child files")
+
+	// Directory entries and their tree children remain visible, even after a
+	// delayed navigation response or a transient tree-listing failure.
+	for _, directory := range []string{"/home", "/home/deploy", "/home/ruoyi", "/home/stack", "/home/stack/data"} {
+		response, err := http.Post(web.URL+"/api/term/fs/mkdir?"+url.Values{"id": {sessionID}, "path": {directory}}.Encode(), "application/octet-stream", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("fixture mkdir %s: %d", directory, response.StatusCode)
+		}
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => { const path=document.querySelector('#term-path');path.value='/home';path.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true})); })()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`['deploy','ruoyi','stack'].every(name=>document.querySelector('#term-file-rows tr[data-name="'+name+'"]') && document.querySelector('.term-tree-row[data-path="/home/'+name+'"]'))`, "all home directories in the listing and tree")
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const original=window.fetch; window.__beforeDirectoryProbe=original;
+		window.fetch=(input,init)=>{ const url=new URL(String(input),location.href);
+			if(url.pathname==='/api/term/fs/list' && url.searchParams.get('path')==='/late-listing') return new Promise(resolve=>{ window.__releaseDirectoryProbe=()=>resolve(new Response(JSON.stringify({path:'/late-listing',entries:[]}),{status:200})); });
+			return original(input,init);
+		};
+		const path=document.querySelector('#term-path'); path.value='/late-listing';path.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+		path.value='/home/ruoyi';path.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+	})()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`document.querySelector('#term-path').value==='/home/ruoyi' && !!document.querySelector('.term-tree-row.active[data-path="/home/ruoyi"]')`, "new navigation completed before the old response")
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.__releaseDirectoryProbe();window.fetch=window.__beforeDirectoryProbe`, nil), chromedp.Sleep(150*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var latestDirectory bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#term-path').value==='/home/ruoyi' && !!document.querySelector('.term-tree-row.active[data-path="/home/ruoyi"]')`, &latestDirectory)); err != nil || !latestDirectory {
+		t.Fatalf("stale directory response replaced the active folder: %v", err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`.term-tree-row[data-path="/home"] span`, chromedp.ByQuery), chromedp.Evaluate(`(() => {const original=window.fetch;window.__treeProbeCount=0;window.__beforeTreeProbe=original;window.fetch=(input,init)=>{const url=new URL(String(input),location.href);if(url.pathname==='/api/term/fs/list' && url.searchParams.get('path')==='/home/stack' && ++window.__treeProbeCount===1)return Promise.resolve(new Response(JSON.stringify({error:'temporary fixture failure'}),{status:503}));return original(input,init);};})()`, nil), chromedp.Click(`[data-toggle="/home/stack"]`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`window.__treeProbeCount===1 && document.querySelector('[data-toggle="/home/stack"]').textContent==='▾'`, "transient tree read failure")
+	if err := chromedp.Run(ctx, chromedp.Click(`[data-toggle="/home/stack"]`, chromedp.ByQuery), chromedp.Click(`[data-toggle="/home/stack"]`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`window.__treeProbeCount===2 && !!document.querySelector('.term-tree-row[data-path="/home/stack/data"]')`, "failed tree listing can be retried instead of staying empty")
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.fetch=window.__beforeTreeProbe;window.__savedTerminalServers=state.commandServers.slice();state.commandServers.push({...state.commandServers[0],id:'srv-other',name:'Other session'});renderTerminalView();document.querySelector('#term-server-select').value='srv-other'`, nil), chromedp.Click(`#term-connect`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`!!document.querySelector('.term-tab.open[data-server-id="srv-other"]')`, "second terminal session")
+	if err := chromedp.Run(ctx, chromedp.Click(`.term-tab[data-server-id="srv-0"] span`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	wait(`document.querySelector('#term-server-select').value==='srv-0' && document.querySelector('#term-file-source').textContent.includes(state.commandServers[0].host) && document.querySelector('#term-path').value==='/home'`, "server selection and file source follow the active session")
+	var snapshotRetained bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {const server=state.commandServers[0],host=server.host;server.host='changed.invalid';renderTerminalView();const unchanged=!document.querySelector('#term-file-source').textContent.includes('changed.invalid');server.host=host;return unchanged;})()`, &snapshotRetained)); err != nil || !snapshotRetained {
+		t.Fatalf("editing a saved server relabeled an existing connection: %v", err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`.term-tab[data-server-id="srv-other"] .term-tab-close`, chromedp.ByQuery), chromedp.Evaluate(`state.commandServers=window.__savedTerminalServers;renderTerminalView()`, nil)); err != nil {
+		t.Fatal(err)
+	}
 
 	// The command tab lists the command sets and sends one to the shell.
 	if err := chromedp.Run(ctx,
