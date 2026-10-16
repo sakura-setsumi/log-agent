@@ -33,6 +33,17 @@ function actionMarkers(state, statements, context, execute) {
   return RangeSet.of(statements.map(statement => new QueryActions(statement, context, execute).range(state.doc.lineAt(Math.max(statement.from, statement.to - 1)).from)), true);
 }
 
+let copiedSlots = null, pasteSequence = 0;
+function copySlots(event, view) {
+  const state = view.state, range = state.selection.main;
+  let { from, to } = range;
+  if (range.empty) { const line = state.doc.lineAt(range.head); from = line.from; to = Math.min(line.to + 1, state.doc.length); }
+  const slots = state.field(inlineSlots).filter(slot => slot.from >= from && slot.to <= to).map(slot => ({ ...slot, from: slot.from - from, to: slot.to - from }));
+  const text = state.sliceDoc(from, to);
+  copiedSlots = slots.length ? { text, slots } : null;
+  return false;
+}
+
 window.DatabaseUI = {
   createRemoteTextEditor,
   Tabulator: TabulatorFull,
@@ -56,6 +67,23 @@ window.DatabaseUI = {
         actions, inlineSlots, gutter({ class: 'cm-query-actions', side: 'after', markers: view => view.state.field(actions).markers }),
         EditorView.updateListener.of(update => { if (update.docChanged) onChange?.(); }),
         EditorView.domEventHandlers({ click(event, view) { const target = event.target.closest('[data-db-slot]'); if (target) { const slot = view.state.field(inlineSlots).find(item => item.id === target.dataset.dbSlot); if (slot) { activeTemplate = slot.template?.id; onSlot?.(slot); return true; } } return false; } }),
+        // Copying a statement keeps its selectable slots: the clipboard text is
+        // matched against what was last copied here, and the slots are re-created
+        // (as their own template group) at the paste position.
+        EditorView.domEventHandlers({
+          copy: copySlots, cut: copySlots,
+          paste(event, view) {
+            const pasted = event.clipboardData?.getData('text/plain'), copied = copiedSlots;
+            if (!copied || !pasted || pasted !== copied.text) return false;
+            event.preventDefault();
+            const state = view.state, { from, to } = state.selection.main, changes = state.changes({ from, to, insert: pasted });
+            const group = { ...copied.slots[0]?.template, id: 'template-paste-' + ++pasteSequence };
+            const remaining = state.field(inlineSlots).filter(slot => slot.to <= from || slot.from >= to).map(slot => ({ ...slot, from: changes.mapPos(slot.from, 1), to: changes.mapPos(slot.to, -1) }));
+            const inserted = copied.slots.map((slot, index) => ({ ...slot, id: group.id + '-' + index, template: group, from: from + slot.from, to: from + slot.to }));
+            view.dispatch({ changes, effects: setSlots.of([...remaining, ...inserted].sort((a, b) => a.from - b.from)), selection: { anchor: from + pasted.length }, scrollIntoView: true, userEvent: 'input.paste' });
+            return true;
+          },
+        }),
         Prec.highest(keymap.of([{ key: 'Mod-Enter', run: () => { run(); return true; } }])),
         EditorView.theme({ '&': { height: '100%', fontSize: '13px' }, '.cm-scroller': { fontFamily: 'Consolas, monospace', overflow: 'auto' }, '.cm-content': { minHeight: '120px' } })],
     });

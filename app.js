@@ -3528,7 +3528,7 @@ function renderCommandServerEditor() {
         <label>${t('commands.username')}<input data-server-field="user" value="${escapeHtml(server.user || '')}" placeholder="deploy" /></label>
         <label>${t('commands.auth')}<select data-server-field="auth"><option value="key" ${server.auth !== 'password' ? 'selected' : ''}>SSH Key</option><option value="password" ${server.auth === 'password' ? 'selected' : ''}>${t('commands.authPassword')}</option></select></label>
       </div>
-      ${server.auth === 'password' ? `<input class="reusable-server-secret" data-server-field="secret" type="password" value="${escapeHtml(server.secret || '')}" placeholder="${t('commands.loginPassword')}" />` : `<label class="server-key-picker"><span>${t('commands.chooseKeyFile')}</span><small>${escapeHtml(server.keyName || t('commands.noFileChosen'))}</small><input data-server-key-file type="file" accept=".key,.pem,.ppk,application/x-pem-file" hidden /></label>`}
+      ${server.auth === 'password' ? `<div class="secret-field"><input class="reusable-server-secret" data-server-field="secret" type="password" value="${escapeHtml(server.secret || '')}" placeholder="${t('commands.loginPassword')}" /><button type="button" class="secret-toggle" data-secret-toggle aria-pressed="false" title="${t('commands.showPassword')}">${t('commands.showPassword')}</button></div>` : `<label class="server-key-picker"><span>${t('commands.chooseKeyFile')}</span><small>${escapeHtml(server.keyName || t('commands.noFileChosen'))}</small><input data-server-key-file type="file" accept=".key,.pem,.ppk,application/x-pem-file" hidden /></label>`}
       <label class="server-unrestricted" title="${t('commands.unrestrictedHint')}"><input type="checkbox" data-server-unrestricted ${server.unrestricted ? 'checked' : ''} /><span>${t('commands.unrestricted')}</span><small>${t('commands.unrestrictedHint')}</small></label>
       ${server.connectionError ? `<div class="server-library-error">${escapeHtml(server.connectionError)}</div>` : ''}
     </article>`;
@@ -4493,6 +4493,16 @@ function bindEvents() {
     if (action === 'disable-all') await persistRuleGroup({ mask: false, structure: false, noise: false }, t('rules.toast.allDisabled'));
     if (action === 'reset') await persistRuleGroup({ mask: true, structure: true, noise: false }, t('rules.toast.defaultsRestored'));
   }));
+  document.addEventListener('click', (event) => {
+    const toggle = event.target.closest?.('[data-secret-toggle]');
+    if (!toggle) return;
+    const input = toggle.parentElement.querySelector('input');
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    toggle.setAttribute('aria-pressed', String(show));
+    toggle.textContent = t(show ? 'commands.hidePassword' : 'commands.showPassword');
+    toggle.title = toggle.textContent;
+  });
   // Resolve outside-click ancestry during the capture phase. Several click
   // handlers re-render the DOM (for example selecting an assistant session
   // rebuilds the session list), which detaches event.target. A detached node

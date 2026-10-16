@@ -221,7 +221,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
       const selected = [...el('db-inline-body').querySelectorAll('[name="inline-column"]:checked')].map(input => input.value);
       if (!selected.length && !star) return;
       if (kind === 'field') ui.editor.replaceSlots({ field: quote(engine, selected[0]) });
-      else { context.selectedFields = star ? [] : selected; tab.templateContext = context; ui.editor.replaceSlots({ columns: star ? '*' : selected.map(name => quote(engine, name)).join(', '), values: Array(Math.max(1, selected.length)).fill('NULL').join(', ') }); }
+      else { const useStar = star || (tab.templateId !== 'insert' && selected.length === context.columns.length); context.selectedFields = useStar ? [] : selected; tab.templateContext = context; ui.editor.replaceSlots({ columns: useStar ? '*' : selected.map(name => quote(engine, name)).join(', '), values: Array(Math.max(1, selected.length)).fill('NULL').join(', ') }); }
     }
     ui.editor.setTemplateContext(tab.templateContext ? clone(tab.templateContext) : null);
     closeInlinePicker(); renderTargets(); ui.editor.focus();
@@ -231,7 +231,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
   const sqlSession = () => ui.sqlTabs?.find(tab => tab.id === ui.activeSQL);
   const tableSession = () => ui.tableTabs?.find(tab => tab.id === ui.currentTableId);
   const tableKey = target => JSON.stringify([target.id, target.database, target.schema, target.table]);
-  function renderWorkspaceTabs() {
+  function renderWorkspaceTabs() { persistSQL();
     el('db-sql-tabs').innerHTML = ui.sqlTabs.map(tab => `<div class="db-session-tab ${tab.id === ui.activeSQL ? 'active' : ''}" draggable="true" data-reorder="${tab.id}"><button type="button" role="tab" aria-selected="${tab.id === ui.activeSQL}" data-db-sql="${tab.id}">${escaped(tab.name)}${tab.controller ? ' ◌' : tab.text?.trim() ? ' •' : ''}</button><button type="button" class="db-session-close" data-db-close-sql="${tab.id}" aria-label="${escaped(text('closeTab'))}">×</button></div>`).join('');
     el('db-table-tabs').innerHTML = ui.bottomTabs.map(item => {
       const tab = item.kind === 'table' ? ui.tableTabs.find(tab => tab.id === item.id) : ui.sqlTabs.find(tab => tab.id === item.id);
@@ -273,7 +273,31 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     tab.editor = ui.editor.snapshot(); tab.text = ui.editor.value(); tab.checked = new Map(ui.checked); tab.focus = ui.focus ? { ...ui.focus } : null;
     tab.targetsExplicit = ui.targetsExplicit; tab.singleTarget = ui.singleTarget; tab.singleTargetManual = ui.singleTargetManual; tab.limit = el('db-query-limit').value;
   }
-  function editorChanged() { if (!ui.restoringSQL && sqlSession()) { const tab = sqlSession(), wasFilled = Boolean(tab.text.trim()); tab.text = ui.editor.value(); if (inline.open) closeInlinePicker(); if (wasFilled !== Boolean(tab.text.trim())) renderWorkspaceTabs(); } }
+  function editorChanged() { if (!ui.restoringSQL && sqlSession()) { const tab = sqlSession(), wasFilled = Boolean(tab.text.trim()); tab.text = ui.editor.value(); persistSQL(); if (inline.open) closeInlinePicker(); if (wasFilled !== Boolean(tab.text.trim())) renderWorkspaceTabs(); } }
+  // SQL editor text lives in this browser's localStorage so a refresh or
+  // restart does not lose unsaved queries. Only id/name/text are kept; targets
+  // and results are session state.
+  const sqlStorageKey = 'log-agent-database-sql-tabs';
+  let sqlPersistTimer = null;
+  function persistSQLNow() {
+    clearTimeout(sqlPersistTimer); sqlPersistTimer = null;
+    if (!ui.initialized || !ui.sqlTabs?.length) return;
+    try {
+      const tabs = ui.sqlTabs.map(tab => ({ id: tab.id, name: tab.name, text: tab.id === ui.activeSQL && ui.editor && !ui.restoringSQL ? ui.editor.value() : tab.text }));
+      localStorage.setItem(sqlStorageKey, JSON.stringify({ tabs, active: ui.activeSQL, sequence: ui.sqlSequence }));
+    } catch {}
+  }
+  function persistSQL() { clearTimeout(sqlPersistTimer); sqlPersistTimer = setTimeout(persistSQLNow, 300); }
+  window.addEventListener('beforeunload', persistSQLNow);
+  function restoreSQLTabs() {
+    let saved = null; try { saved = JSON.parse(localStorage.getItem(sqlStorageKey) || 'null'); } catch {}
+    const tabs = Array.isArray(saved?.tabs) ? saved.tabs.filter(tab => tab && typeof tab.id === 'string' && typeof tab.text === 'string') : [];
+    if (!tabs.length) return false;
+    ui.sqlSequence = Math.max(Number(saved.sequence) || 0, ...tabs.map(tab => Number(String(tab.id).replace(/\D/g, '')) || 0));
+    for (const item of tabs) ui.sqlTabs.push({ id: item.id, name: String(item.name || item.id), text: item.text, checked: new Map(), targetsExplicit: false, focus: null, singleTarget: undefined, singleTargetManual: false, limit: el('db-query-limit').value || '500', controller: null, query: null });
+    activateSQLTab(ui.sqlTabs.some(tab => tab.id === saved.active) ? saved.active : ui.sqlTabs[0].id);
+    return true;
+  }
   function createSQLTab() {
     captureSQL();
     const number = ++ui.sqlSequence, tab = { id: `sql-${number}`, name: `SQL ${number}`, text: '', checked: new Map(ui.checked), targetsExplicit: ui.targetsExplicit, focus: ui.focus ? { ...ui.focus } : null, singleTarget: ui.singleTarget, singleTargetManual: ui.singleTargetManual, limit: el('db-query-limit').value || '500', controller: null, query: null };
@@ -826,7 +850,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
   function initialize() {
     if (ui.initialized) return; ui.initialized = true;
     ui.editor = DatabaseUI.createEditor(el('db-sql-editor'), () => runSQL(), (scope, sql) => runSQL('run', { scope, sql }), editorChanged, slot => openInlinePicker(slot));
-    createSQLTab();
+    if (!restoreSQLTabs()) createSQLTab();
     const theme = () => ui.editor.theme(document.documentElement.dataset.theme === 'dark'); theme(); new MutationObserver(theme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     loadProfiles().catch(error => status(error.message, true));
     el('db-target-select').addEventListener('click', () => toggleTargetPicker(!targetPicker.open, true));
