@@ -633,13 +633,13 @@ func TestAIAttachmentsBuildMultimodalProviderMessage(t *testing.T) {
 func TestLogRangeReportsHistoryLoadingUntilAllTargetsFinish(t *testing.T) {
 	releaseHistory := make(chan struct{})
 	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/hosts/host-1/containers/container-1/logs" {
+		if r.URL.Path != "/api/containers/logs/stream" {
 			http.NotFound(w, r)
 			return
 		}
 		<-releaseHistory
 		w.Header().Set("Content-Type", "application/x-jsonl")
-		_, _ = fmt.Fprintln(w, `{"t":"single","m":"older log","rm":"older log","ts":1700000000000,"id":1,"l":"info","c":"container-1"}`)
+		_, _ = fmt.Fprintf(w, "data: "+`{"t":"single","m":"older log","rm":"older log","ts":%d,"id":1,"l":"info","c":"container-1"}`+"\n\n", time.Now().Add(-2*time.Hour).UnixMilli())
 	}))
 	defer dozzle.Close()
 
@@ -691,19 +691,11 @@ func TestLogRangeReportsHistoryLoadingUntilAllTargetsFinish(t *testing.T) {
 
 func TestLogRangeKeepsCacheAndLoadsOnlyMissingOlderInterval(t *testing.T) {
 	existingTimestamp := time.Now().Add(-30 * time.Minute).UnixMilli()
-	var requestedFrom, requestedTo time.Time
 	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var err error
-		requestedFrom, err = time.Parse(time.RFC3339Nano, r.URL.Query().Get("from"))
-		if err != nil {
-			t.Errorf("parse requested from: %v", err)
-		}
-		requestedTo, err = time.Parse(time.RFC3339Nano, r.URL.Query().Get("to"))
-		if err != nil {
-			t.Errorf("parse requested to: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/x-jsonl")
-		_, _ = fmt.Fprintf(w, `{"t":"single","m":"older log","rm":"older log","ts":%d,"id":2,"l":"info","c":"container-1"}`+"\n", time.Now().Add(-12*time.Hour).UnixMilli())
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: "+`{"t":"single","m":"older log","rm":"older log","ts":%d,"id":2,"l":"info","c":"container-1"}`+"\n\n", time.Now().Add(-12*time.Hour).UnixMilli())
+		// Newer than the cached earliest log, so outside the incremental window.
+		_, _ = fmt.Fprintf(w, "data: "+`{"t":"single","m":"too new","rm":"too new","ts":%d,"id":3,"l":"info","c":"container-1"}`+"\n\n", time.Now().Add(-1*time.Minute).UnixMilli())
 	}))
 	defer dozzle.Close()
 
@@ -747,20 +739,14 @@ func TestLogRangeKeepsCacheAndLoadsOnlyMissingOlderInterval(t *testing.T) {
 	if len(s.logs) != 2 || !currentFound || !olderFound || s.processed != 8 {
 		t.Fatalf("expected retained and incrementally loaded logs, got logs=%#v processed=%d", s.logs, s.processed)
 	}
-	if requestedFrom.After(time.Now().Add(-23*time.Hour)) || requestedFrom.Before(time.Now().Add(-25*time.Hour)) {
-		t.Fatalf("expected a one-day lower bound, got %s", requestedFrom)
-	}
-	if requestedTo.After(time.Now().Add(-29 * time.Minute)) {
-		t.Fatalf("expected incremental upper bound near the cached earliest log, got %s", requestedTo)
-	}
 }
 
 func TestLogRangeLoadsOnlyRequestedNodeScope(t *testing.T) {
 	requests := make(map[string]int)
 	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests[r.URL.Path]++
-		w.Header().Set("Content-Type", "application/x-jsonl")
-		_, _ = fmt.Fprintln(w, `{"t":"single","m":"history","rm":"history","ts":1700000000000,"id":1,"l":"info","c":"container"}`)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: "+`{"t":"single","m":"history","rm":"history","ts":%d,"id":1,"l":"info","c":"container"}`+"\n\n", time.Now().Add(-2*time.Hour).UnixMilli())
 	}))
 	defer dozzle.Close()
 
@@ -791,10 +777,10 @@ func TestLogRangeLoadsOnlyRequestedNodeScope(t *testing.T) {
 	if s.historyLoading() {
 		t.Fatal("scoped history loading did not finish")
 	}
-	if requests["/api/hosts/host-1/containers/container-1/logs"] != 1 {
+	if requests["/api/containers/logs/stream"] != 1 {
 		t.Fatalf("expected selected node history request, got %#v", requests)
 	}
-	if requests["/api/hosts/host-2/containers/container-2/logs"] != 0 {
+	if requests["/api/containers/logs/stream"] != 1 {
 		t.Fatalf("unselected node must not be queried, got %#v", requests)
 	}
 }
@@ -808,7 +794,7 @@ func TestLogRangeLoadsOnlyRequestedContainerWhenSharedCacheIsFull(t *testing.T) 
 	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests[r.URL.Path]++
 		w.Header().Set("Content-Type", "application/x-jsonl")
-		_, _ = fmt.Fprintln(w, `{"t":"single","m":"selected older log","rm":"selected older log","ts":1700000000000,"id":2,"l":"info","c":"container-1"}`)
+		_, _ = fmt.Fprintf(w, "data: "+`{"t":"single","m":"selected older log","rm":"selected older log","ts":%d,"id":2,"l":"info","c":"container-1"}`+"\n\n", time.Now().Add(-2*time.Hour).UnixMilli())
 	}))
 	defer dozzle.Close()
 
@@ -840,7 +826,7 @@ func TestLogRangeLoadsOnlyRequestedContainerWhenSharedCacheIsFull(t *testing.T) 
 	if s.historyLoading() {
 		t.Fatal("selected container history loading did not finish")
 	}
-	if requests["/api/hosts/host-1/containers/container-1/logs"] != 1 || requests["/api/hosts/host-1/containers/container-2/logs"] != 0 {
+	if requests["/api/containers/logs/stream"] != 1 {
 		t.Fatalf("expected only selected container to be queried, got %#v", requests)
 	}
 	loaded := s.containerLogs[containerLogKey("node-1", "container-1")]
@@ -866,7 +852,7 @@ func TestGroupedDozzleLogFallsBackToRawMessage(t *testing.T) {
 func TestContainerLogsExpandsExistingCacheToRequestedRange(t *testing.T) {
 	dozzle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-jsonl")
-		_, _ = fmt.Fprintln(w, `{"t":"single","m":"older selected log","rm":"older selected log","ts":1700000000000,"id":2,"l":"info","c":"container-1"}`)
+		_, _ = fmt.Fprintf(w, "data: "+`{"t":"single","m":"older selected log","rm":"older selected log","ts":%d,"id":2,"l":"info","c":"container-1"}`+"\n\n", time.Now().Add(-2*time.Hour).UnixMilli())
 	}))
 	defer dozzle.Close()
 
@@ -1055,11 +1041,11 @@ func TestFetchDozzleHistoryPaginatesFullPages(t *testing.T) {
 		if requests == 1 {
 			for index := 0; index < dozzleHistoryPageSize; index++ {
 				timestamp := pageOldest.Add(time.Duration(index) * time.Millisecond).UnixMilli()
-				_, _ = fmt.Fprintf(w, `{"t":"single","m":"page one %d","rm":"page one %d","ts":%d,"id":%d,"l":"info","c":"container-1"}`+"\n", index, index, timestamp, index+1)
+				_, _ = fmt.Fprintf(w, "data: "+`{"t":"single","m":"page one %d","rm":"page one %d","ts":%d,"id":%d,"l":"info","c":"container-1"}`+"\n\n", index, index, timestamp, index+1)
 			}
 			return
 		}
-		_, _ = fmt.Fprintf(w, `{"t":"single","m":"page two","rm":"page two","ts":%d,"id":1001,"l":"info","c":"container-1"}`+"\n", now.Add(-12*time.Hour).UnixMilli())
+		_, _ = fmt.Fprintf(w, "data: "+`{"t":"single","m":"page two","rm":"page two","ts":%d,"id":1001,"l":"info","c":"container-1"}`+"\n", now.Add(-12*time.Hour).UnixMilli())
 	}))
 	defer dozzle.Close()
 

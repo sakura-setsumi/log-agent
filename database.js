@@ -1,11 +1,13 @@
 // Database workspace. Mature editor/grid components are bundled locally; all
 // database traffic goes through the existing in-process Go bridge.
 const databaseLabels = {
-  resultEditHint: ['Double-click a cell to edit; Enter or leaving the cell saves to its source database. Right-click to set NULL.', '双击单元格修改，回车或离开单元格时保存到来源数据库；右键可设为 NULL。'], resultReadOnly: ['Editing requires a direct single-table query with its full primary key. Joins, aggregates and expressions are read-only.', '仅可修改包含完整主键的单表直接查询结果；关联、聚合和表达式结果只读。'], resultSaving: ['Saving to the source database…', '正在保存到来源数据库…'], resultSaved: ['Saved: {source} / {column}', '已保存：{source} / {column}'],
+  resultEditHint: ['Click a cell to edit; Enter or leaving the cell saves to its source database. Right-click to set NULL.', '单击单元格修改，回车或离开单元格时保存到来源数据库；右键可设为 NULL。'], resultReadOnly: ['Editing requires a direct single-table query with its full primary key. Joins, aggregates and expressions are read-only.', '仅可修改包含完整主键的单表直接查询结果；关联、聚合和表达式结果只读。'], resultSaving: ['Saving to the source database…', '正在保存到来源数据库…'], resultSaved: ['Saved: {source} / {column}', '已保存：{source} / {column}'],
   subtitle: ['Query several databases with one SQL statement and one combined result.', '连接多个数据库，用一条 SQL 汇总查询结果。'],
   newConnection: ['New connection…', '新建连接…'], newItem: ['New', '新建'], newQuery: ['New SQL tab', '新建 SQL 页签'], connections: ['Connections & objects', '连接与结构'], refresh: ['Refresh', '刷新'], chooseObject: ['Choose a table or check databases to query', '选择数据表，或勾选多个库查询'],
   chooseTargets: ['Choose target databases', '选择目标数据库'], searchTargets: ['Search connections or databases', '搜索连接或数据库'], targetsLimit: ['{count} selected · maximum 16 databases', '已选 {count} 个库 · 最多 16 个'], noTargetMatches: ['No matching databases', '没有匹配的数据库'], emptyDatabases: ['No databases', '暂无数据库'], expandConnection: ['Expand or collapse {name}', '展开或收起 {name}'],
-  data: ['Data', '数据'], structure: ['Structure', '结构'], sql: ['SQL query', 'SQL 查询'], addRow: ['Add row', '新增行'], deleteRows: ['Delete selected rows', '删除选中行'], saveRows: ['Save changes', '保存修改'], reload: ['Reload', '重新加载'], editHint: ['Double-click to edit; right-click for NULL. Save to commit changes.', '双击编辑，右键可设为 NULL；保存后写入数据库。'],
+  data: ['Data', '数据'], structure: ['Structure', '结构'], sql: ['SQL query', 'SQL 查询'], addRow: ['Add row', '新增行'], deleteRows: ['Delete selected rows', '删除选中行'], saveRows: ['Save changes', '保存修改'], reload: ['Reload', '重新加载'], editHint: ['Select rows: Ctrl+C; add row: Ctrl+V; click to edit; Ctrl+S to save. Right-click for NULL.', '选中行 Ctrl+C，新增行 Ctrl+V，单击编辑，Ctrl+S 保存；右键可设为 NULL。'],
+  invalidRowPaste: ['Cannot paste: the clipboard columns do not match this table or the row format is invalid.', '无法粘贴：剪贴板字段与当前表不匹配，或行数据格式无效。'],
+  rowActions: ['Row actions', '行操作'], commitRows: ['Commit changes (Ctrl+S)', '提交修改（Ctrl+S）'], rollbackRows: ['Roll back pending changes', '回滚未提交的修改'], stopLoading: ['Stop loading', '停止加载'], loadingStopped: ['Loading stopped', '已停止加载'],
   previous: ['Previous', '上一页'], next: ['Next', '下一页'], last: ['Last', '尾页'], createTable: ['Create table', '新建表'], addColumn: ['Add column', '添加字段'], alterColumn: ['Edit column', '修改字段'], renameColumn: ['Rename column', '重命名字段'], dropColumn: ['Drop column', '删除字段'], createIndex: ['Create index', '新增索引'], dropIndex: ['Drop index', '删除索引'], renameTable: ['Rename table', '重命名表'], dropTable: ['Drop table', '删除表'], columns: ['Columns — select one to edit', '字段（选中后可修改）'], indexes: ['Indexes', '索引'],
   runQuery: ['Run SQL · Ctrl+Enter', '执行 SQL · Ctrl+Enter'], execute: ['Execute statement (one DB)', '执行语句（单库）'], cancel: ['Cancel', '取消'], clearTargets: ['Clear selection', '清空选择'], exportCsv: ['Export CSV', '导出 CSV'], queryHint: ['Choose databases in the target dropdown. SQL runs on each; result columns are aligned and combined.', '在目标数据库下拉框中多选，同一条 SQL 分别执行，返回结果按列名对齐合并。'],
   connection: ['Database connection', '数据库连接'], connectionName: ['Connection name', '连接名称'], engine: ['Database type', '数据库类型'], host: ['Host', '主机'], port: ['Port', '端口'], user: ['User', '用户名'], password: ['Password (blank keeps the saved password)', '密码（留空保留已保存密码）'], defaultDatabase: ['Default database (optional)', '默认数据库（可留空）'], tlsDisable: ['Disabled', '不启用'], tlsRequire: ['Encrypted connection', '加密连接'], tlsVerify: ['Encrypted, verify certificate', '加密并验证证书'], sqliteFile: ['Absolute SQLite file path (created if missing)', 'SQLite 文件绝对路径（不存在时创建）'], deleteConnection: ['Delete connection', '删除连接'], testConnection: ['Test connection', '测试连接'], save: ['Save', '保存'],
@@ -91,6 +93,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     const first = columns.find(c => c.primary) || columns[0];
     return { table: context ? inlineTableName(context) : '{{table}}', columns: names.length ? names.map(c => quote(engine, c.name)).join(', ') : write ? '{{columns}}' : '*', field: first ? quote(engine, first.name) : '{{field}}', values: Array(Math.max(1, names.length)).fill('NULL').join(', '), value: 'NULL', condition: '1 = 0' };
   }
+  function slotLabels() { return { table: text('inlineTable'), columns: text('inlineColumns'), field: text('inlineField'), operator: text('inlineOperator'), values: text('inlineValue'), value: text('inlineValue'), filterValue: text('inlineValue'), condition: text('inlineCondition') }; }
   function fillTemplate(id) {
     const tab = sqlSession(); if (!tab || !templateSQL[id]) return;
     closeInlinePicker();
@@ -191,6 +194,8 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
   }
   function operandLiteral(value, engine, operator) {
     value = value.trim();
+    // A LIKE pattern without any wildcard would only match exactly, so it becomes a contains-match.
+    if (operator.includes('LIKE') && !/[%_]/.test(value)) value = `%${value}%`;
     const field = ui.editor.slotText('field'), column = sqlSession()?.templateContext?.columns?.find(item => quote(engine, item.name) === field);
     const numeric = !operator.includes('LIKE') && /^(?:(?:tiny|small|medium|big)?int(?:eger|\d+)?|serial\d*|decimal|numeric|number|float\d*|double|real|money)\b/i.test(String(column?.type || '').trim());
     if (numeric && /^[+-]?\d+(?:\.\d+)?$/.test(value)) return value;
@@ -210,7 +215,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
       const untouched = group === inline.operandGroup && inputs.join('\u0000') === inline.operandShown.join('\u0000'), literal = value => operandLiteral(value, engine, operator);
       let operand;
       if (group === 'none') operand = '';
-      else if (untouched && previousValue && operandGroup(current) === group) operand = previousValue;
+      else if (untouched && previousValue && operandGroup(current) === group && !(operator.includes('LIKE') && !/[%_]/.test(inputs[0]))) operand = previousValue;
       else if (group === 'range') operand = inputs.map(value => value.trim() ? literal(value) : 'NULL').join(' AND ');
       else if (group === 'list') { const items = splitOperandList(inputs[0]); operand = `(${items.length ? items.map(literal).join(', ') : 'NULL'})`; }
       else operand = inputs[0].trim() ? literal(inputs[0]) : operator.includes('LIKE') ? "''" : 'NULL';
@@ -273,7 +278,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
   }
   function captureSQL() {
     const tab = sqlSession(); if (!tab || !ui.editor || ui.restoringSQL) return;
-    tab.editor = ui.editor.snapshot(); tab.text = ui.editor.value(); tab.checked = new Map(ui.checked); tab.focus = ui.focus ? { ...ui.focus } : null;
+    tab.editor = ui.editor.snapshot(); tab.slotState = ui.editor.slotState(); tab.text = ui.editor.value(); tab.checked = new Map(ui.checked); tab.focus = ui.focus ? { ...ui.focus } : null;
     tab.targetsExplicit = ui.targetsExplicit; tab.singleTarget = ui.singleTarget; tab.singleTargetManual = ui.singleTargetManual; tab.limit = el('db-query-limit').value;
   }
   function editorChanged() { if (!ui.restoringSQL && sqlSession()) { const tab = sqlSession(), wasFilled = Boolean(tab.text.trim()); tab.text = ui.editor.value(); persistSQL(); if (inline.open) closeInlinePicker(); if (wasFilled !== Boolean(tab.text.trim())) renderWorkspaceTabs(); } }
@@ -286,7 +291,10 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     clearTimeout(sqlPersistTimer); sqlPersistTimer = null;
     if (!ui.initialized || !ui.sqlTabs?.length) return;
     try {
-      const tabs = ui.sqlTabs.map(tab => ({ id: tab.id, name: tab.name, text: tab.id === ui.activeSQL && ui.editor && !ui.restoringSQL ? ui.editor.value() : tab.text }));
+      const tabs = ui.sqlTabs.map(tab => {
+        const live = tab.id === ui.activeSQL && ui.editor && !ui.restoringSQL;
+        return { id: tab.id, name: tab.name, text: live ? ui.editor.value() : tab.text, slotState: live ? ui.editor.slotState() : tab.slotState, templateId: tab.templateId, templateContext: tab.templateContext };
+      });
       localStorage.setItem(sqlStorageKey, JSON.stringify({ tabs, active: ui.activeSQL, sequence: ui.sqlSequence }));
     } catch {}
   }
@@ -297,7 +305,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     const tabs = Array.isArray(saved?.tabs) ? saved.tabs.filter(tab => tab && typeof tab.id === 'string' && typeof tab.text === 'string') : [];
     if (!tabs.length) return false;
     ui.sqlSequence = Math.max(Number(saved.sequence) || 0, ...tabs.map(tab => Number(String(tab.id).replace(/\D/g, '')) || 0));
-    for (const item of tabs) ui.sqlTabs.push({ id: item.id, name: String(item.name || item.id), text: item.text, checked: new Map(), targetsExplicit: false, focus: null, singleTarget: undefined, singleTargetManual: false, limit: el('db-query-limit').value || '500', controller: null, query: null });
+    for (const item of tabs) ui.sqlTabs.push({ id: item.id, name: String(item.name || item.id), text: item.text, slotState: item.slotState, templateId: item.templateId, templateContext: item.templateContext, checked: new Map(), targetsExplicit: false, focus: null, singleTarget: undefined, singleTargetManual: false, limit: el('db-query-limit').value || '500', controller: null, query: null });
     activateSQLTab(ui.sqlTabs.some(tab => tab.id === saved.active) ? saved.active : ui.sqlTabs[0].id);
     return true;
   }
@@ -313,7 +321,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     ui.activeSQL = id; ui.checked = new Map([...tab.checked].filter(([, target]) => profile(target.id))); ui.focus = tab.focus && profile(tab.focus.id) ? { ...tab.focus } : null;
     ui.targetsExplicit = Boolean(tab.targetsExplicit); ui.singleTarget = tab.singleTarget; ui.singleTargetManual = tab.singleTargetManual; ui.controller = tab.controller;
     ui.restoringSQL = true;
-    if (tab.editor) ui.editor.restore(tab.editor); else ui.editor.setValue(tab.text);
+    if (tab.editor) ui.editor.restore(tab.editor); else { ui.editor.setValue(tab.text); if (tab.slotState?.slots?.length) ui.editor.setSlotState(tab.slotState); else ui.editor.recognizeSlots(slotLabels()); }
     ui.editor.theme(document.documentElement.dataset.theme === 'dark'); ui.restoringSQL = false;
     el('db-query-limit').value = tab.limit;
     el('db-run-query').disabled = Boolean(tab.controller); el('db-cancel-query').disabled = !tab.controller;
@@ -340,7 +348,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     ui.currentTableId = tab.id; ui.table = tab.target; ui.tableResponse = tab.response; ui.page = tab.page || 0; ui.dirty = tab.dirty || 0; ui.saving = Boolean(tab.saving);
     el('db-page-size').value = tab.pageSize || '100';
     if (tab.response) { renderData(tab); renderStructure(); }
-    el('db-panel-data').inert = Boolean(tab.saving || tab.loading);
+    el('db-data-grid').inert = Boolean(tab.saving || tab.loading); syncDataActions();
   }
   function activateBottom(item) {
     captureTableState(); captureResultState(); closeInlinePicker();
@@ -355,12 +363,16 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
   function paintBottom() {
     const item = ui.activeBottom, table = item?.kind === 'table' ? ui.tableTabs.find(tab => tab.id === item.id) : null, result = item?.kind === 'result' ? ui.sqlTabs.find(tab => tab.id === item.id) : null;
     const hasTable = Boolean(table?.response);
-    el('db-panel-data').classList.toggle('hidden', !hasTable || ui.tab === 'structure'); el('db-panel-structure').classList.toggle('hidden', !hasTable || ui.tab !== 'structure');
-    el('db-table-subtabs').classList.toggle('hidden', !hasTable); el('db-panel-result').classList.toggle('hidden', !result); el('db-table-empty').classList.toggle('hidden', Boolean(hasTable || result));
+    el('db-panel-data').classList.toggle('hidden', !table || hasTable && ui.tab === 'structure'); el('db-panel-structure').classList.toggle('hidden', !hasTable || ui.tab !== 'structure');
+    el('db-data-grid').classList.toggle('hidden', !hasTable);
+    el('db-data-placeholder').classList.toggle('hidden', !table || hasTable);
+    el('db-data-placeholder').textContent = table?.loading ? text('loading') : table?.error || table?.message || '';
+    if (table && !hasTable) { el('db-data-count').textContent = ''; el('db-page-label').textContent = ''; }
+    syncDataActions();
+    el('db-table-subtabs').classList.toggle('hidden', !hasTable); el('db-panel-result').classList.toggle('hidden', !result); el('db-table-empty').classList.toggle('hidden', Boolean(table || result));
     el('db-table-empty').textContent = table?.loading ? text('loading') : table?.error || text('emptyWorkspace');
     view.querySelectorAll('[data-db-tab]').forEach(button => button.classList.toggle('active', button.dataset.dbTab === ui.tab));
     el('db-object-title').textContent = table ? `${sourceName(table.target)} / ${table.target.schema}.${table.target.table}` : result ? `${result.name} / ${text('results')}` : text('chooseObject');
-    el('db-engine-label').textContent = table ? profile(table.target.id)?.engine || '' : '';
     if (result) {
       ui.query = result.query;
       if (result.query) renderQuery(result.query); else { if (ui.grids.query?._databaseReady) ui.grids.query.clearData(); el('db-query-summary').textContent = result.message || text('queryHint'); status(result.message || '', result.error); }
@@ -373,7 +385,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     if (item.kind === 'result' && ui.sqlTabs.find(tab => tab.id === item.id)?.query?.saving) return false;
     const tab = item.kind === 'table' ? ui.tableTabs.find(tab => tab.id === item.id) : null;
     if (tab?.saving || (!force && tab?.dirty && !window.confirm(text('discard')))) return false;
-    if (tab) ui.tableTabs = ui.tableTabs.filter(value => value !== tab);
+    if (tab) { tab.loadController?.abort(); ui.tableTabs = ui.tableTabs.filter(value => value !== tab); }
     ui.bottomTabs = ui.bottomTabs.filter(value => !(value.kind === item.kind && value.id === item.id));
     if (ui.currentTableId === item.id) { ui.currentTableId = null; ui.table = null; ui.tableResponse = null; ui.dirty = 0; ui.original = new Map(); ui.saving = false; }
     if (ui.activeBottom?.kind === item.kind && ui.activeBottom.id === item.id) { ui.activeBottom = null; if (ui.bottomTabs.length) activateBottom(ui.bottomTabs.at(-1)); else paintBottom(); }
@@ -567,10 +579,72 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     ui.editor?.resize();
   }
   function cellText(value) { if (value === null) return 'NULL'; if (value && typeof value === 'object' && value.blob !== undefined) return `[BLOB ${Math.floor(value.blob.length * .75)}]`; return value === undefined ? '' : String(value); }
+  function databaseCellEditor(type) {
+    const kind = /^(datetime|timestamp)(?:\b|\d)/i.test(type || '') ? 'datetime-local' : /^date\b/i.test(type || '') ? 'date' : /^time\b/i.test(type || '') ? 'time' : '';
+    if (!kind) return 'input';
+    return (cell, onRendered, success, cancel) => {
+      const input = document.createElement('input'), original = cell.getValue(), raw = original == null ? '' : String(original);
+      const zone = kind !== 'date' ? raw.match(/(?:Z|[+-]\d{2}:\d{2})$/)?.[0] || '' : '';
+      input.type = kind; input.step = 'any';
+      input.value = kind === 'date' ? raw.slice(0, 10) : (zone ? raw.slice(0, -zone.length) : raw).replace(' ', 'T').replace(/(\.\d{3})\d+$/, '$1');
+      const initial = input.value;
+      let finished = false;
+      const commit = () => {
+        if (finished) return;
+        if (!input.validity.valid || (!input.value && raw && !initial)) { finished = true; cancel(); return; }
+        finished = true;
+        if (input.value === initial) { success(original); return; }
+        if (!input.value) { success(null); return; }
+        let value = input.value;
+        // Native inputs omit :00 seconds. Keep SQL values explicit and preserve their timezone suffix.
+        if (kind !== 'date' && /(?:T|^)\d{2}:\d{2}$/.test(value)) value += ':00';
+        if (kind === 'datetime-local' && !raw.includes('T')) value = value.replace('T', ' ');
+        success(value + zone);
+      };
+      input.addEventListener('blur', commit);
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (!finished) { finished = true; cancel(); } }
+        else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); commit(); }
+      });
+      onRendered(() => {
+        input.focus({ preventScroll: true });
+        // Opening directly from the cell click keeps the browser's user activation.
+        try { input.showPicker?.(); } catch (_) { /* The calendar icon remains available for keyboard edits. */ }
+      });
+      return input;
+    };
+  }
+  function newRowDefault(column) {
+    const sql = column?.default?.trim();
+    if (sql === undefined) return undefined;
+    if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(sql)) return sql;
+    if (/^'(?:[^']|'')*'$/.test(sql)) return sql.slice(1, -1).replaceAll("''", "'");
+    return undefined;
+  }
+  function clearActiveDataCell(instance) {
+    instance._activeDataElement?.classList.remove('db-cell-active');
+    instance._activeDataRowElement?.classList.remove('db-row-current');
+    instance._activeDataColumnElement?.classList.remove('db-column-current');
+    instance._activeDataRowKey = null; instance._activeDataField = null;
+  }
+  function activateDataCell(cell) {
+    const instance = cell.getTable(), row = cell.getRow();
+    clearActiveDataCell(instance);
+    instance._activeDataElement = cell.getElement(); instance._activeDataElement.classList.add('db-cell-active');
+    instance._activeDataRowElement = row.getElement(); instance._activeDataRowElement.classList.add('db-row-current');
+    instance._activeDataColumnElement = cell.getColumn().getElement(); instance._activeDataColumnElement.classList.add('db-column-current');
+    instance._activeDataRowKey = row.getIndex(); instance._activeDataField = cell.getField();
+    instance.deselectRow(); row.select();
+  }
   function formatter(cell) {
     const span = document.createElement('span'), value = cell.getValue(); span.textContent = cellText(value); span.classList.toggle('db-cell-null', value === null);
     if (cell.getRow().getData().__rowKey) {
       const row = cell.getRow().getData(), index = Number(cell.getField().slice(1)), original = ui.original.get(row.__rowKey);
+      if (row.__new && value === undefined && /^v\d+$/.test(cell.getField())) {
+        const column = ui.tableResponse?.structure.columns.find(c => c.name === ui.tableResponse.result.columns[index]?.name), value = newRowDefault(column);
+        span.textContent = value === undefined ? '(Default)' : value;
+        span.classList.toggle('db-cell-default', value === undefined);
+      }
       cell.getElement().classList.toggle('db-cell-dirty', row.__new ? value !== undefined : JSON.stringify(value) !== JSON.stringify(original?.[index]));
     }
     return span;
@@ -593,20 +667,54 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
       return Object.keys(values).length ? [{ operation: 'update', key: identity, original, values }] : [];
     });
   }
-  function updateDirty() { ui.dirty = changes().length; const tab = tableSession(); if (tab) { tab.dirty = ui.dirty; tab.message = ''; tab.error = ''; } el('db-save-rows').disabled = !ui.dirty; status(ui.dirty ? text('dirty', { count: ui.dirty }) : ui.tableResponse?.editable === false ? text('readOnly') : ''); renderWorkspaceTabs(); }
+  function syncDataActions() {
+    const tab = tableSession(), ready = Boolean(ui.grids.data?._databaseReady), busy = Boolean(tab?.saving || tab?.loading || tab?.response && !ready), selected = ready ? ui.grids.data.getSelectedData() : [];
+    el('db-data-grid').inert = busy;
+    el('db-add-row').disabled = busy || !tab?.response || tab.target.kind === 'view';
+    el('db-delete-row').disabled = busy || !selected.some(row => !row.__delete && (row.__new || tab?.response?.editable));
+    el('db-save-rows').disabled = busy || !tab?.dirty;
+    el('db-rollback-rows').disabled = busy || !tab?.dirty;
+    el('db-reload-table').disabled = busy || !tab;
+    el('db-stop-table').disabled = !tab?.loading || tab.saving;
+    for (const id of ['db-page-prev', 'db-page-next', 'db-page-last', 'db-page-size']) {
+      const disabled = busy || !tab?.response || (id === 'db-page-prev' ? !tab.page : id === 'db-page-size' ? false : !tab.response.result.truncated);
+      el(id).disabled = disabled;
+    }
+  }
+  function updateDirty() { ui.dirty = changes().length; const tab = tableSession(); if (tab) { tab.dirty = ui.dirty; tab.message = ''; tab.error = ''; } syncDataActions(); status(ui.dirty ? text('dirty', { count: ui.dirty }) : ui.tableResponse?.editable === false ? text('readOnly') : ''); renderWorkspaceTabs(); }
   function renderData(draft) {
     const response = ui.tableResponse; if (!response) return;
     ui.original = draft?.rows ? new Map(draft.original) : new Map();
     const data = draft?.rows ? clone(draft.rows) : response.result.rows.map((values, index) => { const row = { __rowKey: `row-${index}` }; values.forEach((value, i) => { row[`v${i}`] = value; }); ui.original.set(row.__rowKey, clone(values)); return row; });
     const editable = cell => { const row = cell.getRow().getData(), index = Number(cell.getField().slice(1)), name = response.result.columns[index]?.name, meta = response.structure.columns.find(c => c.name === name); return !row.__delete && (row.__new || response.editable) && !meta?.generated && !(cell.getValue() && typeof cell.getValue() === 'object'); };
-    const columns = [{ title: '', field: '__select', width: 36, minWidth: 36, formatter: 'rowSelection', titleFormatter: 'rowSelection', headerSort: false, cellClick: (event, cell) => cell.getRow().toggleSelect() }, ...response.result.columns.map((c, i) => ({ title: escaped(c.name), field: `v${i}`, headerTooltip: c.type, editor: 'input', editable, contextMenu: [{ label: text('setNull'), action: (event, cell) => { if (editable(cell)) { cell.setValue(null); updateDirty(); } } }] }))];
-    const instance = grid('data', columns, data, { index: '__rowKey', editTriggerEvent: 'dblclick', selectableRows: 'highlight', initialSort: draft?.sort || [], rowFormatter: row => row.getElement().classList.toggle('db-row-deleted', Boolean(row.getData().__delete)) });
-    instance.on('cellEdited', cell => { cell.getRow().reformat(); updateDirty(); });
+    const selectRow = (event, cell) => {
+      const row = cell.getRow(), instance = row.getTable(), rows = instance.getRows('active');
+      finishDataEdit(); clearActiveDataCell(instance);
+      if (event.shiftKey && instance._selectionAnchor) {
+        const start = rows.findIndex(item => item.getIndex() === instance._selectionAnchor), end = rows.indexOf(row);
+        if (!(event.ctrlKey || event.metaKey)) instance.deselectRow();
+        if (start >= 0) rows.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(item => item.select());
+        else row.select();
+      } else {
+        if (event.ctrlKey || event.metaKey) row.toggleSelect();
+        else { instance.deselectRow(); row.select(); }
+        instance._selectionAnchor = row.getIndex();
+      }
+      el('db-data-grid').focus({ preventScroll: true });
+    };
+    const columns = [{ title: '', field: '__select', width: 9, minWidth: 9, maxWidth: 9, frozen: true, resizable: false, formatter: () => '', headerSort: false, cellClick: selectRow }, ...response.result.columns.map((c, i) => ({ title: escaped(c.name), field: `v${i}`, headerTooltip: c.type, editor: databaseCellEditor(c.type), editable, contextMenu: [{ label: text('setNull'), action: (event, cell) => { if (editable(cell)) { cell.setValue(null); updateDirty(); } } }] }))];
+    const instance = grid('data', columns, data, { clipboard: false, index: '__rowKey', editTriggerEvent: 'click', selectableRows: 'highlight', initialSort: draft?.sort || [], rowFormatter: row => { row.getElement().classList.toggle('db-row-deleted', Boolean(row.getData().__delete)); row.getElement().classList.toggle('db-row-new', Boolean(row.getData().__new)); row.getElement().classList.toggle('db-row-current', row.getIndex() === row.getTable()._activeDataRowKey); } });
+    instance.on('cellClick', (event, cell) => { if (/^v\d+$/.test(cell.getField())) activateDataCell(cell); });
+    instance.on('cellEditing', activateDataCell);
+    instance.on('rowSelectionChanged', syncDataActions);
+    instance.on('tableBuilt', syncDataActions);
+    instance.on('cellEdited', cell => { const row = cell.getRow(), field = cell.getField(); row.reformat(); activateDataCell(row.getCell(field)); updateDirty(); });
     if (draft) instance.on('tableBuilt', () => { if (ui.currentTableId !== draft.id) return; if (draft.selected?.length) instance.selectRow(draft.selected); requestAnimationFrame(() => { const holder = el('db-data-grid').querySelector('.tabulator-tableholder'); if (holder) holder.scrollTop = draft.scroll || 0; }); });
     ui.dirty = draft?.dirty || 0; el('db-save-rows').disabled = !ui.dirty || Boolean(draft?.saving);
     el('db-delete-row').disabled = !response.editable; el('db-add-row').disabled = ui.table?.kind === 'view';
     el('db-data-count').textContent = text('rows', { count: data.length }); el('db-page-label').textContent = text('page', { page: ui.page + 1 });
     el('db-page-prev').disabled = ui.page === 0; el('db-page-next').disabled = !response.result.truncated; el('db-page-last').disabled = !response.result.truncated;
+    syncDataActions();
   }
   function renderStructure() {
     if (!ui.tableResponse) return;
@@ -616,17 +724,19 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     grid('index', [{ title: text('name'), field: 'name' }, { title: text('indexColumns'), field: 'columns', formatter: cell => { const span = document.createElement('span'); span.textContent = cell.getValue().join(', '); return span; } }, { title: text('unique'), field: 'unique', formatter: 'tickCross' }, { title: text('primary'), field: 'primary', formatter: 'tickCross' }], meta.indexes, { selectableRows: 1 });
   }
   async function fetchTableRecord(tab, page = tab.page || 0, last = false) {
-    const nonce = (tab.loadNonce || 0) + 1; tab.loadNonce = nonce; tab.loading = true; tab.error = ''; tab.page = page;
-    if (ui.activeBottom?.kind === 'table' && ui.activeBottom.id === tab.id) { el('db-panel-data').inert = true; paintBottom(); }
+    const previousPage = tab.response ? Math.floor((tab.response.offset || 0) / (tab.response.limit || Number(tab.pageSize || 100))) : 0;
+    tab.loadController?.abort(); const controller = new AbortController(); tab.loadController = controller;
+    const nonce = (tab.loadNonce || 0) + 1; tab.loadNonce = nonce; tab.loading = true; tab.error = ''; tab.message = ''; tab.page = page;
+    if (ui.activeBottom?.kind === 'table' && ui.activeBottom.id === tab.id) { el('db-data-grid').inert = true; syncDataActions(); paintBottom(); }
     renderWorkspaceTabs();
     try {
-      const response = await api('table', { target: { ...tab.target, offset: page * Number(tab.pageSize || 100), limit: tab.pageSize || 100, ...(last ? { last: 1 } : {}) } });
+      const response = await api('table', { target: { ...tab.target, offset: page * Number(tab.pageSize || 100), limit: tab.pageSize || 100, ...(last ? { last: 1 } : {}) }, signal: controller.signal });
       if (nonce !== tab.loadNonce || !ui.tableTabs.includes(tab)) return;
       tab.response = response; if (last) tab.page = Math.floor(response.offset / response.limit); tab.rows = null; tab.original = null; tab.selected = []; tab.dirty = 0; tab.error = '';
-    } catch (error) { if (nonce === tab.loadNonce) tab.error = error.message; }
+    } catch (error) { if (nonce === tab.loadNonce) { tab.page = previousPage; if (tab.response?.limit) tab.pageSize = String(tab.response.limit); if (controller.signal.aborted) { tab.message = text('loadingStopped'); } else tab.error = error.message; } }
     finally {
       if (nonce === tab.loadNonce && ui.tableTabs.includes(tab)) {
-        tab.loading = false;
+        tab.loading = false; tab.loadController = null;
         if (ui.activeBottom?.kind === 'table' && ui.activeBottom.id === tab.id) { restoreTableState(tab); paintBottom(); renderTree(); renderTargets(); }
         renderWorkspaceTabs();
       }
@@ -652,8 +762,9 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
   }
   async function saveRows() {
     if (ui.saving) return;
+    finishDataEdit();
     const pending = changes(), tab = tableSession(); if (!pending.length || !tab) return;
-    captureTableState(); tab.saving = true; ui.saving = true; el('db-panel-data').inert = true; el('db-save-rows').disabled = true;
+    captureTableState(); tab.saving = true; ui.saving = true; el('db-data-grid').inert = true; syncDataActions();
     try {
       const result = await api('changes', { target: { ...tab.target }, body: { changes: pending } });
       tab.response = null; tab.rows = null; tab.original = null; tab.dirty = 0;
@@ -663,10 +774,103 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     } catch (error) { tab.error = error.message; tab.message = ''; }
     finally {
       tab.saving = false;
-      if (ui.currentTableId === tab.id) { ui.saving = false; el('db-panel-data').inert = Boolean(tab.loading); el('db-save-rows').disabled = !tab.dirty; }
+      if (ui.currentTableId === tab.id) { ui.saving = false; el('db-data-grid').inert = Boolean(tab.loading); syncDataActions(); }
       if (ui.activeBottom?.kind === 'table' && ui.activeBottom.id === tab.id) paintBottom();
       renderWorkspaceTabs();
     }
+  }
+
+  function finishDataEdit() {
+    const input = el('db-data-grid').querySelector('.tabulator-cell.tabulator-editing input, .tabulator-cell.tabulator-editing textarea');
+    if (input) { input.dispatchEvent(new Event('change', { bubbles: true })); input.blur(); }
+  }
+  function rollbackRows() {
+    const tab = tableSession(); if (!tab?.response || tab.saving || tab.loading) return;
+    tab.rows = null; tab.original = null; tab.selected = []; tab.dirty = 0; tab.error = ''; tab.message = '';
+    renderData(); updateDirty(); el('db-data-grid').focus({ preventScroll: true });
+  }
+
+  async function addDataRow() {
+    if (!ui.table || !ui.tableResponse || ui.table.kind === 'view' || ui.saving || tableSession()?.loading) return;
+    const row = await ui.grids.data.addRow({ __rowKey: `new-${++ui.sequence}`, __new: true }, false);
+    ui.grids.data.deselectRow(); row.select();
+    ui.grids.data._selectionAnchor = row.getIndex();
+    await row.scrollTo(); el('db-data-grid').focus({ preventScroll: true }); updateDirty();
+    const first = row.getCells().find(cell => /^v\d+$/.test(cell.getField()) && !ui.tableResponse.structure.columns.find(c => c.name === ui.tableResponse.result.columns[Number(cell.getField().slice(1))]?.name)?.generated);
+    if (first) activateDataCell(first);
+  }
+  function initializeDataClipboard() {
+    const container = el('db-data-grid'), mime = 'application/x-log-agent-rows+json';
+    container.tabIndex = 0;
+    container.addEventListener('wheel', event => {
+      const instance = ui.grids.data;
+      if (!instance?._databaseReady || !instance._activeDataField || container.inert || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || !event.deltaY || Math.abs(event.deltaX) > Math.abs(event.deltaY) || !event.target.closest('.tabulator-tableholder')) return;
+      event.preventDefault(); event.stopPropagation();
+      const delta = event.deltaY * (event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? container.clientHeight : 1), now = performance.now();
+      if (now - (instance._wheelTime || 0) > 200 || Math.sign(delta) !== Math.sign(instance._wheelDelta || delta)) instance._wheelDelta = 0;
+      instance._wheelTime = now; instance._wheelDelta = (instance._wheelDelta || 0) + delta;
+      if (Math.abs(instance._wheelDelta) < 80) return;
+      const direction = Math.sign(instance._wheelDelta); instance._wheelDelta = 0;
+      const rows = instance.getRows('active').filter(row => !row.getData().__delete), index = rows.findIndex(row => row.getIndex() === instance._activeDataRowKey), row = rows[index + direction], field = instance._activeDataField;
+      if (index < 0 || !row) return;
+      finishDataEdit(); activateDataCell(row.getCell(field));
+      row.scrollTo('nearest', false).catch(() => {});
+      container.focus({ preventScroll: true });
+    }, { passive: false, capture: true });
+    const editing = event => event.target.closest('input:not([type="checkbox"]), textarea, [contenteditable="true"]');
+    container.addEventListener('copy', event => {
+      if (editing(event) || !event.clipboardData || !ui.tableResponse) return;
+      const rows = ui.grids.data.getRows('active').filter(row => row.isSelected() && !row.getData().__delete).map(row => ui.tableResponse.result.columns.map((c, i) => row.getData()[`v${i}`]));
+      if (!rows.length) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      event.clipboardData.setData(mime, JSON.stringify({ columns: ui.tableResponse.result.columns.map(c => c.name), rows }));
+      const encode = value => { const s = value === null || value === undefined ? 'NULL' : typeof value === 'object' ? JSON.stringify(value) : String(value); return /[\t\r\n"]/.test(s) || s === 'NULL' && typeof value === 'string' ? `"${s.replaceAll('"', '""')}"` : s; };
+      event.clipboardData.setData('text/plain', rows.map(row => row.map(encode).join('\t')).join('\r\n'));
+    }, true);
+    // Quoted TSV preserves tabs, line breaks, empty strings and literal "NULL".
+    function parseTSV(source) {
+      const rows = []; let row = [], value = '', quoted = false, wasQuoted = false;
+      const field = () => { row.push(!wasQuoted && value === 'NULL' ? null : value); value = ''; wasQuoted = false; };
+      for (let i = 0; i < source.length; i++) {
+        const c = source[i];
+        if (c === '"' && (quoted || !value)) { if (quoted && source[i + 1] === '"') { value += '"'; i++; } else { quoted = !quoted; wasQuoted = true; } }
+        else if (!quoted && (c === '\t' || c === '\n' || c === '\r')) { field(); if (c !== '\t') { if (c === '\r' && source[i + 1] === '\n') i++; rows.push(row); row = []; } }
+        else value += c;
+      }
+      if (quoted) throw new Error(text('invalidRowPaste'));
+      if (value || wasQuoted || row.length || !rows.length) { field(); rows.push(row); }
+      return rows;
+    }
+    container.addEventListener('paste', async event => {
+      if (editing(event) || !event.clipboardData || !ui.tableResponse || ui.table?.kind === 'view' || ui.saving || tableSession()?.loading) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      try {
+        const raw = event.clipboardData.getData(mime), plain = event.clipboardData.getData('text/plain');
+        if (!raw && !plain) return;
+        const columns = ui.tableResponse.result.columns, payload = raw ? JSON.parse(raw) : null;
+        if (payload && (JSON.stringify(payload.columns) !== JSON.stringify(columns.map(c => c.name)) || !Array.isArray(payload.rows))) throw new Error(text('invalidRowPaste'));
+        const values = payload ? payload.rows : parseTSV(plain);
+        if (!values.length || values.some(row => !Array.isArray(row) || row.length !== columns.length)) throw new Error(text('invalidRowPaste'));
+        const instance = ui.grids.data, selected = instance.getSelectedRows();
+        const targets = selected.filter(row => row.getData().__new && !row.getData().__delete);
+        const pasted = [];
+        for (let n = 0; n < values.length; n++) {
+          const data = {};
+          columns.forEach((c, i) => { if (!ui.tableResponse.structure.columns.find(meta => meta.name === c.name)?.generated) data[`v${i}`] = values[n][i]; });
+          let row = targets[n];
+          if (row) await row.update(data);
+          else row = await instance.addRow({ ...data, __rowKey: `new-${++ui.sequence}`, __new: true }, false);
+          row.reformat(); pasted.push(row);
+        }
+        instance.deselectRow(); pasted.forEach(row => row.select());
+        await pasted[0].scrollTo(); container.focus({ preventScroll: true }); updateDirty();
+      } catch (error) { updateDirty(); status(error.message, true); }
+    }, true);
+    el('db-panel-data').addEventListener('keydown', event => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's' || event.altKey) return;
+      event.preventDefault(); event.stopPropagation();
+      saveRows();
+    }, true);
   }
 
   function captureResultState() {
@@ -715,10 +919,10 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     const owner = ui.activeBottom?.kind === 'result' ? ui.sqlTabs.find(tab => tab.id === ui.activeBottom.id) : null;
     const editable = cell => queryCellEditable(result, cell);
     const statementOnly = result.mode === 'execute' && !result.columns.length;
-    const columns = [{ title: text('sourceConnection'), field: '__source', minWidth: 150, formatter: 'plaintext' }, { title: text('sourceDatabase'), field: '__database', formatter: 'plaintext' }, { title: text('sourceEngine'), field: '__engine', formatter: 'plaintext' }, ...(statementOnly ? [ { title: text('executionStatus'), field: '__status', formatter: 'plaintext' }, { title: text('affectedTitle'), field: '__affected', formatter: 'plaintext' }, { title: text('duration'), field: '__duration', formatter: 'plaintext' }, { title: text('errorDetail'), field: '__error', formatter: 'plaintext', minWidth: 220 } ] : result.columns.map((c, i) => ({ title: escaped(c.name), field: `v${i}`, headerTooltip: c.type, editor: 'input', editable, contextMenu: [{ label: text('setNull'), action: (event, cell) => { if (editable(cell)) cell.setValue(null); } }] })))];
+    const columns = [{ title: text('sourceConnection'), field: '__source', minWidth: 150, formatter: 'plaintext' }, { title: text('sourceDatabase'), field: '__database', formatter: 'plaintext' }, { title: text('sourceEngine'), field: '__engine', formatter: 'plaintext' }, ...(statementOnly ? [ { title: text('executionStatus'), field: '__status', formatter: 'plaintext' }, { title: text('affectedTitle'), field: '__affected', formatter: 'plaintext' }, { title: text('duration'), field: '__duration', formatter: 'plaintext' }, { title: text('errorDetail'), field: '__error', formatter: 'plaintext', minWidth: 220 } ] : result.columns.map((c, i) => ({ title: escaped(c.name), field: `v${i}`, headerTooltip: c.type, editor: databaseCellEditor(c.type), editable, contextMenu: [{ label: text('setNull'), action: (event, cell) => { if (editable(cell)) cell.setValue(null); } }] })))];
     const origin = source => ({ __source: source.name || profile(source.target.id)?.name || source.target.id, __database: source.edit?.target.database || source.target.database, __engine: source.engine });
     const data = statementOnly ? result.sources.map(source => ({ ...origin(source), __status: text(source.error ? 'failed' : 'completed'), __affected: source.error ? '—' : source.affected ?? text('unknownAffected'), __duration: source.milliseconds, __error: source.error || '' })) : result.rows.map((row, index) => { const record = { ...origin(result.sources[row.source]), __resultRow: index }; row.values.forEach((value, i) => { record[`v${i}`] = value; }); return record; });
-    const instance = grid('query', columns, data, { editTriggerEvent: 'dblclick', initialFilter: owner?.filters || [], initialHeaderFilter: owner?.headerFilters || [], initialSort: owner?.sort || [] });
+    const instance = grid('query', columns, data, { editTriggerEvent: 'click', initialFilter: owner?.filters || [], initialHeaderFilter: owner?.headerFilters || [], initialSort: owner?.sort || [] });
     ui.resultGridOwner = owner?.id;
     el('db-query-grid').inert = Boolean(result.saving);
     instance.on('cellEdited', cell => { if (!instance._revertingResult) void saveQueryCell(result, owner, instance, cell); });
@@ -904,8 +1108,11 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     el('db-template-list').addEventListener('click', event => { const button = event.target.closest('[data-db-template]'); if (button && !button.disabled) fillTemplate(button.dataset.dbTemplate); });
     el('db-reload-table').addEventListener('click', () => ui.table && openTable(ui.table, { page: ui.page, reload: true }));
     el('db-save-rows').addEventListener('click', saveRows);
-    el('db-add-row').addEventListener('click', async () => { if (!ui.table || !ui.tableResponse) return status(text('chooseTable'), true); await ui.grids.data.addRow({ __rowKey: `new-${++ui.sequence}`, __new: true }, false); updateDirty(); });
-    el('db-delete-row').addEventListener('click', async () => { await Promise.all((ui.grids.data?.getSelectedRows() || []).map(row => row.getData().__new ? row.delete() : row.update({ __delete: true }))); updateDirty(); });
+    el('db-rollback-rows').addEventListener('click', rollbackRows);
+    el('db-stop-table').addEventListener('click', () => tableSession()?.loadController?.abort());
+    initializeDataClipboard();
+    el('db-add-row').addEventListener('click', () => addDataRow().catch(error => status(error.message, true)));
+    el('db-delete-row').addEventListener('click', async () => { await Promise.all((ui.grids.data?.getSelectedRows() || []).filter(row => row.getData().__new || ui.tableResponse?.editable).map(row => row.getData().__new ? row.delete() : row.update({ __delete: true }))); updateDirty(); });
     el('db-page-prev').addEventListener('click', () => ui.table && openTable(ui.table, { page: Math.max(0, ui.page - 1) })); el('db-page-next').addEventListener('click', () => ui.table && openTable(ui.table, { page: ui.page + 1 })); el('db-page-last').addEventListener('click', () => ui.table && openTable(ui.table, { last: true })); el('db-page-size').addEventListener('change', () => ui.table && openTable(ui.table, { page: 0, pageSize: el('db-page-size').value, reload: true }));
     for (const [id, action] of [['db-create-table', 'createTable'], ['db-add-column', 'addColumn'], ['db-alter-column', 'alterColumn'], ['db-create-index', 'createIndex'], ['db-drop-index', 'dropIndex']]) el(id).addEventListener('click', () => openDesigner(action));
     const connectionForm = el('db-connection-form'); connectionForm.addEventListener('submit', saveConnection); connectionForm.elements.password.addEventListener('input', () => { connectionForm.dataset.passwordDirty = 'true'; }); connectionForm.elements.engine.addEventListener('change', () => { connectionForm.elements.port.value = connectionForm.elements.engine.value === 'postgres' ? '5432' : '3306'; connectionMode(); });

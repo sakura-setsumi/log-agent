@@ -6,6 +6,7 @@ import { sql } from '@codemirror/lang-sql';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { TabulatorFull } from 'tabulator-tables';
 import { recognizeStatements, queryAtCursor, sqlDialect } from './statements.js';
+import { recognizeSlots } from './slot-recognizer.js';
 import { inlineSlots, setSlots, applyTemplate, replaceSlotValues, replacePredicate } from './inline-slots.js';
 
 const queryContext = StateEffect.define();
@@ -122,6 +123,19 @@ window.DatabaseUI = {
         editor.dispatch({ changes, effects: setSlots.of([...others, ...created].sort((a, b) => a.from - b.from)) });
       },
       replacePredicate(operator, operand, label) { const transaction = replacePredicate(editor.state, operator, operand, label, activeTemplate); if (transaction) editor.dispatch(transaction); },
+      // Give plain SQL (no slots yet) picker slots wherever its structure is recognizable.
+      recognizeSlots(labels) {
+        if (editor.state.field(inlineSlots).length) return false;
+        const slots = recognizeSlots(editor.state.doc.toString(), editor.state.field(actions).context.engine, labels);
+        if (slots.length) editor.dispatch({ effects: setSlots.of(slots) });
+        return slots.length > 0;
+      },
+      // Slots are plain objects, so they survive JSON; used to keep the picker slots across a restart.
+      slotState: () => ({ slots: editor.state.field(inlineSlots), activeTemplate }),
+      setSlotState(saved) {
+        const length = editor.state.doc.length, slots = (saved?.slots || []).filter(slot => Number.isInteger(slot?.from) && Number.isInteger(slot?.to) && slot.from >= 0 && slot.from <= slot.to && slot.to <= length);
+        activeTemplate = saved?.activeTemplate; if (slots.length) editor.dispatch({ effects: setSlots.of(slots) });
+      },
       snapshot: () => ({ state: editor.state, activeTemplate, top: editor.scrollDOM.scrollTop, left: editor.scrollDOM.scrollLeft }),
       restore(snapshot) { configuration = ''; activeTemplate = snapshot.activeTemplate; editor.setState(snapshot.state); requestAnimationFrame(() => { editor.scrollDOM.scrollTop = snapshot.top; editor.scrollDOM.scrollLeft = snapshot.left; }); },
       configure(engine, schema = {}) { const next = JSON.stringify([engine, schema]); if (configuration === next) return; configuration = next; editor.dispatch({ effects: [language.reconfigure(sql({ dialect: sqlDialect(engine), schema, upperCaseKeywords: true })), queryContext.of({ engine })] }); },

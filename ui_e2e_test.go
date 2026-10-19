@@ -2891,14 +2891,14 @@ func TestE2ETerminalPage(t *testing.T) {
 		t.Fatalf("load page: %v", err)
 	}
 
-	// The old page is "指令集组" now and the SSH client is "服务器指令".
+	// The old page is "指令集组" now and the SSH client is "服务器".
 	var labels string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll('.rail .nav-item')).map((b) => b.dataset.view + '=' + b.textContent.replace(/[0-9]+$/, '').trim()).join('|')`, &labels)); err != nil {
 		t.Fatal(err)
 	}
-	// The browser here runs in English; the Chinese UI says 指令集组 / 服务器指令.
-	if !strings.Contains(labels, "commands=▤Command Groups") || !strings.Contains(labels, "terminal=>_Server Commands") {
-		t.Fatalf("rail labels = %q, want Command Groups for commands and Server Commands for terminal", labels)
+	// The browser here runs in English; the Chinese UI says 指令集组 / 服务器.
+	if !strings.Contains(labels, "commands=▤Command Groups") || !strings.Contains(labels, "terminal=>_Servers") {
+		t.Fatalf("rail labels = %q, want Command Groups for commands and Servers for terminal", labels)
 	}
 	var commandsTitle string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#commands-view h1').textContent`, &commandsTitle)); err != nil || commandsTitle != "Command Groups" {

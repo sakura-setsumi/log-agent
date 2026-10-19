@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $distDirectory = Join-Path $projectRoot 'dist'
-$output = Join-Path $distDirectory 'dozzle-ops.exe'
+$output = Join-Path $distDirectory 'log-agent.exe'
 $go = Join-Path ${env:ProgramFiles} 'Go\bin\go.exe'
 $env:GOCACHE = Join-Path ([System.IO.Path]::GetTempPath()) 'log-agent-go-cache'
 

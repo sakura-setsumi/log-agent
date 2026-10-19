@@ -3411,23 +3411,12 @@ func (s *server) fetchDozzleHistoryPage(ctx context.Context, node Node, hostID, 
 	}
 	query.Set("from", from.Format(time.RFC3339Nano))
 	query.Set("to", to.Format(time.RFC3339Nano))
-	endpoint := fmt.Sprintf("%s/api/hosts/%s/containers/%s/logs?%s", node.baseURL, url.PathEscape(hostID), url.PathEscape(containerID), query.Encode())
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	body, err := openDozzleHistory(ctx, node.baseURL, hostID, containerID, from, to, query)
 	if err != nil {
-		s.setNodeStatus(node.ID, "error", err.Error())
 		return time.Time{}, 0, err
 	}
-	request.Header.Set("Accept", "application/x-jsonl")
-	client := &http.Client{}
-	response, err := client.Do(request)
-	if err != nil {
-		return time.Time{}, 0, fmt.Errorf("read Dozzle history failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return time.Time{}, 0, fmt.Errorf("Dozzle history returned HTTP %d", response.StatusCode)
-	}
-	scanner := bufio.NewScanner(response.Body)
+	defer body.Close()
+	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 16<<20)
 	oldest := time.Time{}
 	count := 0
@@ -3488,21 +3477,12 @@ func (s *server) fetchDozzleHistorySearchPage(ctx context.Context, node Node, ho
 	}
 	query.Set("from", from.Format(time.RFC3339Nano))
 	query.Set("to", to.Format(time.RFC3339Nano))
-	endpoint := fmt.Sprintf("%s/api/hosts/%s/containers/%s/logs?%s", node.baseURL, url.PathEscape(hostID), url.PathEscape(containerID), query.Encode())
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	body, err := openDozzleHistory(ctx, node.baseURL, hostID, containerID, from, to, query)
 	if err != nil {
 		return time.Time{}, 0, nil, err
 	}
-	request.Header.Set("Accept", "application/x-jsonl")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return time.Time{}, 0, nil, fmt.Errorf("read Dozzle history failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return time.Time{}, 0, nil, fmt.Errorf("Dozzle history returned HTTP %d", response.StatusCode)
-	}
-	scanner := bufio.NewScanner(response.Body)
+	defer body.Close()
+	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 16<<20)
 	oldest := time.Time{}
 	count := 0
@@ -3534,6 +3514,92 @@ func (s *server) fetchDozzleHistorySearchPage(ctx context.Context, node Node, ho
 		return time.Time{}, 0, nil, fmt.Errorf("read Dozzle history failed: %w", err)
 	}
 	return oldest, count, entries, nil
+}
+
+// openDozzleHistory returns the history of one container as JSON lines. It
+// uses the stream API of Dozzle v11.3+ (/api/containers/logs/stream), which
+// replays the container's log as SSE and ignores from/to, so the replay is read
+// until it goes quiet and filtered to the requested window here. Only nodes that
+// answer 404 (Dozzle v11.0) fall back to the legacy per-host history route.
+func openDozzleHistory(ctx context.Context, baseURL, hostID, containerID string, from, to time.Time, query url.Values) (io.ReadCloser, error) {
+	body, found, err := readDozzleReplay(ctx, baseURL, hostID, containerID, from, to, query)
+	if err != nil || found {
+		return body, err
+	}
+	rangeQuery := url.Values{}
+	for key, values := range query {
+		rangeQuery[key] = values
+	}
+	rangeQuery.Set("from", from.Format(time.RFC3339Nano))
+	rangeQuery.Set("to", to.Format(time.RFC3339Nano))
+	endpoint := fmt.Sprintf("%s/api/hosts/%s/containers/%s/logs?%s", baseURL, url.PathEscape(hostID), url.PathEscape(containerID), rangeQuery.Encode())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/x-jsonl")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("read Dozzle history failed: %w", err)
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		response.Body.Close()
+		return nil, fmt.Errorf("Dozzle history returned HTTP %d", response.StatusCode)
+	}
+	return response.Body, nil
+}
+
+// dozzleStreamEndpoint is the log stream route of Dozzle v11.3 and later.
+func dozzleStreamEndpoint(baseURL, hostID, containerID string, query url.Values) string {
+	streamQuery := url.Values{}
+	for key, values := range query {
+		streamQuery[key] = values
+	}
+	streamQuery.Set("container", hostID+"/"+containerID)
+	return baseURL + "/api/containers/logs/stream?" + streamQuery.Encode()
+}
+
+func readDozzleReplay(ctx context.Context, baseURL, hostID, containerID string, from, to time.Time, query url.Values) (io.ReadCloser, bool, error) {
+	replayCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(replayCtx, http.MethodGet, dozzleStreamEndpoint(baseURL, hostID, containerID, query), nil)
+	if err != nil {
+		return nil, false, err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, false, fmt.Errorf("read Dozzle history failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, false, fmt.Errorf("Dozzle history returned HTTP %d", response.StatusCode)
+	}
+
+	// The replay never ends on its own (it turns into the live stream), so a
+	// quiet period after the first events marks the end of the backlog.
+	const idle = 1500 * time.Millisecond
+	idleTimer := time.AfterFunc(idle*2, cancel)
+	defer idleTimer.Stop()
+	fromMs, toMs := from.UnixMilli(), to.UnixMilli()
+	var out bytes.Buffer
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 64*1024), 16<<20)
+	_ = readDozzleSSE(scanner, func(_, data string) {
+		idleTimer.Reset(idle)
+		var event dozzleLogEvent
+		if json.Unmarshal([]byte(data), &event) != nil || event.Timestamp < fromMs || event.Timestamp > toMs {
+			return
+		}
+		out.WriteString(data)
+		out.WriteByte('\n')
+	})
+	if ctx.Err() != nil {
+		return nil, false, ctx.Err()
+	}
+	return io.NopCloser(&out), true, nil
 }
 
 func normalizeSearchValue(value string) string {
@@ -3613,7 +3679,8 @@ func (s *server) consumeDozzleLogs(ctx context.Context, node Node, hostID, conta
 	for _, level := range []string{"debug", "info", "warn", "error", "fatal", "trace", "unknown"} {
 		query.Add("levels", level)
 	}
-	endpoint := fmt.Sprintf("%s/api/hosts/%s/containers/%s/logs/stream?%s", node.baseURL, url.PathEscape(hostID), url.PathEscape(containerID), query.Encode())
+	endpoint := dozzleStreamEndpoint(node.baseURL, hostID, containerID, query)
+	legacyEndpoint := fmt.Sprintf("%s/api/hosts/%s/containers/%s/logs/stream?%s", node.baseURL, url.PathEscape(hostID), url.PathEscape(containerID), query.Encode())
 	for {
 		if ctx.Err() != nil {
 			return
@@ -3639,6 +3706,11 @@ func (s *server) consumeDozzleLogs(ctx context.Context, node Node, hostID, conta
 			response.Body.Close()
 			if ctx.Err() != nil {
 				return
+			}
+			if status == http.StatusNotFound && endpoint != legacyEndpoint {
+				// Dozzle v11.0 has no /api/containers/logs/stream; use its per-host route.
+				endpoint = legacyEndpoint
+				continue
 			}
 			s.setNodeStatus(node.ID, "error", fmt.Sprintf("Dozzle log stream returned HTTP %d", status))
 			if !waitForRetry(ctx, 3*time.Second) {

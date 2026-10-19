@@ -29,7 +29,7 @@
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='rules']" data-i18n="nav.rules">处理规则</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='connections']" data-i18n="nav.connections">连接管理</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='commands']" data-i18n="nav.commands">指令集组</button>
-          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='terminal']" data-i18n="nav.terminal">服务器指令</button>
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='terminal']" data-i18n="nav.terminal">服务器</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='database']" data-i18n="nav.database">数据库</button>
           <div class="menu-separator" role="separator"></div>
           <button class="menu-item" type="button" role="menuitem" data-click="#theme-toggle" data-label-from="#theme-toggle">切换主题</button>
@@ -87,7 +87,7 @@
           <span class="nav-icon">▤</span><span data-i18n="nav.commands">指令集组</span>
         </button>
         <button class="nav-item" data-view="terminal">
-          <span class="nav-icon">&gt;_</span><span data-i18n="nav.terminal">服务器指令</span>
+          <span class="nav-icon">&gt;_</span><span data-i18n="nav.terminal">服务器</span>
         </button>
         <button class="nav-item" data-view="database">
           <span class="nav-icon">▤</span><span data-i18n="nav.database">数据库</span>
@@ -374,7 +374,7 @@
             <div class="db-target-picker hidden" id="db-target-picker" role="dialog" aria-labelledby="db-target-picker-title"><div class="db-target-picker-heading"><strong id="db-target-picker-title" data-i18n="db.chooseTargets">选择目标数据库</strong><button class="text-button" id="db-target-picker-clear" type="button" data-i18n="db.clearTargets">清空勾选</button><button class="text-button" id="db-target-picker-close" type="button" aria-label="Close">×</button></div><input id="db-target-search" class="db-target-search" type="search" autocomplete="off" data-i18n-placeholder="db.searchTargets" placeholder="搜索连接或数据库"/><div class="db-target-tree" id="db-target-tree"></div><div class="db-target-picker-status" id="db-target-picker-status" role="status"></div></div>
             <aside class="db-browser panel"><div class="db-tree-heading"><strong data-i18n="db.connections">连接与结构</strong><button class="text-button" id="db-tree-create-table" type="button" data-i18n="db.newItem" data-i18n-title="db.createTable" title="新建表">新建</button><button class="text-button" id="db-refresh-tree" type="button" data-i18n="db.refresh">刷新</button></div><div class="db-tree" id="db-tree"></div></aside>
             <section class="db-content panel">
-              <div class="db-workspace-tabbar db-sql-tabbar"><span class="db-tabbar-label">SQL</span><div id="db-sql-tabs" class="db-session-tabs" role="tablist" aria-label="SQL tabs"></div><button id="db-add-sql-tab" class="text-button db-add-tab" type="button" data-i18n-title="db.addSqlTab" title="新建 SQL 页签">＋</button></div>
+              <div class="db-workspace-tabbar db-sql-tabbar"><div id="db-sql-tabs" class="db-session-tabs" role="tablist" aria-label="SQL tabs"></div><button id="db-add-sql-tab" class="text-button db-add-tab" type="button" data-i18n-title="db.addSqlTab" title="新建 SQL 页签">＋</button></div>
               <div class="db-sql-pane" id="db-panel-sql">
                 <div class="db-actions db-query-bar"><div class="db-sql-targets" id="db-sql-targets"><button class="db-target-select" id="db-target-select" type="button" aria-expanded="false" aria-haspopup="dialog" aria-controls="db-target-picker"><strong id="db-target-count"></strong><span id="db-target-summary"></span><span aria-hidden="true">▾</span></button></div><button class="primary-button compact-button" id="db-run-query" type="button" data-i18n="db.runQuery">执行 SQL · Ctrl+Enter</button><button class="secondary-button compact-button" id="db-execute" type="button" data-i18n="db.execute">执行语句（单库）</button><button class="danger-button compact-button" id="db-cancel-query" type="button" disabled data-i18n="db.cancel">取消</button><select id="db-query-limit" aria-label="Rows per database"><option value="100">100 / DB</option><option value="500" selected>500 / DB</option><option value="1000">1000 / DB</option><option value="2500">2500 / DB</option></select><button class="text-button" id="db-clear-targets" type="button" data-i18n="db.clearTargets">清空勾选</button><button class="text-button" id="db-export-query" type="button" data-i18n="db.exportCsv">导出 CSV</button><label class="db-single-target"><span data-i18n="db.singleTarget">单库目标</span><select id="db-single-target"></select></label><button class="secondary-button compact-button db-template-toggle" id="db-toggle-templates" type="button" aria-expanded="false" aria-controls="db-template-panel" data-i18n="db.templates">模板语句</button></div>
                 <div class="db-sql-workspace">
@@ -387,12 +387,22 @@
               </div>
 
               <div class="db-workspace-tabbar db-table-tabbar"><span class="db-tabbar-label" data-i18n="db.tableTabs">表 / 结果</span><div id="db-table-tabs" class="db-session-tabs" role="tablist" aria-label="Tables and results"></div></div>
-              <div class="db-object-header"><strong class="db-object-title" id="db-object-title" data-i18n="db.chooseObject">选择数据表，或勾选多个库查询</strong><span class="db-hint" id="db-engine-label"></span></div>
+              <div class="db-object-header"><strong class="db-object-title" id="db-object-title" data-i18n="db.chooseObject">选择数据表，或勾选多个库查询</strong></div>
               <nav class="db-tabs hidden" id="db-table-subtabs"><button type="button" class="active" data-db-tab="data" data-i18n="db.data">数据</button><button type="button" data-db-tab="structure" data-i18n="db.structure">结构</button></nav>
               <div class="db-panel" id="db-panel-data">
-                <div class="db-actions"><button class="secondary-button compact-button" id="db-add-row" type="button" data-i18n="db.addRow">新增行</button><button class="danger-button compact-button" id="db-delete-row" type="button" data-i18n="db.deleteRows">删除选中行</button><button class="primary-button compact-button" id="db-save-rows" type="button" disabled data-i18n="db.saveRows">保存修改</button><button class="secondary-button compact-button" id="db-reload-table" type="button" data-i18n="db.reload">重新加载</button><span class="db-hint" data-i18n="db.editHint">双击编辑，右键可设为 NULL；保存后写入数据库。</span></div>
+                <div class="db-table-empty hidden" id="db-data-placeholder" role="status"></div>
                 <div class="db-grid" id="db-data-grid"></div>
-                <footer class="db-footer"><span id="db-data-count"></span><div class="db-actions"><button class="secondary-button compact-button" id="db-page-prev" type="button" data-i18n="db.previous">上一页</button><span id="db-page-label"></span><button class="secondary-button compact-button" id="db-page-next" type="button" data-i18n="db.next">下一页</button><button class="secondary-button compact-button" id="db-page-last" type="button" data-i18n="db.last">尾页</button><select id="db-page-size" aria-label="Page size"><option>100</option><option>250</option><option>500</option><option>1000</option></select></div></footer>
+                <footer class="db-footer db-data-footer">
+                  <div class="db-row-toolbar" role="toolbar" data-i18n-aria-label="db.rowActions">
+                    <button id="db-add-row" type="button" data-i18n-title="db.addRow" data-i18n-aria-label="db.addRow"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
+                    <button id="db-delete-row" type="button" disabled data-i18n-title="db.deleteRows" data-i18n-aria-label="db.deleteRows"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg></button>
+                    <button id="db-save-rows" type="button" disabled data-i18n-title="db.commitRows" data-i18n-aria-label="db.commitRows"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7"/></svg></button>
+                    <button id="db-rollback-rows" type="button" disabled data-i18n-title="db.rollbackRows" data-i18n-aria-label="db.rollbackRows"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
+                    <button id="db-reload-table" type="button" data-i18n-title="db.reload" data-i18n-aria-label="db.reload"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6A5 5 0 1 0 13 9M13 2v4H9"/></svg></button>
+                    <button id="db-stop-table" type="button" disabled data-i18n-title="db.stopLoading" data-i18n-aria-label="db.stopLoading"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" fill="currentColor" stroke="none"/></svg></button>
+                  </div>
+                  <span id="db-data-count" data-i18n-title="db.editHint"></span><div class="db-actions db-data-pagination"><button class="secondary-button compact-button" id="db-page-prev" type="button" data-i18n="db.previous">上一页</button><span id="db-page-label"></span><button class="secondary-button compact-button" id="db-page-next" type="button" data-i18n="db.next">下一页</button><button class="secondary-button compact-button" id="db-page-last" type="button" data-i18n="db.last">尾页</button><select id="db-page-size" aria-label="Page size"><option>100</option><option>250</option><option>500</option><option>1000</option></select></div>
+                </footer>
               </div>
               <div class="db-panel hidden" id="db-panel-structure">
                 <div class="db-actions"><button class="primary-button compact-button" id="db-create-table" type="button" data-i18n="db.createTable">新建表</button><button class="secondary-button compact-button" id="db-add-column" type="button" data-i18n="db.addColumn">添加字段</button><button class="secondary-button compact-button" id="db-alter-column" type="button" data-i18n="db.alterColumn">修改字段</button><button class="secondary-button compact-button" id="db-create-index" type="button" data-i18n="db.createIndex">新增索引</button><button class="danger-button compact-button" id="db-drop-index" type="button" data-i18n="db.dropIndex">删除索引</button></div>

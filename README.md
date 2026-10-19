@@ -14,7 +14,7 @@ Highlights:
 - Time-window history loading with automatic older-page loading after the per-container browse limit is reached.
 - Processing pipeline for sensitive-data masking, structured-field extraction, and health-check filtering.
 - AI log analysis with selectable context, image/text attachments, model profiles, and browser-local conversation history.
-- Command Groups page for ordered, reusable server command sets, and a Server Commands page that is an SSH terminal (xterm.js) with an SFTP file browser, in the style of FinalShell. Select or drop whole folders to upload them with their directory structure.
+- Command Groups page for ordered, reusable server command sets, and a Servers page that is an SSH terminal (xterm.js) with an SFTP file browser, in the style of FinalShell. Select or drop whole folders to upload them with their directory structure.
 - Database workspace for MySQL, PostgreSQL and SQLite: connection/schema tree, paged editable tables, a visual table/column/index designer, and one SQL query across multiple databases with combined results and source labels.
 - Local node/model storage for localhost use, with browser-local storage for remote visitors.
 - No database required; frontend assets are embedded into the Go executable.
@@ -31,7 +31,7 @@ This is a Windows desktop app: it opens its own window (Microsoft Edge WebView2,
 
 ```powershell
 .\scripts\build.ps1
-.\dist\dozzle-ops.exe
+.\dist\log-agent.exe
 ```
 
 The window serves its own frontend and talks to the Go handlers in-process, so nothing else on the machine (or network) can reach the dashboard. Only one instance runs at a time; starting a second one brings the first window forward. Links to external sites open in the system browser. Diagnostics go to `log-agent.log` in the data directory, and `LOG_AGENT_DEBUG=1` enables the WebView2 developer tools.
@@ -45,7 +45,7 @@ The latest Windows amd64 executable is available in the [Releases](https://githu
 The application stores node connections, AI providers and server-command flows as JSON files in a `data` directory beside the executable:
 
 ```text
-dozzle-ops.exe
+log-agent.exe
 data/
 ├─ nodes.json
 ├─ models.json
@@ -129,7 +129,7 @@ The executable's icon and version info come from `app-icon.ico`, compiled into t
 
 ```powershell
 go install github.com/tc-hib/go-winres@latest
-go-winres simply --icon app-icon.ico --arch amd64,386,arm64 --manifest none --product-name "日志中枢 Log Agent" --file-description "日志中枢 Log Agent" --product-version 1.0.0 --file-version 1.0.0 --original-filename dozzle-ops.exe
+go-winres simply --icon app-icon.ico --arch amd64,386,arm64 --manifest none --product-name "日志中枢 Log Agent" --file-description "日志中枢 Log Agent" --product-version 1.0.0 --file-version 1.0.0 --original-filename log-agent.exe
 ```
 
 Build output is written to `dist/`; local binaries and caches are intentionally ignored by Git.
@@ -139,7 +139,7 @@ Build output is written to `dist/`; local binaries and caches are intentionally 
 - `main.go` — HTTP API, Dozzle connectors, SSE ingestion, history paging, cache policy, and embedded frontend.
 - `app.js` — dashboard state, node/container selection, log stream, filtering, paging, and export.
 - `assistant-ui.js` — AI assistant conversations, context, attachments, and session history.
-- `term_api.go` / `terminal.js` — the Server Commands page: SSH shell sessions and SFTP over one connection, and the xterm.js front end. xterm.js is vendored in `third_party/xterm/` (MIT).
+- `term_api.go` / `terminal.js` — the Servers page: SSH shell sessions and SFTP over one connection, and the xterm.js front end. xterm.js is vendored in `third_party/xterm/` (MIT).
 - `database.go` / `database_schema.go` / `database.js` / `database.css` — database connections, multi-target query merging, transactional row changes and the schema designer. Browser libraries and their licenses are vendored in `third_party/database/`.
 - `bootstrap.js` — application initialization after frontend modules load.
 - `styles.css` — dashboard styling and responsive layout.
@@ -171,7 +171,7 @@ Log Agent 是一个面向 Dozzle 的自托管日志聚合、检索、加工和�
 - 按时间窗口拉取历史日志；单容器浏览缓存达到上限后，滚动到顶部会自动加载更早日志。
 - 提供敏感信息脱敏、结构化字段提取和健康检查过滤等日志加工规则。
 - 支持 AI 日志分析、上下文选择、图片/文本附件、模型配置和浏览器本地会话历史。
-- 「指令集组」页编排可复用的服务器指令集；「服务器指令」页是类似 FinalShell 的 SSH 终端（xterm.js），下方带 SFTP 文件管理（浏览、上传、下载、新建、重命名、删除）和指令集快捷发送，支持选择或拖入整个文件夹上传并保留目录结构。
+- 「指令集组」页编排可复用的服务器指令集；「服务器」页是类似 FinalShell 的 SSH 终端（xterm.js），下方带 SFTP 文件管理（浏览、上传、下载、新建、重命名、删除）和指令集快捷发送，支持选择或拖入整个文件夹上传并保留目录结构。
 - 「数据库」页支持 MySQL、PostgreSQL、SQLite，提供连接和结构树、数据查看与编辑、可视化建表及字段和索引管理；支持一条 SQL 在多个库执行并合并结果。
 - 本机访问时使用可执行文件旁的本地 JSON 配置；远程访问时使用访客浏览器的 localStorage。
 - 无需数据库，前端资源直接嵌入 Go 可执行文件。
@@ -188,7 +188,7 @@ go run .
 
 ```powershell
 .\scripts\build.ps1
-.\dist\dozzle-ops.exe
+.\dist\log-agent.exe
 ```
 
 窗口内的前端资源由程序自身提供，接口在进程内直接调用，不占用端口，本机其他程序和局域网都无法访问。同一时间只运行一个实例，再次启动会把已有窗口切到前台；外部网站链接用系统浏览器打开；运行日志写入数据目录下的 `log-agent.log`，设置 `LOG_AGENT_DEBUG=1` 可开启 WebView2 开发者工具。首次启动会在桌面创建名为「日志中枢」的快捷方式。移动 exe 后再启动一次会更新快捷方式；手动删除后不会再自动创建。设置 `LOG_AGENT_NO_SHORTCUT=1` 可关闭此功能。Windows amd64 最新可执行文件位于 [Releases](https://github.com/sakura-setsumi/log-agent/releases)。
@@ -232,7 +232,7 @@ go test ./...
 - `main.go`：HTTP API、Dozzle 连接、SSE 日志接收、历史分页、缓存策略和嵌入式前端。
 - `app.js`：页面状态、节点/容器选择、日志流、筛选、分页和导出。
 - `assistant-ui.js`：AI 助手会话、上下文、附件和历史记录。
-- `term_api.go`、`terminal.js`：「服务器指令」页——同一条连接上的 SSH shell 与 SFTP，以及基于 xterm.js 的前端；xterm.js 随仓库放在 `third_party/xterm/`（MIT）。
+- `term_api.go`、`terminal.js`：「服务器」页——同一条连接上的 SSH shell 与 SFTP，以及基于 xterm.js 的前端；xterm.js 随仓库放在 `third_party/xterm/`（MIT）。
 - `bootstrap.js`：前端模块加载完成后的初始化。
 - `styles.css`：面板样式和响应式布局。
 

@@ -64,6 +64,9 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 		}
 		var dump string
 		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#database-view').innerText + '\nDIALOG: ' + document.querySelector('#db-schema-modal').innerText`, &dump))
+		exceptionMu.Lock()
+		t.Logf("browser exceptions: %v", exceptions)
+		exceptionMu.Unlock()
 		t.Fatalf("waiting for %s: %s", description, dump)
 	}
 	run(chromedp.Navigate(web.URL), chromedp.WaitVisible(`.nav-item[data-view="database"]`, chromedp.ByQuery), chromedp.Click(`.nav-item[data-view="database"]`, chromedp.ByQuery))
@@ -121,7 +124,7 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	}
 	// Editing a merged row writes only to that row's source, then retains NULL
 	// handling and reports an optimistic-lock conflict without losing data.
-	run(chromedp.DoubleClick(`#db-query-grid .tabulator-row:first-child [tabulator-field="v3"]`, chromedp.ByQuery))
+	run(chromedp.Click(`#db-query-grid .tabulator-row:first-child [tabulator-field="v3"]`, chromedp.ByQuery))
 	var missingColumnReadOnly bool
 	run(chromedp.Evaluate(`!document.querySelector('#db-query-grid .tabulator-editing input')`, &missingColumnReadOnly))
 	if !missingColumnReadOnly {
@@ -129,7 +132,7 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	}
 	editResultNote := func(value string) {
 		t.Helper()
-		run(chromedp.DoubleClick(`#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-query-grid .tabulator-editing input`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText(value).Do(ctx) }), chromedp.KeyEvent(kb.Enter))
+		run(chromedp.Click(`#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-query-grid .tabulator-editing input`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText(value).Do(ctx) }), chromedp.KeyEvent(kb.Enter))
 	}
 	editResultNote("result edit")
 	wait(`document.querySelector('#db-query-summary .db-query-edit-status').textContent.includes('Saved:') && document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]').textContent==='result edit' && !document.querySelector('#db-query-grid').inert`, "query result cell saved")
@@ -239,9 +242,14 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	wait(`document.querySelector('#db-data-grid .tabulator-row [tabulator-field="v0"]').textContent!==window.__firstPageId && document.querySelector('#db-page-label').textContent.includes('2') && document.querySelector('#db-page-last').disabled`, "last page")
 	run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-page-size');s.value='100';s.dispatchEvent(new Event('change', {bubbles:true})); })()`, nil))
 	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===2`, "page size restored")
-	run(chromedp.DoubleClick(`#db-data-grid .tabulator-row:first-child [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-data-grid .tabulator-cell.tabulator-editing input`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("browser edit").Do(ctx) }))
+	run(chromedp.Click(`#db-data-grid .tabulator-row:first-child [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-data-grid .tabulator-cell.tabulator-editing input`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("browser edit").Do(ctx) }))
 	run(chromedp.KeyEvent(kb.Enter))
 	wait(`!document.querySelector('#db-save-rows').disabled`, "pending edit")
+	wait(`document.querySelector('#db-data-grid .tabulator-row:first-child').classList.contains('db-row-current') && document.querySelector('#db-data-grid .tabulator-col[tabulator-field="v2"]').classList.contains('db-column-current')`, "click highlights the current row and column header")
+	run(chromedp.Evaluate(`document.querySelector('#db-data-grid .db-cell-active').dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:100}))`, nil))
+	wait(`document.querySelector('#db-data-grid .tabulator-row:nth-child(2) [tabulator-field="v2"]').classList.contains('db-cell-active') && document.querySelectorAll('#db-data-grid .db-row-current').length===1`, "wheel down moves to the next row in the same column")
+	run(chromedp.Evaluate(`document.querySelector('#db-data-grid .db-cell-active').dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-100}))`, nil))
+	wait(`document.querySelector('#db-data-grid .tabulator-row:first-child [tabulator-field="v2"]').classList.contains('db-cell-active') && document.querySelectorAll('#db-data-grid .db-column-current').length===1`, "wheel up restores the previous row and keeps one highlighted column")
 	run(chromedp.Click(`#db-save-rows`, chromedp.ByQuery))
 	wait(`document.querySelector('#db-status').textContent.includes('Committed 1')`, "committed edit")
 	pool, _ := databases.pool(context.Background(), a)
@@ -249,10 +257,62 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	if err := pool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&note); err != nil || note != "browser edit" {
 		t.Fatalf("saved value = %q (%v)", note, err)
 	}
+	// Copy a selected row, paste into a new draft, then save while its key editor is active.
+	run(chromedp.Click(`#db-data-grid .tabulator-row:first-child [tabulator-field="__select"]`, chromedp.ByQuery), chromedp.Evaluate(`(() => { window.__rowClipboard = new DataTransfer(); document.querySelector('#db-data-grid').dispatchEvent(new ClipboardEvent('copy', {bubbles:true, cancelable:true, clipboardData:window.__rowClipboard})); })()`, nil))
+	var copiedRow string
+	run(chromedp.Evaluate(`window.__rowClipboard.getData('text/plain')`, &copiedRow))
+	if copiedRow != "1\t12.5\tbrowser edit" {
+		t.Fatalf("copied row = %q", copiedRow)
+	}
+	run(chromedp.KeyEvent("c", chromedp.KeyModifiers(input.ModifierCtrl)))
 	run(chromedp.Click(`#db-add-row`, chromedp.ByQuery))
 	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===3`, "new row")
-	run(chromedp.DoubleClick(`#db-data-grid .tabulator-row:nth-child(3) [tabulator-field="v0"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-data-grid .tabulator-cell.tabulator-editing input`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("3").Do(ctx) }), chromedp.KeyEvent(kb.Enter), chromedp.Click(`#db-save-rows`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-data-grid .tabulator-row:nth-child(3)').classList.contains('db-row-new') && document.querySelector('#db-data-grid .tabulator-row:nth-child(3) [tabulator-field="v0"]').classList.contains('db-cell-active') && document.querySelector('#db-data-grid .tabulator-row:nth-child(3) [tabulator-field="v1"]').textContent==='(Default)'`, "new row has default placeholders and a single active cell")
+	if path := os.Getenv("LOG_AGENT_DB_NEW_ROW_SCREENSHOT"); path != "" {
+		var screenshot []byte
+		run(chromedp.CaptureScreenshot(&screenshot))
+		if err := os.WriteFile(path, screenshot, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(chromedp.KeyEvent("v", chromedp.KeyModifiers(input.ModifierCtrl)))
+	wait(`document.querySelector('#db-data-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]').textContent==='browser edit' && document.querySelectorAll('#db-data-grid .tabulator-row').length===3`, "paste fills the selected new row")
+	run(chromedp.Click(`#db-data-grid .tabulator-row:nth-child(3) [tabulator-field="v0"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-data-grid .tabulator-cell.tabulator-editing input`, chromedp.ByQuery), chromedp.Evaluate(`document.querySelector('#db-data-grid .tabulator-cell.tabulator-editing input').select()`, nil), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("3").Do(ctx) }))
+	run(chromedp.KeyEvent("s", chromedp.KeyModifiers(input.ModifierCtrl)))
 	wait(`document.querySelector('#db-status').textContent.includes('Committed 1') && !document.querySelector('#db-panel-data').inert && document.querySelectorAll('#db-data-grid .tabulator-row').length===3 && document.querySelector('#db-data-grid .tabulator-row:nth-child(2) [tabulator-field="v0"]').textContent==='3'`, "insert saved")
+	if err := pool.db.QueryRow("SELECT note FROM orders WHERE id=3").Scan(&note); err != nil || note != "browser edit" {
+		t.Fatalf("pasted value = %q (%v)", note, err)
+	}
+	var navicatLayout bool
+	run(chromedp.Evaluate(`!document.querySelector('#db-data-grid input[type="checkbox"]') && document.querySelector('#db-add-row').getBoundingClientRect().top >= document.querySelector('#db-data-grid').getBoundingClientRect().bottom && document.querySelector('#db-add-row').getBoundingClientRect().left < document.querySelector('#db-page-prev').getBoundingClientRect().left`, &navicatLayout))
+	if !navicatLayout {
+		t.Fatal("row checkboxes remain or the row toolbar is not at the bottom left")
+	}
+	run(chromedp.Click(`#db-data-grid .tabulator-row:first-child [tabulator-field="__select"]`, chromedp.ByQuery), chromedp.Evaluate(`document.querySelector('#db-data-grid .tabulator-row:nth-child(3) [tabulator-field="__select"]').dispatchEvent(new MouseEvent('click',{bubbles:true,shiftKey:true}))`, nil))
+	wait(`document.querySelectorAll('#db-data-grid .tabulator-row.tabulator-selected').length===3`, "Shift selects a continuous row range")
+	run(chromedp.Evaluate(`document.querySelector('#db-data-grid .tabulator-row:nth-child(2) [tabulator-field="__select"]').dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:true}))`, nil))
+	wait(`document.querySelectorAll('#db-data-grid .tabulator-row.tabulator-selected').length===2`, "Ctrl toggles one row without clearing the others")
+	run(chromedp.Click(`#db-data-grid .tabulator-row:nth-child(2) [tabulator-field="__select"]`, chromedp.ByQuery))
+	wait(`document.querySelectorAll('#db-data-grid .tabulator-row.tabulator-selected').length===1`, "plain row-header click replaces the selection")
+	// Rollback restores pending updates/deletions and drops newly inserted drafts.
+	run(chromedp.Click(`#db-delete-row`, chromedp.ByQuery), chromedp.Click(`#db-add-row`, chromedp.ByQuery))
+	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===4 && !document.querySelector('#db-rollback-rows').disabled`, "pending delete and insert")
+	run(chromedp.Click(`#db-rollback-rows`, chromedp.ByQuery))
+	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===3 && !document.querySelector('#db-data-grid .db-row-deleted') && document.querySelector('#db-save-rows').disabled && document.querySelector('#db-rollback-rows').disabled`, "rollback restores the last committed data")
+	// A delayed refresh can be stopped; the previous committed data stays usable.
+	run(chromedp.Evaluate(`window.__dbFetch=window.fetch; window.fetch=(url,options)=>String(url).includes('/api/database/table')?new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')))):window.__dbFetch(url,options)`, nil), chromedp.Click(`#db-reload-table`, chromedp.ByQuery))
+	wait(`!document.querySelector('#db-stop-table').disabled && document.querySelector('#db-reload-table').disabled`, "stop is available during refresh")
+	run(chromedp.Click(`#db-stop-table`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-stop-table').disabled && !document.querySelector('#db-reload-table').disabled && !document.querySelector('#db-data-grid').inert && document.querySelector('#db-status').textContent.includes('stopped')`, "stop cancels loading and unlocks the grid")
+	run(chromedp.Evaluate(`window.fetch=window.__dbFetch`, nil))
+	if path := os.Getenv("LOG_AGENT_DB_DATA_SCREENSHOT"); path != "" {
+		var screenshot []byte
+		run(chromedp.Evaluate(`setLanguage('zh')`, nil), chromedp.CaptureScreenshot(&screenshot))
+		if err := os.WriteFile(path, screenshot, 0644); err != nil {
+			t.Fatal(err)
+		}
+		run(chromedp.Evaluate(`setLanguage('en')`, nil))
+	}
 	run(chromedp.Click(`#db-data-grid .tabulator-row:nth-child(2) [tabulator-field="__select"]`, chromedp.ByQuery), chromedp.Click(`#db-delete-row`, chromedp.ByQuery))
 	wait(`!document.querySelector('#db-save-rows').disabled`, "pending row deletion")
 	run(chromedp.Click(`#db-save-rows`, chromedp.ByQuery))
@@ -394,19 +454,23 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 		const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
 		window.__pasteData = data;
 	})()`, nil), chromedp.Sleep(200*time.Millisecond))
-	run(chromedp.ActionFunc(func(ctx context.Context) error { return input.DispatchKeyEvent(input.KeyDown).WithKey("c").WithModifiers(input.ModifierCtrl).WithCommands([]string{"copy"}).Do(ctx) }))
+	run(chromedp.ActionFunc(func(ctx context.Context) error {
+		return input.DispatchKeyEvent(input.KeyDown).WithKey("c").WithModifiers(input.ModifierCtrl).WithCommands([]string{"copy"}).Do(ctx)
+	}))
 	run(chromedp.Evaluate(`(() => {
 		const content = document.querySelector('#db-sql-editor .cm-content');
 		const last = content.querySelectorAll('.cm-line'); const end = last[last.length - 1];
 		const range = document.createRange(); range.selectNodeContents(end); range.collapse(false);
 		const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
 	})()`, nil), chromedp.Sleep(200*time.Millisecond))
-	run(chromedp.ActionFunc(func(ctx context.Context) error { return input.DispatchKeyEvent(input.KeyDown).WithKey("v").WithModifiers(input.ModifierCtrl).WithCommands([]string{"paste"}).Do(ctx) }))
+	run(chromedp.ActionFunc(func(ctx context.Context) error {
+		return input.DispatchKeyEvent(input.KeyDown).WithKey("v").WithModifiers(input.ModifierCtrl).WithCommands([]string{"paste"}).Do(ctx)
+	}))
 	wait(`document.querySelectorAll('#db-sql-editor [data-db-slot-kind="operator"]').length===2 && document.querySelectorAll('#db-sql-editor [data-db-slot-kind="filterValue"]').length===2`, "pasted statement keeps its slots")
 	run(chromedp.Evaluate(`Array.from(document.querySelectorAll('#db-sql-editor [data-db-slot-kind="operator"]')).at(-1).click()`, nil))
 	wait(`!!document.querySelector('#db-inline-operator')`, "pasted operator picker")
 	run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-inline-operator');s.value='LIKE';s.dispatchEvent(new Event('change', {bubbles:true}));document.querySelector('#db-inline-value').value='zz'; })()`, nil), chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
-	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+"`\"currency\" LIKE 'zz'`"+`) && document.querySelector('#db-sql-editor .cm-content').textContent.includes("\"currency\" = '5'")`, "pasted statement picker edits only the copy")
+	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+"`\"currency\" LIKE '%zz%'`"+`) &&document.querySelector('#db-sql-editor .cm-content').textContent.includes("\"currency\" = '5'")`, "pasted statement picker edits only the copy")
 	run(chromedp.Evaluate(`window.confirm=()=>true;document.querySelector('#db-sql-tabs .db-session-tab.active [data-db-close-sql]').click()`, nil))
 	wait(`document.querySelectorAll('#db-sql-tabs .db-session-tab').length===window.__tabsBefore`, "paste test tab closed")
 	if _, err := pool.db.Exec(`CREATE TABLE "odd""table" ("odd""column" TEXT); CREATE VIEW template_view AS SELECT id,note FROM orders`); err != nil {
@@ -467,7 +531,7 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	// Table tabs retain pending edits until the user saves them.
 	run(chromedp.Click(`[data-db-bottom="table-1"]`, chromedp.ByQuery), chromedp.Click(`[data-db-tab="data"]`, chromedp.ByQuery))
 	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===2 && !document.querySelector('#db-panel-data').classList.contains('hidden')`, "orders table tab")
-	run(chromedp.DoubleClick(`#db-data-grid .tabulator-row:first-child [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-data-grid .tabulator-cell.tabulator-editing input`, chromedp.ByQuery), chromedp.Evaluate(`document.querySelector('#db-data-grid .tabulator-cell.tabulator-editing input').select()`, nil), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("draft kept").Do(ctx) }), chromedp.KeyEvent(kb.Enter))
+	run(chromedp.Click(`#db-data-grid .tabulator-row:first-child [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-data-grid .tabulator-cell.tabulator-editing input`, chromedp.ByQuery), chromedp.Evaluate(`document.querySelector('#db-data-grid .tabulator-cell.tabulator-editing input').select()`, nil), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("draft kept").Do(ctx) }), chromedp.KeyEvent(kb.Enter))
 	wait(`!document.querySelector('#db-save-rows').disabled`, "pending table edit")
 	run(chromedp.Click(`[data-db-bottom="table-2"]`, chromedp.ByQuery), chromedp.Click(`[data-db-tab="data"]`, chromedp.ByQuery), chromedp.Click(`[data-db-bottom="table-1"]`, chromedp.ByQuery))
 	wait(`document.querySelector('#db-data-grid').textContent.includes('draft kept') && !document.querySelector('#db-save-rows').disabled`, "table draft restored")
@@ -541,6 +605,26 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 			t.Fatalf("target picker was clipped at %dx%d", size[0], size[1])
 		}
 	}
+	// A restart restores the SQL text and its picker slots, not just plain text.
+	run(chromedp.Evaluate(`window.newDatabaseQuery()`, nil))
+	wait(`!!document.querySelector('[data-db-template="where"]')`, "template list for reload test")
+	run(chromedp.Evaluate(`document.querySelector('[data-db-template="where"]').click()`, nil))
+	wait(`!!document.querySelector('#db-sql-editor [data-db-slot-kind="table"]')`, "template slots before reload")
+	run(chromedp.Evaluate(`window.dispatchEvent(new Event('beforeunload'))`, nil), chromedp.Reload(), chromedp.WaitVisible(`.nav-item[data-view="database"]`, chromedp.ByQuery), chromedp.Click(`.nav-item[data-view="database"]`, chromedp.ByQuery))
+	wait(`!!document.querySelector('#db-sql-editor [data-db-slot-kind="table"]')`, "slots restored after reload")
+	// Plain saved SQL (no slot data) is recognized again into picker slots.
+	// The page re-saves its own tabs on unload, so freeze storage after seeding it.
+	run(chromedp.Evaluate("(() => { const seed = Storage.prototype.setItem; seed.call(localStorage, 'log-agent-database-sql-tabs', JSON.stringify({tabs:[{id:'sql-1',name:'SQL 1',text:\"SELECT * FROM `orders` WHERE `id` = '1' LIMIT 100;\\n\\nDELETE FROM `orders` WHERE `id` = '2';\"}],active:'sql-1',sequence:1})); Storage.prototype.setItem = () => {}; })()", nil), chromedp.Reload(), chromedp.WaitVisible(`.nav-item[data-view="database"]`, chromedp.ByQuery), chromedp.Click(`.nav-item[data-view="database"]`, chromedp.ByQuery))
+	wait(`document.querySelectorAll('#db-sql-editor [data-db-slot-kind="operator"]').length===2 && document.querySelectorAll('#db-sql-editor [data-db-slot-kind="table"]').length===2`, "plain SQL recognized into slots")
+	run(chromedp.Evaluate(`Array.from(document.querySelectorAll('#db-sql-editor [data-db-slot-kind="operator"]')).at(-1).click()`, nil))
+	wait(`!!document.querySelector('#db-inline-operator')`, "recognized operator opens its dropdown")
+	// Switching to LIKE and applying the shown value unchanged still gets its wildcards.
+	run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-inline-operator');s.value='LIKE';s.dispatchEvent(new Event('change', {bubbles:true})); })()`, nil), chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
+	wait("document.querySelector('#db-sql-editor .cm-content').textContent.includes(\"LIKE '%2%'\")", "LIKE without wildcards becomes a contains match")
+	run(chromedp.Evaluate(`Array.from(document.querySelectorAll('#db-sql-editor [data-db-slot-kind="operator"]')).at(-1).click()`, nil))
+	wait(`!!document.querySelector('#db-inline-operator')`, "reopen LIKE picker")
+	run(chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
+	wait("document.querySelector('#db-sql-editor .cm-content').textContent.includes(\"LIKE '%2%'\") && !document.querySelector('#db-sql-editor .cm-content').textContent.includes(\"'%%2%%'\")", "reapplying LIKE keeps one pair of wildcards")
 	run(chromedp.EmulateViewport(1600, 1000))
 	if path := os.Getenv("LOG_AGENT_UI_SCREENSHOT"); path != "" {
 		run(chromedp.Evaluate(`setLanguage('zh');applyTheme('dark');document.querySelector('#db-template-panel').scrollTop=0`, nil), chromedp.Sleep(250*time.Millisecond))
