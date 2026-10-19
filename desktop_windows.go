@@ -30,14 +30,31 @@ $desktop = [Environment]::GetFolderPath('Desktop')
 if (-not $desktop) { throw 'no desktop folder' }
 $path = Join-Path $desktop ($env:LOG_AGENT_SHORTCUT_NAME + '.lnk')
 $shell = New-Object -ComObject WScript.Shell
+# Preserve the existing shortcut when upgrading from the previous application name.
+$legacyPath = Join-Path $desktop '日志中枢.lnk'
+if (-not (Test-Path -LiteralPath $path) -and (Test-Path -LiteralPath $legacyPath)) {
+    $legacyLink = $shell.CreateShortcut($legacyPath)
+    $sameDirectory = (Split-Path -Parent $legacyLink.TargetPath) -ieq (Split-Path -Parent $env:LOG_AGENT_SHORTCUT_TARGET)
+    $knownExecutable = (Split-Path -Leaf $legacyLink.TargetPath) -in @('log-agent.exe', 'dozzle-ops.exe', '栈桥.exe')
+    if ($legacyLink.TargetPath -ieq $env:LOG_AGENT_SHORTCUT_TARGET -or ($sameDirectory -and $knownExecutable)) {
+        Move-Item -LiteralPath $legacyPath -Destination $path
+    }
+}
 $exists = Test-Path -LiteralPath $path
-if ($exists -and $shell.CreateShortcut($path).TargetPath -ieq $env:LOG_AGENT_SHORTCUT_TARGET) { Report 'kept'; exit 0 }
+if ($exists -and $shell.CreateShortcut($path).TargetPath -ieq $env:LOG_AGENT_SHORTCUT_TARGET) {
+    $currentLink = $shell.CreateShortcut($path)
+    if ($currentLink.Description -ne $env:LOG_AGENT_SHORTCUT_NAME) {
+        $currentLink.Description = $env:LOG_AGENT_SHORTCUT_NAME
+        $currentLink.Save()
+    }
+    Report 'kept'; exit 0
+}
 if (-not $exists -and $env:LOG_AGENT_SHORTCUT_ONLY_UPDATE -eq '1') { Report 'removed'; exit 0 }
 $link = $shell.CreateShortcut($path)
 $link.TargetPath = $env:LOG_AGENT_SHORTCUT_TARGET
 $link.WorkingDirectory = Split-Path -Parent $env:LOG_AGENT_SHORTCUT_TARGET
 $link.IconLocation = $env:LOG_AGENT_SHORTCUT_TARGET + ',0'
-$link.Description = 'Log Agent'
+$link.Description = $env:LOG_AGENT_SHORTCUT_NAME
 $link.Save()
 if (-not (Test-Path -LiteralPath $path)) { throw ('shortcut was not written: ' + $path) }
 if ($exists) { Report 'updated' } else { Report 'created' }`

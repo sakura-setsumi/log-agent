@@ -9,7 +9,7 @@ import (
 	"unicode/utf16"
 )
 
-const desktopShortcutName = "日志中枢"
+const desktopShortcutName = "栈桥"
 
 // desktopShortcutMarker records that the shortcut was created once, so a user
 // who deletes it does not get it back on every start. It is written only after

@@ -11,9 +11,9 @@ const defaultLanguage = 'en';
 
 const i18n = {
   en: {
-    'app.title': 'Log Agent',
-    'brand.name': 'Log Agent',
-    'brand.caption': 'LOG AGENT / 1.0.0',
+    'app.title': '栈桥',
+    'brand.name': '栈桥',
+    'brand.caption': 'ZHANQIAO / 1.0.0',
 
     'sidebar.workspace': 'Workspace',
     'sidebar.navLabel': 'Main navigation',
@@ -758,9 +758,9 @@ const i18n = {
   },
 
   zh: {
-    'app.title': '日志中枢',
-    'brand.name': '日志中枢',
-    'brand.caption': 'LOG AGENT / 1.0.0',
+    'app.title': '栈桥',
+    'brand.name': '栈桥',
+    'brand.caption': 'ZHANQIAO / 1.0.0',
 
     'sidebar.workspace': '工作台',
     'sidebar.navLabel': '主导航',

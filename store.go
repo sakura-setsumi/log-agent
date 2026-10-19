@@ -166,7 +166,7 @@ func validateConfigDir() error {
   可执行文件：%s
 
 这通常是因为使用了 "go run ."。请改用以下任一方式启动：
-  1. go build -o dozzle-ops.exe .  然后运行生成的 exe（配置存在 exe 旁边的 data/）
+  1. go build -o 栈桥.exe .  然后运行生成的 exe（配置存在 exe 旁边的 data/）
   2. 指定一个固定目录：LOG_AGENT_CONFIG_DIR=<目录> go run .`, executable)
 }
 
@@ -199,7 +199,7 @@ func isGoRunExecutable(path string) bool {
 //
 // The layout is deliberately flat and visible:
 //
-//	dozzle-ops.exe
+//	栈桥.exe
 //	data/nodes.json
 //	data/models.json
 //

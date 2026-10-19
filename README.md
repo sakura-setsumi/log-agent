@@ -1,4 +1,4 @@
-# Log Agent
+# 栈桥
 
 > A focused, self-hosted dashboard for aggregating, searching, processing, and analyzing logs from multiple [Dozzle](https://dozzle.dev/) instances.
 
@@ -6,7 +6,7 @@
 
 ## Overview
 
-Log Agent is a single-binary Go service with an embedded HTML/CSS/JavaScript dashboard. It connects to one or more Dozzle v10 instances, combines their live streams, and keeps a bounded in-memory history for fast investigation.
+栈桥 is a single-binary Go service with an embedded HTML/CSS/JavaScript dashboard. It connects to one or more Dozzle v10 instances, combines their live streams, and keeps a bounded in-memory history for fast investigation.
 
 Highlights:
 
@@ -31,12 +31,12 @@ This is a Windows desktop app: it opens its own window (Microsoft Edge WebView2,
 
 ```powershell
 .\scripts\build.ps1
-.\dist\log-agent.exe
+.\dist\栈桥.exe
 ```
 
 The window serves its own frontend and talks to the Go handlers in-process, so nothing else on the machine (or network) can reach the dashboard. Only one instance runs at a time; starting a second one brings the first window forward. Links to external sites open in the system browser. Diagnostics go to `log-agent.log` in the data directory, and `LOG_AGENT_DEBUG=1` enables the WebView2 developer tools.
 
-The first start creates a desktop shortcut named **日志中枢**. Moving the executable repoints the shortcut on its next start; a deleted shortcut is not recreated. Set `LOG_AGENT_NO_SHORTCUT=1` to skip it.
+The first start creates a desktop shortcut named **栈桥**. Moving the executable repoints the shortcut on its next start; a deleted shortcut is not recreated. Set `LOG_AGENT_NO_SHORTCUT=1` to skip it.
 
 The latest Windows amd64 executable is available in the [Releases](https://github.com/sakura-setsumi/log-agent/releases) page.
 
@@ -45,7 +45,7 @@ The latest Windows amd64 executable is available in the [Releases](https://githu
 The application stores node connections, AI providers and server-command flows as JSON files in a `data` directory beside the executable:
 
 ```text
-log-agent.exe
+栈桥.exe
 data/
 ├─ nodes.json
 ├─ models.json
@@ -72,7 +72,7 @@ Example:
 
 ```powershell
 $env:LOG_AGENT_CONFIG_DIR = 'D:\log-agent-config'
-.\log-agent.exe
+.\栈桥.exe
 ```
 
 `models.json` contains API keys in plain text, `commands.json` contains SSH passwords for servers that use password login, and `databases.json` contains database connection credentials. Keep these files outside public repositories and backups that are shared with others.
@@ -125,11 +125,11 @@ Build quickly without tests:
 .\scripts\build.ps1 -SkipTests
 ```
 
-The executable's icon and version info come from `app-icon.ico`, compiled into the committed `rsrc_windows_*.syso` files that `go build` links automatically. After changing the icon, regenerate them:
+The approved logo source is `assets/branding/zhanqiao-logo-approved.png`. Run `python scripts/export-brand.py` with Pillow installed to export the header logo, favicon and Windows icon. The executable's icon and version info come from `app-icon.ico`, compiled into the committed `rsrc_windows_*.syso` files that `go build` links automatically. After changing the icon, regenerate them:
 
 ```powershell
 go install github.com/tc-hib/go-winres@latest
-go-winres simply --icon app-icon.ico --arch amd64,386,arm64 --manifest none --product-name "日志中枢 Log Agent" --file-description "日志中枢 Log Agent" --product-version 1.0.0 --file-version 1.0.0 --original-filename log-agent.exe
+go-winres simply --icon app-icon.ico --arch amd64,386,arm64 --manifest none --product-name "栈桥" --file-description "栈桥" --product-version 1.0.0 --file-version 1.0.0 --original-filename 栈桥.exe
 ```
 
 Build output is written to `dist/`; local binaries and caches are intentionally ignored by Git.
@@ -163,7 +163,7 @@ No license file is currently included. Contact the repository owner before redis
 
 ## 项目简介
 
-Log Agent 是一个面向 Dozzle 的自托管日志聚合、检索、加工和分析面板。服务端使用 Go 编写，前端 HTML/CSS/JavaScript 会嵌入最终可执行文件。
+栈桥是一个面向 Dozzle 的自托管日志聚合、检索、加工和分析面板。服务端使用 Go 编写，前端 HTML/CSS/JavaScript 会嵌入最终可执行文件。
 
 主要能力：
 
@@ -188,10 +188,10 @@ go run .
 
 ```powershell
 .\scripts\build.ps1
-.\dist\log-agent.exe
+.\dist\栈桥.exe
 ```
 
-窗口内的前端资源由程序自身提供，接口在进程内直接调用，不占用端口，本机其他程序和局域网都无法访问。同一时间只运行一个实例，再次启动会把已有窗口切到前台；外部网站链接用系统浏览器打开；运行日志写入数据目录下的 `log-agent.log`，设置 `LOG_AGENT_DEBUG=1` 可开启 WebView2 开发者工具。首次启动会在桌面创建名为「日志中枢」的快捷方式。移动 exe 后再启动一次会更新快捷方式；手动删除后不会再自动创建。设置 `LOG_AGENT_NO_SHORTCUT=1` 可关闭此功能。Windows amd64 最新可执行文件位于 [Releases](https://github.com/sakura-setsumi/log-agent/releases)。
+窗口内的前端资源由程序自身提供，接口在进程内直接调用，不占用端口，本机其他程序和局域网都无法访问。同一时间只运行一个实例，再次启动会把已有窗口切到前台；外部网站链接用系统浏览器打开；运行日志写入数据目录下的 `log-agent.log`，设置 `LOG_AGENT_DEBUG=1` 可开启 WebView2 开发者工具。首次启动会在桌面创建名为「栈桥」的快捷方式。移动 exe 后再启动一次会更新快捷方式；手动删除后不会再自动创建。设置 `LOG_AGENT_NO_SHORTCUT=1` 可关闭此功能。Windows amd64 最新可执行文件位于 [Releases](https://github.com/sakura-setsumi/log-agent/releases)。
 
 ## 配置和安全
 

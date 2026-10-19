@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$SkipTests
 )
@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $distDirectory = Join-Path $projectRoot 'dist'
-$output = Join-Path $distDirectory 'log-agent.exe'
+$output = Join-Path $distDirectory '栈桥.exe'
 $go = Join-Path ${env:ProgramFiles} 'Go\bin\go.exe'
 $env:GOCACHE = Join-Path ([System.IO.Path]::GetTempPath()) 'log-agent-go-cache'
 

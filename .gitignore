@@ -8,6 +8,7 @@
 
 # Build artifacts
 log-agent.exe
+栈桥.exe
 log-agent-linux-amd64
 dozzle-ops*.exe
 dist/

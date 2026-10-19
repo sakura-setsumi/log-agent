@@ -13,7 +13,7 @@ func TestEncodePowerShellCommandIsUTF16LEBase64(t *testing.T) {
 }
 
 func TestParseDesktopShortcutOutputSkipsNoise(t *testing.T) {
-	want := `C:\Users\EDY\Desktop\日志中枢.lnk`
+	want := `C:\Users\EDY\Desktop\栈桥.lnk`
 	line := "created|" + base64.StdEncoding.EncodeToString([]byte(want))
 	output := "#< CLIXML\r\n\ufeff" + line + "\r\n<Objs Version=\"1.1.0.1\"></Objs>"
 	status, path, ok := parseDesktopShortcutOutput(output)

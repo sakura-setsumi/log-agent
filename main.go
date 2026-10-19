@@ -33,7 +33,7 @@ import (
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
 //
-//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js menubar.js terminal.js database.js database.css third_party/database/* third_party/xterm/xterm.js third_party/xterm/xterm.css third_party/xterm/addon-fit.js favicon.png ai-icon.png loading.gif
+//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js menubar.js terminal.js database.js database.css third_party/database/* third_party/xterm/xterm.js third_party/xterm/xterm.css third_party/xterm/addon-fit.js favicon.png brand-logo.png ai-icon.png loading.gif
 var frontend embed.FS
 
 const (

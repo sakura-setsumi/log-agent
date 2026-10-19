@@ -26,7 +26,7 @@ import (
 var bridgeScript string
 
 const (
-	windowTitle     = "日志中枢 Log Agent"
+	windowTitle     = "栈桥"
 	windowClass     = "webview" // the class go-webview2 registers
 	singleInstance  = `Local\LogAgentDesktop-`
 	maxLogFileBytes = 5 << 20
