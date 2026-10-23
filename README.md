@@ -85,6 +85,10 @@ For multi-database execution, choose databases from the target dropdown above th
 
 The left tree browses connections and table structures without selection checkboxes. SQL targets are chosen in a separate tree dropdown grouped by connection and database. Select a connection to check all its databases, or check databases individually; partly selected connections show a mixed checkbox state. Search preserves selections hidden by the filter. The limit is 16 databases, and a group that exceeds it is rejected without changing the selection. Each SQL tab retains its targets. Clearing the dropdown leaves zero targets even when browsing a table.
 
+Table structure expands only from the arrow beside its name; clicking the table name opens its data without changing expansion. Structure is grouped into Fields, Indexes, Foreign Keys, Checks and Triggers, each with its own arrow. Opening a structure fetches metadata without loading table records. The tree uses the shared gray-blue icon color for fields, primary keys and each structure group.
+
+The Structure view has separate Fields, Indexes, Foreign Keys, Checks, Triggers and Table comment tabs. Clicking a structure group's name opens its corresponding tab; the arrow only expands or collapses the tree. Detail grids include referenced columns and update/delete rules, check expressions and enforcement, and trigger definitions. Table comments can be edited for MySQL and PostgreSQL: Preview SQL prepares the change, and Save comment applies it only while the inspected structure and comment still match. Comment drafts are retained per open table and prompt before discarding. SQLite has no native table comments, so its comment editor is disabled.
+
 SQL editor execution permits changes on one or several databases. Each destination executes independently using its database's autocommit behavior: failure on one database does not roll back successful changes elsewhere. Check the individual reports before retrying a partially successful write. Cancellation does not undo completed changes, and in-flight outcomes may need verification. Explicit transaction-control statements (BEGIN/COMMIT/ROLLBACK/savepoints) are rejected because SQL executions do not hold a persistent connection between actions. The legacy API query mode remains database-enforced read-only. Structure changes offer a SQL preview before applying; PostgreSQL and SQLite plans use transactions, while MySQL DDL can auto-commit. Primary key changes and advanced constraints can be written in SQL.
 
 The workspace has SQL tabs above the editor and table/result tabs below it. Use + or New SQL tab to create an independent editor; SQL text, cursor/undo state, query targets and results are retained when switching tabs. Queries can run in the background and their results stay with the originating SQL tab. Opening a table reuses its tab; each table retains its data/structure view, paging, selection and pending row edits. Closing a table with pending edits asks before discarding them. Tabs are kept for the current application session.
@@ -93,7 +97,7 @@ On a blank editor line, a template inserts a new statement; on an occupied line,
 
 The editor recognizes queries, writes and DDL separated by semicolons (the last statement can omit one). Single-database and multi-database execution icons appear on the right of each statement's final line. The single-database icon and Execute statement (one DB) use the Single-database target selector and preserve checked targets; the multi-database icon uses checked databases and requires at least two. Typing never executes SQL. Ctrl+Enter and Run SQL execute selected text, or the statement at the cursor when nothing is selected, on checked databases. Statement recognition follows the chosen single-database target's dialect and respects quoted semicolons, comments and nested queries.
 
-Data edits use one transaction for each Save changes batch on the current table/database: successful changes commit together and a failed statement or conflicting update rolls the batch back. MySQL tables must use a transactional engine such as InnoDB for this guarantee. There is no manually held editing transaction or distributed transaction spanning connections.
+Table and SQL-result edits and deletions are staged locally until Commit; Roll back restores the loaded values. Result rows can be selected for deletion. Commit all submits pending changes from every open result/table page, grouping all tables in each source database into one transaction. Conflicting edits to the same row across pages must be resolved before submission. Successful source databases stay committed if another source fails, and failed drafts remain pending. Data edits use one transaction for each source database: successful changes commit together and a failed statement or conflicting update rolls the batch back. MySQL tables must use a transactional engine such as InnoDB; nontransactional tables are rejected before applying edits. There is no manually held editing transaction or distributed transaction spanning connections.
 
 The editor and grids use CodeMirror 6 and Tabulator; schema inspection and migration planning use Atlas, with go-sql-driver/mysql, pgx and modernc SQLite drivers. All browser assets are embedded and work offline. To rebuild the pinned browser dependencies (Node.js and pnpm required):
 
@@ -102,6 +106,20 @@ pnpm --dir scripts/database-ui install --frozen-lockfile --ignore-scripts
 pnpm --dir scripts/database-ui test
 node scripts/database-ui/build.mjs
 ```
+
+## Redis workspace
+
+The **Redis** sidebar tab uses the official `go-redis/v9` client and the bundled CodeMirror 6 editor. The top **Redis** menu provides **New connection** and **Manage connections…**; the manager lists connections with Connect, Edit and Delete actions. Create a connection with host, port, optional ACL username/password and optional TLS with certificate verification. Connection profiles are stored in `data/redis.json`; passwords are omitted from API listings, and leaving the password blank when editing retains it. Use the clear-password checkbox to remove it.
+
+Choose a DB number and click Open. Search uses Redis glob patterns (`biz:*`); keys are grouped by colons. SCAN loads keys in batches without KEYS, up to 10,000 loaded keys per search. A batch may contain no matching keys while more batches remain. Refresh restarts the scan. INFO keyspace supplies optional DB counts; browsing still works when INFO is unavailable.
+
+Hover or select a key to reveal Copy value and Delete buttons on its row. Copy exports the loaded string exactly, or a collection as JSON; incomplete/binary previews cannot be copied in full. Ctrl+C outside text fields copies the selected key's value while preserving normal editor/text-selection copy. Deletion asks for confirmation and deleting another row preserves the current editor.
+
+String, Hash, List, Set and Sorted Set values can be created and edited. Strings support exact text or JSON validation/formatting; collections use JSON. Sorted Sets use `[{"Score":1,"Member":"value"}]`. Save preserves the original expiry by default; TTL accepts positive seconds, `-1` for no expiry, and `-2` to preserve expiry. Delete asks for confirmation. Writes use WATCH/MULTI to reject changes made since the loaded preview; reload a conflicting key before retrying.
+
+Collection previews are limited to about 500 entries and 2 MiB of serialized content. Incomplete previews, binary values and Streams are read-only; supported previews can still be deleted or have their TTL changed. This workspace connects directly to standalone Redis or a compatible single endpoint; Sentinel discovery, Cluster topology and SSH tunnels are not configured here. Like the database workspace, Redis APIs are available only to the local file-backed client. `redis.json` contains credentials in plain text and should not be committed or shared.
+
+“Redis”页签位于左侧“数据库”下方，支持连接管理、ACL 认证、TLS、DB 切换、冒号分组键树、SCAN 分批搜索、键值新增/编辑/删除及 TTL 管理。值编辑复用 CodeMirror；String、Hash、List、Set、ZSet 支持编辑，Stream、大集合和二进制数据仅预览。连接保存在本地 `data/redis.json`。
 
 ## Development and tests
 
@@ -211,7 +229,7 @@ SQL 编辑器允许单库、多库修改，各目标按数据库自身的自动�
 
 工作区上方是 SQL 页签，下方是表与查询结果页签。点击「＋」或「新建 SQL 页签」可创建独立编辑区；切换时保留各自的 SQL 文本、光标与撤销状态、目标库和结果。查询可以在后台运行，结果只写回发起查询的页签。打开同一个表会复用其页签；每张表独立保留数据/结构视图、分页、选中行和未保存修改。关闭有未保存修改的表时会先确认。页签在本次应用会话中保留。
 
-模板按钮打开覆盖工作区的独立浮层，不挤占 SQL 文本区宽度，也不受文本区高度限制。点击查询、条件、排序、统计、去重、分组或增删改模板后，内容填入当前 SQL 页签。在文本中点击带下划线的表名、字段表达式即可选择结构来源、表和字段；条件运算符也支持选择，包括 NULL 判断、比较、LIKE、IN、BETWEEN 等，对应的值可直接在 SQL 文本中编辑。长 SQL 自动换行显示。多列选择和 GROUP BY 中重复的字段会同步更新。生成的内容仍是可直接编辑的 SQL，填入模板不会自动执行，也不会改变已勾选的查询目标。
+模板按钮打开覆盖工作区的独立浮层，不挤占 SQL 文本区宽度，也不受文本区高度限制。面板提供 SELECT、CREATE TABLE、DROP TABLE、ALTER TABLE、INSERT、UPDATE、DELETE 七类模板。CREATE、DROP、ALTER 通过结构配置界面按数据库类型生成 SQL，预览后只填入当前 SQL 页签；ALTER 包含添加字段、修改字段类型和删除字段。在当前 SQL 中输入 WHERE、ORDER（或 ORDER BY）、COUNT、DISTINCT、GROUP（或 GROUP BY），会弹出增量选择器，将选定内容加入当前语句并保留已有条件，排序和分组自动插到 LIMIT 之前。COUNT 可选择统计字段和结果列名，生成后点击统计字段或列名也可再次修改。输入 INNER、LEFT、RIGHT（也可输入完整 JOIN 关键字）会打开联表选择器，可从当前语句的已有表选择来源，再选择新表、别名和左右关联字段；支持添加多组等值关联条件。JOIN 会加入 WHERE 等后续子句之前，输入位置保留在联表末尾，可继续关联更多表，包括使用不同别名关联同一张表。在文本中点击带下划线的表名、字段表达式即可选择结构来源、表和字段；条件运算符也支持选择，包括 NULL 判断、比较、LIKE、IN、BETWEEN 等，对应的值可直接在 SQL 文本中编辑。长 SQL 自动换行显示。字段和条件按当前点击位置分别编辑。生成的内容仍是可直接编辑的 SQL，填入模板不会自动执行，也不会改变已勾选的查询目标。
 
 编辑器会识别以分号分隔的查询、增删改和 DDL 语句（最后一条可不写分号），并在每段语句末行右侧显示单库、多库执行图标。单库图标和「执行语句（单库）」使用「单库目标」下拉框所选的库，并保留多库勾选；多库图标使用目标数据库下拉框中勾选的库，至少需要勾选两个。输入文字不会自动执行。Ctrl+Enter 和「执行 SQL」优先执行选中的文本，否则执行光标所在语句，目标为下拉框中勾选的库。识别采用「单库目标」对应的 SQL 方言，处理字符串中的分号、注释和嵌套语句。
 
@@ -237,3 +255,5 @@ go test ./...
 - `styles.css`：面板样式和响应式布局。
 
 </details>
+
+数据库查询、打开表及翻页刷新时，数据区域中央显示获取进度浮层，包含旋转图标、实际等待耗时、后台已读取的记录数和停止按钮。浮层跟随当前结果或表页签，完成、失败或取消后自动收起；刷新取消时保留原有表数据。

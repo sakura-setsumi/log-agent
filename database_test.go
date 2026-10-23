@@ -338,6 +338,21 @@ func TestDatabaseProfilesAndLocalAccess(t *testing.T) {
 	if !found {
 		t.Fatal("omitted password did not preserve the existing credential")
 	}
+	revealed := databaseRequest(t, "password", &databaseTarget{ID: "mysql-fixture"}, nil)
+	secret := databaseDecode[map[string]string](t, revealed)
+	if secret["password"] != password || revealed.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("explicit password lookup failed or was cacheable")
+	}
+	if missing := databaseRequest(t, "password", &databaseTarget{ID: "missing"}, nil); missing.Code != 404 {
+		t.Fatalf("unknown password lookup = %d", missing.Code)
+	}
+	remote := httptest.NewRequest(http.MethodGet, "/api/database/password?id=mysql-fixture", nil)
+	remote.RemoteAddr = "203.0.113.1:1000"
+	denied := httptest.NewRecorder()
+	(&server{}).handleDatabase(denied, remote)
+	if denied.Code != 403 || strings.Contains(denied.Body.String(), password) {
+		t.Fatal("remote password lookup was not denied")
+	}
 	response := databaseRequest(t, "profiles", nil, nil)
 	if strings.Contains(response.Body.String(), password) {
 		t.Fatal("password returned in profile list")
@@ -408,4 +423,43 @@ func Example_mergeDatabaseResults() {
 	result := mergeDatabaseResults(sources)
 	fmt.Println(result.Rows[1].Values)
 	// Output: [2 20]
+}
+
+func TestDatabaseMultiTableChangesAtomic(t *testing.T) {
+	a, _ := databaseTestSetup(t)
+	pool, _ := databases.pool(context.Background(), a)
+	if _, err := pool.db.Exec("CREATE TABLE extra(id INTEGER PRIMARY KEY,note TEXT); INSERT INTO extra VALUES(1,'old')"); err != nil {
+		t.Fatal(err)
+	}
+	update := databaseRowChange{Operation: "update", Key: map[string]any{"id": "1"}, Original: map[string]any{"note": nil}, Values: map[string]any{"note": "pending"}}
+	other := a
+	other.Table = "extra"
+	stale := databaseRowChange{Operation: "delete", Key: map[string]any{"id": "1"}, Original: map[string]any{"note": "stale"}}
+	request := func(second databaseRowChange) *httptest.ResponseRecorder {
+		return databaseRequest(t, "changes", &a, map[string]any{"batches": []databaseChangeBatch{{Target: a, Changes: []databaseRowChange{update}}, {Target: other, Changes: []databaseRowChange{second}}}})
+	}
+	if response := request(stale); response.Code == 200 {
+		t.Fatal("cross-table stale batch committed")
+	}
+	var note any
+	_ = pool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&note)
+	if note != nil {
+		t.Fatal("first table was not rolled back")
+	}
+	stale.Original["note"] = "old"
+	databaseDecode[map[string]any](t, request(stale))
+	_ = pool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&note)
+	if note != "pending" {
+		t.Fatalf("first table not committed: %v", note)
+	}
+	var count int
+	_ = pool.db.QueryRow("SELECT COUNT(*) FROM extra").Scan(&count)
+	if count != 0 {
+		t.Fatal("second table deletion not committed")
+	}
+	other.ID = "west"
+	response := databaseRequest(t, "changes", &a, map[string]any{"batches": []databaseChangeBatch{{Target: other, Changes: []databaseRowChange{stale}}}})
+	if response.Code == 200 {
+		t.Fatal("batch redirected to another connection")
+	}
 }

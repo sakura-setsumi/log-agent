@@ -10,7 +10,7 @@ await mkdir(output, { recursive: true });
 await build({ entryPoints: [resolve(here, 'index.js')], bundle: true, minify: true, format: 'iife', target: 'chrome110', outfile: resolve(output, 'database-vendor.js'), legalComments: 'eof' });
 const tableRoot = resolve(dirname(require.resolve('tabulator-tables')), '..');
 await copyFile(resolve(tableRoot, 'css/tabulator.min.css'), resolve(output, 'tabulator.min.css'));
-const packages = ['@codemirror/legacy-modes', '@codemirror/language', '@codemirror/search', 'codemirror', '@codemirror/state', '@codemirror/view', '@codemirror/lang-sql', '@codemirror/theme-one-dark', 'tabulator-tables'];
+const packages = ['@codemirror/autocomplete', '@codemirror/legacy-modes', '@codemirror/language', '@codemirror/search', 'codemirror', '@codemirror/state', '@codemirror/view', '@codemirror/lang-sql', '@codemirror/theme-one-dark', 'tabulator-tables'];
 const licenses = [];
 const visited = new Set();
 async function collectLicense(name, resolver) {

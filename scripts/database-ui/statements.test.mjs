@@ -55,3 +55,8 @@ test('offers execution actions for DML, DDL and CTE writes in every supported di
     assert.match(statements[7].sql, /^WITH.*DELETE/);
   }
 });
+
+test('qualified wildcard projections remain valid executable statements',()=>{
+  const source='SELECT o.*, u.name FROM orders o LEFT JOIN users u ON o.user_id=u.id;';
+  assert.equal(recognizeStatements(source,'mysql').length,1);
+});

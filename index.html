@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="third_party/database/tabulator.min.css" />
     <link rel="stylesheet" href="styles.css?v=rail-nav-136" />
     <link rel="stylesheet" href="database.css?v=1" />
+    <link rel="stylesheet" href="redis.css?v=1" />
   </head>
   <body>
     <nav class="menubar" id="menubar" aria-label="应用菜单" data-i18n-aria-label="menu.label">
@@ -31,6 +32,7 @@
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='commands']" data-i18n="nav.commands">指令集组</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='terminal']" data-i18n="nav.terminal">服务器</button>
           <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='database']" data-i18n="nav.database">数据库</button>
+          <button class="menu-item" type="button" role="menuitem" data-click=".nav-item[data-view='redis']" data-i18n="nav.redis">Redis</button>
           <div class="menu-separator" role="separator"></div>
           <button class="menu-item" type="button" role="menuitem" data-click="#theme-toggle" data-label-from="#theme-toggle">切换主题</button>
           <button class="menu-item" type="button" role="menuitem" data-click="#language-toggle" data-i18n="menu.language">语言：English / 中文</button>
@@ -57,7 +59,15 @@
         <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="nav.database">数据库</button>
         <div class="menu-panel" role="menu">
           <button class="menu-item" type="button" role="menuitem" data-call="openDatabaseConnection" data-i18n="db.newConnection">新建连接…</button>
+          <button class="menu-item" type="button" role="menuitem" data-call="openDatabaseManager" data-i18n="db.manageConnections">数据库管理…</button>
           <button class="menu-item" type="button" role="menuitem" data-call="newDatabaseQuery" data-i18n="db.newQuery">SQL / 跨库查询</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-title" type="button" aria-haspopup="true" aria-expanded="false" data-i18n="nav.redis">Redis</button>
+        <div class="menu-panel" role="menu">
+          <button class="menu-item" id="redis-add" type="button" role="menuitem" data-i18n="redis.add">新增连接</button>
+          <button class="menu-item" id="redis-manage" type="button" role="menuitem" data-i18n="redis.manage">管理连接…</button>
         </div>
       </div>
       <div class="menu">
@@ -84,13 +94,16 @@
           <span class="nav-icon">⌘</span><span data-i18n="nav.connections">连接管理</span>
         </button>
         <button class="nav-item" data-view="commands">
-          <span class="nav-icon">▤</span><span data-i18n="nav.commands">指令集组</span>
+          <span class="nav-icon commands-nav-icon" aria-hidden="true"></span><span data-i18n="nav.commands">指令集组</span>
         </button>
         <button class="nav-item" data-view="terminal">
-          <span class="nav-icon">&gt;_</span><span data-i18n="nav.terminal">服务器</span>
+          <span class="nav-icon server-nav-icon" aria-hidden="true"></span><span data-i18n="nav.terminal">服务器</span>
         </button>
         <button class="nav-item" data-view="database">
-          <span class="nav-icon">▤</span><span data-i18n="nav.database">数据库</span>
+          <span class="nav-icon database-nav-icon" aria-hidden="true"></span><span data-i18n="nav.database">数据库</span>
+        </button>
+        <button class="nav-item" data-view="redis">
+          <span class="nav-icon redis-nav-icon" aria-hidden="true"></span><span data-i18n="nav.redis">Redis</span>
         </button>
       </nav>
       <aside class="sidebar">
@@ -391,6 +404,7 @@
               <div class="db-object-header"><strong class="db-object-title" id="db-object-title" data-i18n="db.chooseObject">选择数据表，或勾选多个库查询</strong></div>
               <nav class="db-tabs hidden" id="db-table-subtabs"><button type="button" class="active" data-db-tab="data" data-i18n="db.data">数据</button><button type="button" data-db-tab="structure" data-i18n="db.structure">结构</button></nav>
               <div class="db-panel" id="db-panel-data">
+                <div class="db-load-overlay hidden" id="db-data-loading"><div class="db-load-card" role="status"><div class="db-load-title"><span class="db-load-spinner" aria-hidden="true"></span><span data-i18n="db.fetching">正在获取数据</span><span id="db-data-load-time" aria-hidden="true">0.0 s</span></div><div class="db-load-details"><span data-i18n="db.fetchedRecords">已获取记录</span><strong id="db-data-load-records">0</strong><button type="button" class="secondary-button compact-button" id="db-data-load-stop" data-i18n="db.stopFetch">停止</button></div></div></div>
                 <div class="db-table-empty hidden" id="db-data-placeholder" role="status"></div>
                 <div class="db-grid" id="db-data-grid"></div>
                 <footer class="db-footer db-data-footer">
@@ -402,18 +416,42 @@
                     <button id="db-reload-table" type="button" data-i18n-title="db.reload" data-i18n-aria-label="db.reload"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6A5 5 0 1 0 13 9M13 2v4H9"/></svg></button>
                     <button id="db-stop-table" type="button" disabled data-i18n-title="db.stopLoading" data-i18n-aria-label="db.stopLoading"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" fill="currentColor" stroke="none"/></svg></button>
                   </div>
+                  <button type="button" class="text-button" id="db-data-commit-all" disabled data-i18n="db.commitAll">提交全部待提交修改</button>
                   <span id="db-data-count" data-i18n-title="db.editHint"></span><div class="db-actions db-data-pagination"><button class="secondary-button compact-button" id="db-page-prev" type="button" data-i18n="db.previous">上一页</button><span id="db-page-label"></span><button class="secondary-button compact-button" id="db-page-next" type="button" data-i18n="db.next">下一页</button><button class="secondary-button compact-button" id="db-page-last" type="button" data-i18n="db.last">尾页</button><select id="db-page-size" aria-label="Page size"><option>100</option><option>250</option><option>500</option><option>1000</option></select></div>
                 </footer>
               </div>
               <div class="db-panel hidden" id="db-panel-structure">
+                <nav class="db-tabs db-structure-tabs" id="db-structure-tabs"><button type="button" data-db-structure-tab="columns" data-i18n="db.fields">字段</button><button type="button" data-db-structure-tab="indexes" data-i18n="db.indexes">索引</button><button type="button" data-db-structure-tab="foreignKeys" data-i18n="db.foreignKeys">外键</button><button type="button" data-db-structure-tab="checks" data-i18n="db.checks">检查约束</button><button type="button" data-db-structure-tab="triggers" data-i18n="db.triggers">触发器</button><button type="button" data-db-structure-tab="comment" data-i18n="db.tableComment">表备注</button><button type="button" id="db-meta-reload" data-i18n="db.reload">重载</button></nav>
+                <div id="db-meta-status" role="status"></div>
+                <div class="db-structure-page" data-db-structure-page="columns">
                 <div class="db-actions"><button class="primary-button compact-button" id="db-create-table" type="button" data-i18n="db.createTable">新建表</button><button class="secondary-button compact-button" id="db-add-column" type="button" data-i18n="db.addColumn">添加字段</button><button class="secondary-button compact-button" id="db-alter-column" type="button" data-i18n="db.alterColumn">修改字段</button><button class="secondary-button compact-button" id="db-create-index" type="button" data-i18n="db.createIndex">新增索引</button><button class="danger-button compact-button" id="db-drop-index" type="button" data-i18n="db.dropIndex">删除索引</button></div>
                 <h3 class="db-structure-title" data-i18n="db.columns">字段（选中后可修改）</h3><div class="db-grid" id="db-structure-grid"></div>
+                </div>
+                <div class="db-structure-page hidden" data-db-structure-page="indexes">
+                <div class="db-actions"><button type="button" class="secondary-button compact-button" id="db-index-create" data-i18n="db.createIndex">新增索引</button><button type="button" class="danger-button compact-button" id="db-index-drop" data-i18n="db.dropIndex">删除索引</button></div>
                 <h3 class="db-structure-title" data-i18n="db.indexes">索引</h3><div class="db-grid" id="db-index-grid"></div>
+                </div>
+                <div class="db-structure-page hidden" data-db-structure-page="foreignKeys"><div class="db-grid" id="db-foreign-key-grid"></div></div>
+                <div class="db-structure-page hidden" data-db-structure-page="checks"><div class="db-grid" id="db-check-grid"></div></div>
+                <div class="db-structure-page hidden" data-db-structure-page="triggers"><div class="db-grid" id="db-trigger-grid"></div></div>
+                <div class="db-structure-page hidden" data-db-structure-page="comment"><label for="db-table-comment" data-i18n="db.tableComment">表备注</label><textarea id="db-table-comment" spellcheck="false" maxlength="8192"></textarea><div class="db-actions"><button type="button" class="secondary-button compact-button" id="db-comment-preview" data-i18n="db.preview">预览 SQL</button><button type="button" class="primary-button compact-button" id="db-comment-save" disabled data-i18n="db.saveComment">保存备注</button><span id="db-comment-status" role="status"></span></div><pre id="db-comment-sql" class="hidden"></pre></div>
               </div>
 
               <div class="db-panel hidden" id="db-panel-result">
+                <div class="db-load-overlay hidden" id="db-query-loading"><div class="db-load-card" role="status"><div class="db-load-title"><span class="db-load-spinner" aria-hidden="true"></span><span data-i18n="db.fetching">正在获取数据</span><span id="db-query-load-time" aria-hidden="true">0.0 s</span></div><div class="db-load-details"><span data-i18n="db.fetchedRecords">已获取记录</span><strong id="db-query-load-records">0</strong><button type="button" class="secondary-button compact-button" id="db-query-load-stop" data-i18n="db.stopFetch">停止</button></div></div></div>
                     <div class="db-query-summary" id="db-query-summary"><span data-i18n="db.queryHint">勾选左侧数据库，同一条 SQL 分别执行，按列名对齐并合并结果。</span></div>
                     <div class="db-grid" id="db-query-grid"></div>
+                    <footer class="db-footer db-data-footer">
+                      <div class="db-row-toolbar" role="toolbar" data-i18n-aria-label="db.rowActions">
+                        <button id="db-query-delete" type="button" disabled data-i18n-title="db.deleteRows" data-i18n-aria-label="db.deleteRows"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg></button>
+                        <button id="db-query-commit" type="button" disabled data-i18n-title="db.commitRows" data-i18n-aria-label="db.commitRows"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7"/></svg></button>
+                        <button id="db-query-rollback" type="button" disabled data-i18n-title="db.rollbackRows" data-i18n-aria-label="db.rollbackRows"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
+                        <button id="db-query-reload" type="button" disabled data-i18n-title="db.reload" data-i18n-aria-label="db.reload"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6A5 5 0 1 0 13 9M13 2v4H9"/></svg></button>
+                        <button id="db-query-stop" type="button" disabled data-i18n-title="db.stopLoading" data-i18n-aria-label="db.stopLoading"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" fill="currentColor" stroke="none"/></svg></button>
+                      </div>
+                      <span id="db-query-pending" role="status"></span>
+                      <button type="button" class="text-button" id="db-query-commit-all" disabled data-i18n="db.commitAll">提交全部待提交修改</button>
+                    </footer>
               </div>
               <div class="db-table-empty" id="db-table-empty" data-i18n="db.emptyWorkspace">打开左侧数据表，或在上方执行 SQL 查询。</div>
               <div class="db-status" id="db-status" role="status" aria-live="polite"></div>
@@ -426,6 +464,50 @@
                   </aside>
             <div class="db-inline-picker hidden" id="db-inline-picker" role="dialog" aria-labelledby="db-inline-title"><div class="db-template-heading"><strong id="db-inline-title"></strong><button class="text-button" type="button" id="db-inline-close" aria-label="Close">×</button></div><div id="db-inline-body"></div><div class="db-template-status" id="db-inline-status" role="status"></div><div class="db-inline-actions"><button class="primary-button compact-button" type="button" id="db-inline-apply" data-i18n="db.applyInline">填入 SQL</button></div></div>
           </div>
+        </div>
+
+        <div class="page-content page-view hidden" id="redis-view">
+          <div class="redis-workspace">
+            <aside class="redis-browser panel">
+              <header class="redis-toolbar"><strong>Redis</strong><button id="redis-refresh" class="text-button" data-i18n="redis.refresh">刷新</button></header>
+              <div class="redis-connection"><select id="redis-profile" aria-label="Redis connection"></select></div>
+              <form id="redis-db-form" class="redis-toolbar"><label>DB <input id="redis-db" type="number" min="0" max="65535" value="0" list="redis-dbs" required /></label><datalist id="redis-dbs"></datalist><button class="secondary-button compact-button" data-i18n="redis.openDB">打开</button><span id="redis-db-count"></span></form>
+              <form id="redis-search-form" class="redis-toolbar"><input id="redis-pattern" value="*" aria-label="Redis key pattern" data-i18n-placeholder="redis.pattern" /><button class="secondary-button compact-button" data-i18n="redis.search">搜索</button></form>
+              <div id="redis-tree" class="redis-tree"></div>
+              <footer class="redis-toolbar"><span id="redis-key-count"></span><button id="redis-more" class="text-button" data-i18n="redis.more">加载更多</button></footer>
+            </aside>
+            <section class="redis-content panel">
+              <header class="redis-toolbar"><strong id="redis-source" data-i18n="redis.title">Redis 管理</strong><button id="redis-new-key" class="secondary-button compact-button" data-i18n="redis.newKey">新增键</button></header>
+              <div id="redis-empty" class="redis-empty" data-i18n="redis.empty">新建连接或选择左侧的键，查看并管理数据。</div>
+              <div id="redis-detail" class="hidden">
+                <div class="redis-toolbar"><select id="redis-type" aria-label="Redis type"><option>string</option><option>hash</option><option>list</option><option>set</option><option>zset</option><option>stream</option></select><input id="redis-key" aria-label="Redis key" /><span id="redis-size"></span></div>
+                <div class="redis-toolbar"><span id="redis-current-ttl"></span><label>TTL <input id="redis-ttl" type="number" min="-2" max="315360000" value="-2" /></label><button id="redis-expire" class="secondary-button compact-button" data-i18n="redis.applyTTL">修改 TTL</button><span class="redis-hint" data-i18n="redis.ttlHint">秒；-1 永不过期，-2 保留到期时间</span></div>
+                <div class="redis-toolbar"><select id="redis-format" aria-label="Value format"><option value="text" data-i18n="redis.text">文本</option><option value="json">JSON</option></select><button id="redis-pretty" class="text-button" data-i18n="redis.pretty">格式化 JSON</button><button id="redis-reload" class="text-button" data-i18n="redis.reload">重载键值</button><button id="redis-delete" class="text-button" data-i18n="redis.delete">删除键</button><button id="redis-save" class="primary-button compact-button" data-i18n="redis.save">保存 · Ctrl+S</button><span id="redis-dirty"></span></div>
+                <div id="redis-preview-note" class="redis-preview-note hidden" data-i18n="redis.preview">仅预览：集合过大、Stream 或包含二进制数据，不能覆盖保存。</div>
+                <div id="redis-editor"></div>
+                <div class="redis-hint" id="redis-value-hint"></div>
+              </div>
+              <footer id="redis-status" class="redis-status" role="status" aria-live="polite"></footer>
+            </section>
+          </div>
+          <dialog id="redis-manager-dialog">
+            <header class="redis-toolbar"><strong data-i18n="redis.manage">管理连接…</strong><button id="redis-close-manager" class="text-button" type="button" aria-label="Close">×</button></header>
+            <div id="redis-manager-list"></div>
+            <p id="redis-manager-status" role="status"></p>
+          </dialog>
+          <dialog id="redis-connection-dialog">
+            <form id="redis-connection-form">
+              <header class="redis-toolbar"><strong data-i18n="redis.connection">Redis 连接</strong><button id="redis-close-dialog" class="text-button" type="button" aria-label="Close">×</button></header>
+              <label><span data-i18n="redis.name">名称</span><input name="name" required /></label>
+              <div class="redis-fields"><label><span data-i18n="redis.host">主机</span><input name="host" value="127.0.0.1" required /></label><label><span data-i18n="redis.port">端口</span><input name="port" type="number" value="6379" min="1" max="65535" required /></label></div>
+              <label><span data-i18n="redis.user">ACL 用户名（可选）</span><input name="user" autocomplete="off" /></label>
+              <label><span data-i18n="redis.password">密码（留空保留已保存密码）</span><input name="password" type="password" autocomplete="new-password" /></label>
+              <label class="redis-check"><input name="clearPassword" type="checkbox" /><span data-i18n="redis.clearPassword">清除已保存密码</span></label>
+              <label class="redis-check"><input name="tls" type="checkbox" /><span data-i18n="redis.tls">TLS（验证服务器证书）</span></label>
+              <p id="redis-connection-status" role="status"></p>
+              <footer class="redis-toolbar"><button id="redis-test" class="secondary-button compact-button" type="button" data-i18n="redis.test">测试连接</button><button id="redis-save-connection" class="primary-button compact-button" data-i18n="redis.saveConnection">保存连接</button></footer>
+            </form>
+          </dialog>
         </div>
 
         <div class="page-content page-view hidden" id="connections-view">
@@ -442,11 +524,19 @@
       </main>
     </div>
 
+    <div class="modal-backdrop hidden" id="db-manager-modal" role="dialog" aria-modal="true" aria-labelledby="db-manager-title">
+      <div class="modal-card db-dialog"><div class="modal-header"><h2 id="db-manager-title" data-i18n="db.manageConnections">数据库管理…</h2><button class="close-button" type="button" data-db-close="manager">×</button></div>
+        <input id="db-manager-search" type="search" autocomplete="off" data-i18n-placeholder="db.searchConnections" placeholder="搜索连接名称、主机或用户名" />
+        <div id="db-manager-list" class="db-manager-list"></div>
+        <div id="db-manager-status" class="db-dialog-status" role="status"></div>
+        <div class="modal-actions"><button id="db-manager-new" class="primary-button" type="button" data-i18n="db.newConnection">新建连接…</button><button class="secondary-button" type="button" data-db-close="manager" data-i18n="db.close">关闭</button></div>
+      </div>
+    </div>
     <div class="modal-backdrop hidden" id="db-connection-modal" role="dialog" aria-modal="true" aria-labelledby="db-connection-title">
       <div class="modal-card db-dialog"><div class="modal-header"><div><div class="section-kicker">DATABASE CONNECTION</div><h2 id="db-connection-title" data-i18n="db.connection">数据库连接</h2></div><button class="close-button" type="button" data-db-close="connection">×</button></div>
         <form id="db-connection-form">
           <div class="form-grid"><label><span data-i18n="db.connectionName">连接名称</span><input name="name" required autocomplete="off" /></label><label><span data-i18n="db.engine">数据库类型</span><select name="engine"><option value="mysql">MySQL / MariaDB</option><option value="postgres">PostgreSQL</option><option value="sqlite">SQLite</option></select></label></div>
-          <div class="form-grid db-connection-network"><label><span data-i18n="db.host">主机</span><input name="host" value="127.0.0.1" /></label><label><span data-i18n="db.port">端口</span><input name="port" type="number" min="1" max="65535" value="3306" /></label><label><span data-i18n="db.user">用户名</span><input name="user" autocomplete="off" /></label><label><span data-i18n="db.password">密码（留空保留已保存密码）</span><input name="password" type="password" autocomplete="new-password" /></label><label><span data-i18n="db.defaultDatabase">默认数据库（可留空）</span><input name="database" /></label><label><span>TLS</span><select name="tls"><option value="disable" data-i18n="db.tlsDisable">不启用</option><option value="require" data-i18n="db.tlsRequire">加密连接</option><option value="verify-full" data-i18n="db.tlsVerify">加密并验证证书</option></select></label></div>
+          <div class="form-grid db-connection-network"><label><span data-i18n="db.host">主机</span><input name="host" value="127.0.0.1" /></label><label><span data-i18n="db.port">端口</span><input name="port" type="number" min="1" max="65535" value="3306" /></label><label><span data-i18n="db.user">用户名</span><input name="user" autocomplete="off" /></label><label><span data-i18n="db.password">密码（留空保留已保存密码）</span><span class="db-password-field"><input name="password" id="db-connection-password" type="password" autocomplete="new-password" spellcheck="false" /><button id="db-toggle-password" type="button" class="text-button" aria-controls="db-connection-password" aria-pressed="false" data-i18n="db.showPassword">显示</button></span></label><label><span data-i18n="db.defaultDatabase">默认数据库（可留空）</span><input name="database" /></label><label><span>TLS</span><select name="tls"><option value="disable" data-i18n="db.tlsDisable">不启用</option><option value="require" data-i18n="db.tlsRequire">加密连接</option><option value="verify-full" data-i18n="db.tlsVerify">加密并验证证书</option></select></label></div>
           <label class="hidden" id="db-sqlite-path"><span data-i18n="db.sqliteFile">SQLite 文件绝对路径（不存在时创建）</span><input name="file" placeholder="D:\data\app.db" /></label>
           <div class="db-dialog-status" id="db-connection-status" role="status"></div>
           <div class="modal-actions"><button class="danger-button db-delete-connection" type="button" id="db-delete-connection" data-i18n="db.deleteConnection">删除连接</button><button class="secondary-button" type="button" id="db-test-connection" data-i18n="db.testConnection">测试连接</button><button class="secondary-button" type="button" data-db-close="connection" data-i18n="db.cancel">取消</button><button class="primary-button" type="submit" data-i18n="db.save">保存</button></div>
@@ -456,6 +546,7 @@
     <div class="modal-backdrop hidden" id="db-schema-modal" role="dialog" aria-modal="true" aria-labelledby="db-schema-title">
       <div class="modal-card db-dialog"><div class="modal-header"><div><div class="section-kicker">SCHEMA DESIGNER</div><h2 id="db-schema-title" data-i18n="db.designer">结构设计器</h2></div><button class="close-button" type="button" data-db-close="schema">×</button></div>
         <form id="db-schema-form"><div class="form-grid"><label><span data-i18n="db.operation">操作</span><select name="action"><option value="createTable" data-i18n="db.createTable">新建表</option><option value="addColumn" data-i18n="db.addColumn">添加字段</option><option value="alterColumn" data-i18n="db.alterColumn">修改字段</option><option value="renameColumn" data-i18n="db.renameColumn">重命名字段</option><option value="dropColumn" data-i18n="db.dropColumn">删除字段</option><option value="createIndex" data-i18n="db.createIndex">新增索引</option><option value="dropIndex" data-i18n="db.dropIndex">删除索引</option><option value="renameTable" data-i18n="db.renameTable">重命名表</option><option value="dropTable" data-i18n="db.dropTable">删除表</option></select></label><label><span data-i18n="db.currentObject">当前对象</span><input id="db-schema-target" readonly /></label></div>
+          <div class="form-grid hidden" id="db-template-schema-targets"><label><span data-i18n="db.templateSource">结构来源</span><select id="db-template-schema-source"></select></label><label><span data-i18n="db.schemaName">模式 / 数据库</span><select id="db-template-schema-schema"></select></label><label id="db-template-schema-table-label"><span data-i18n="db.tableName">表名</span><select id="db-template-schema-table"></select></label></div>
           <div id="db-schema-fields"></div><pre class="db-schema-preview hidden" id="db-schema-preview"></pre><div class="db-dialog-status" id="db-schema-status" role="status"></div>
           <div class="modal-actions"><button class="secondary-button" type="button" data-db-close="schema" data-i18n="db.cancel">取消</button><button class="secondary-button" type="submit" data-i18n="db.previewSql">预览 SQL</button><button class="primary-button" type="button" id="db-apply-schema" disabled data-i18n="db.applySchema">应用结构变更</button></div>
         </form>
@@ -596,6 +687,7 @@
     <script src="assistant-ui.js?v=modal-dismiss-3"></script>
     <script src="third_party/database/database-vendor.js"></script>
     <script src="database.js?v=1"></script>
+    <script src="redis.js?v=1"></script>
     <script src="bootstrap.js?v=admin-token-deadlock-4"></script>
     <script src="menubar.js?v=1"></script>
     <script src="third_party/xterm/xterm.js"></script>

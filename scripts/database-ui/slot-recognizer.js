@@ -4,11 +4,11 @@ import { recognizeStatements } from './statements.js';
 // statements in plain SQL, so text that lost its template slots (typed by hand,
 // or saved before slots were persisted) gets the same pickers again.
 
-const TOKEN = /\s+|--[^\n]*|\/\*[\s\S]*?\*\/|`(?:[^`]|``)*`|"(?:[^"]|"")*"|\[[^\]\n]*\]|'(?:[^']|'')*'|[A-Za-z_][\w$]*|\d+(?:\.\d+)?|<>|!=|>=|<=|[\s\S]/y;
+const TOKEN = /\s+|--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|`(?:[^`]|``)*`|"(?:[^"]|"")*"|\[[^\]\n]*\]|'(?:[^']|'')*(?:'|$)|[A-Za-z_][\w$]*|\d+(?:\.\d+)?|<>|!=|>=|<=|[\s\S]/y;
 const COMPARISON = new Set(['=', '<>', '!=', '<', '>', '<=', '>=']);
 const CLAUSE_END = new Set(['AND', 'OR', 'ORDER', 'GROUP', 'LIMIT', 'HAVING', 'OFFSET']);
 
-function tokenize(sql, base) {
+export function tokenize(sql, base = 0) {
   const tokens = []; TOKEN.lastIndex = 0;
   for (let match; TOKEN.lastIndex < sql.length && (match = TOKEN.exec(sql));) {
     const text = match[0];
@@ -67,7 +67,11 @@ export function recognizeStatementSlots(sql, base = 0) {
         add('filterValue', operandStart.from, end);
       }
       if (!isWord(peek(), 'AND', 'OR')) return;
-      i++;
+      const logical = peek(); i++;
+      if (!peek() || isWord(peek(), ...CLAUSE_END) || [';', ')'].includes(peek().text)) {
+        slots.push({ kind: 'condition', from: logical.from, to: logical.to, logical: logical.upper });
+        return;
+      }
     }
   }
 
@@ -78,6 +82,16 @@ export function recognizeStatementSlots(sql, base = 0) {
     while (peek() && !isWord(peek(), 'FROM')) { if (peek().text === '(') { plain = false; skipParens(); columnsTo = tokens[i - 1].to; continue; } columnsTo = peek().to; i++; }
     if (!peek()) return [];
     if (plain) add('columns', columnsFrom, columnsTo);
+    for (let j = 1; j < i; j++) {
+      if (!isWord(tokens[j], 'COUNT') || tokens[j + 1]?.text !== '(') continue;
+      let end = j + 2, depth = 1;
+      while (end < i && depth) { if (tokens[end].text === '(') depth++; if (tokens[end].text === ')') depth--; if (depth) end++; }
+      if (depth || end === j + 2) continue;
+      const aggregate = tokens[j].from;
+      slots.push({kind: 'countField', from: tokens[j + 2].from, to: tokens[end - 1].to, aggregate});
+      if (isWord(tokens[end + 1], 'AS') && isName(tokens[end + 2])) slots.push({kind: 'alias', from: tokens[end + 2].from, to: tokens[end + 2].to, aggregate});
+      j = end;
+    }
     i++;
     const table = reference(); if (!table) return [];
     add('table', table.from, table.to);
@@ -108,7 +122,11 @@ export function recognizeStatementSlots(sql, base = 0) {
     i += 2; const table = reference(); if (!table) return [];
     add('table', table.from, table.to);
     if (peek()?.text === '(') { const open = peek(); skipParens(); if (tokens[i - 1].from > open.to) add('columns', open.to, tokens[i - 1].from); }
-    if (isWord(peek(), 'VALUES') && peek(1)?.text === '(') { i++; const open = peek(); skipParens(); if (tokens[i - 1].from > open.to) add('values', open.to, tokens[i - 1].from); }
+    if (isWord(peek(), 'VALUES') && peek(1)?.text === '(') {
+      i++; const open = peek(); skipParens();
+      while (peek()?.text === ',' && peek(1)?.text === '(') { i++; skipParens(); }
+      if (tokens[i - 1].from > open.to) add('values', open.to, tokens[i - 1].from);
+    }
   } else return [];
   return slots;
 }
@@ -121,11 +139,14 @@ function templateOf(sql, found) {
 // Slots for every recognizable statement in `source`, ready for setSlots.
 export function recognizeSlots(source, engine, labels = {}) {
   const result = [];
-  recognizeStatements(source, engine).forEach((statement, index) => {
+  recognizeStatements(source, engine, { includeIncomplete: true }).forEach((statement, index) => {
     const found = recognizeStatementSlots(statement.sql, statement.from);
     if (!found.some(slot => slot.kind === 'table')) return;
     const group = { id: 'template-restored-' + index, templateId: templateOf(statement.sql, found), context: null };
-    found.forEach((slot, order) => result.push({ id: `${group.id}-${order}`, kind: slot.kind, template: group, from: slot.from, to: slot.to, label: labels[slot.kind] || slot.kind }));
+    found.forEach((slot, order) => {
+      const template = slot.aggregate !== undefined ? { ...group, id: `${group.id}-count-${slot.aggregate}`, statementId: group.id, templateId: 'count' } : slot.logical ? { ...group, id: `${group.id}-logical-${order}`, statementId: group.id } : group;
+      result.push({ ...slot, id: `${group.id}-${order}`, template, label: labels[slot.kind] || slot.kind });
+    });
   });
   return result.sort((a, b) => a.from - b.from);
 }

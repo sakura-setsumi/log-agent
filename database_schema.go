@@ -80,15 +80,46 @@ type databaseIndex struct {
 	Unique  bool     `json:"unique"`
 	Columns []string `json:"columns"`
 	Primary bool     `json:"primary"`
+	Method  string   `json:"method,omitempty"`
+	Comment string   `json:"comment,omitempty"`
+}
+type databaseForeignKey struct {
+	Name              string   `json:"name"`
+	Columns           []string `json:"columns"`
+	Schema            string   `json:"schema"`
+	Table             string   `json:"table"`
+	ReferencedColumns []string `json:"referencedColumns"`
+	OnDelete          string   `json:"onDelete"`
+	OnUpdate          string   `json:"onUpdate"`
+}
+type databaseCheck struct {
+	Name       string `json:"name"`
+	Expression string `json:"expression"`
+	Enforced   bool   `json:"enforced"`
+}
+type databaseTrigger struct {
+	Name       string `json:"name"`
+	Timing     string `json:"timing"`
+	Event      string `json:"event"`
+	Definition string `json:"definition"`
 }
 type databaseStructure struct {
-	Columns     []databaseColumn `json:"columns"`
-	Indexes     []databaseIndex  `json:"indexes"`
-	ForeignKeys []string         `json:"foreignKeys"`
+	Columns           []databaseColumn     `json:"columns"`
+	Indexes           []databaseIndex      `json:"indexes"`
+	ForeignKeys       []string             `json:"foreignKeys"`
+	Checks            []string             `json:"checks"`
+	Triggers          []string             `json:"triggers"`
+	TriggerError      string               `json:"triggerError,omitempty"`
+	ForeignKeyDetails []databaseForeignKey `json:"foreignKeyDetails"`
+	CheckDetails      []databaseCheck      `json:"checkDetails"`
+	TriggerDetails    []databaseTrigger    `json:"triggerDetails"`
+	Comment           string               `json:"comment"`
+	CommentSupported  bool                 `json:"commentSupported"`
 }
 
 func describeDatabaseTable(engine string, table *schema.Table) databaseStructure {
 	result := databaseStructure{Columns: []databaseColumn{}, Indexes: []databaseIndex{}, ForeignKeys: []string{}}
+	result.CommentSupported = engine == "mysql" || engine == "postgres"
 	primary := map[string]bool{}
 	if table.PrimaryKey != nil {
 		for _, part := range table.PrimaryKey.Parts {
@@ -126,6 +157,16 @@ func describeDatabaseTable(engine string, table *schema.Table) databaseStructure
 		if i.Primary && i.Name == "" {
 			i.Name = "PRIMARY"
 		}
+		for _, attr := range index.Attrs {
+			switch a := attr.(type) {
+			case *schema.Comment:
+				i.Comment = a.Text
+			case *mysql.IndexType:
+				i.Method = a.T
+			case *postgres.IndexType:
+				i.Method = a.T
+			}
+		}
 		for _, part := range index.Parts {
 			if part.C != nil {
 				i.Columns = append(i.Columns, part.C.Name)
@@ -137,8 +178,68 @@ func describeDatabaseTable(engine string, table *schema.Table) databaseStructure
 	}
 	for _, key := range table.ForeignKeys {
 		result.ForeignKeys = append(result.ForeignKeys, key.Symbol)
+		fk := databaseForeignKey{Name: key.Symbol, OnDelete: string(key.OnDelete), OnUpdate: string(key.OnUpdate), Columns: []string{}, ReferencedColumns: []string{}}
+		for _, c := range key.Columns {
+			fk.Columns = append(fk.Columns, c.Name)
+		}
+		for _, c := range key.RefColumns {
+			fk.ReferencedColumns = append(fk.ReferencedColumns, c.Name)
+		}
+		if key.RefTable != nil {
+			fk.Table = key.RefTable.Name
+			if key.RefTable.Schema != nil {
+				fk.Schema = key.RefTable.Schema.Name
+			}
+		}
+		result.ForeignKeyDetails = append(result.ForeignKeyDetails, fk)
+	}
+	for _, attr := range table.Attrs {
+		if comment, ok := attr.(*schema.Comment); ok {
+			result.Comment = comment.Text
+		}
+		if check, ok := attr.(*schema.Check); ok {
+			enforced := true
+			for _, attr := range check.Attrs {
+				if flag, ok := attr.(*mysql.Enforced); ok {
+					enforced = flag.V
+				}
+			}
+			result.CheckDetails = append(result.CheckDetails, databaseCheck{Name: check.Name, Expression: check.Expr, Enforced: enforced})
+			label := check.Expr
+			if check.Name != "" {
+				label = check.Name + ": " + check.Expr
+			}
+			result.Checks = append(result.Checks, label)
+		}
 	}
 	return result
+}
+
+func databaseTriggerDetails(ctx context.Context, pool *databasePool, target databaseTarget) ([]databaseTrigger, error) {
+	query := "SELECT name, '', '', sql FROM sqlite_schema WHERE type='trigger' AND tbl_name=? ORDER BY name"
+	args := []any{target.Table}
+	switch pool.profile.Engine {
+	case "mysql":
+		query = "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME"
+		args = []any{target.Database, target.Table}
+	case "postgres":
+		query = "SELECT t.tgname, CASE WHEN (t.tgtype & 2)<>0 THEN 'BEFORE' WHEN (t.tgtype & 64)<>0 THEN 'INSTEAD OF' ELSE 'AFTER' END, concat_ws(' OR ', CASE WHEN (t.tgtype & 4)<>0 THEN 'INSERT' END, CASE WHEN (t.tgtype & 8)<>0 THEN 'DELETE' END, CASE WHEN (t.tgtype & 16)<>0 THEN 'UPDATE' END, CASE WHEN (t.tgtype & 32)<>0 THEN 'TRUNCATE' END), pg_catalog.pg_get_triggerdef(t.oid) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE NOT t.tgisinternal AND n.nspname=$1 AND c.relname=$2 ORDER BY t.tgname"
+		args = []any{databaseSchemaName(pool.profile.Engine, target), target.Table}
+	}
+	rows, err := pool.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := []databaseTrigger{}
+	for rows.Next() {
+		var name databaseTrigger
+		if err := rows.Scan(&name.Name, &name.Timing, &name.Event, &name.Definition); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
 }
 
 // Template pickers need column metadata without reading any table records.
@@ -152,7 +253,16 @@ func handleDatabaseStructure(w http.ResponseWriter, r *http.Request, pool *datab
 	}
 	table, err := inspectDatabaseTable(r.Context(), driver, pool.profile.Engine, target)
 	if err == nil {
-		writeJSON(w, 200, describeDatabaseTable(pool.profile.Engine, table))
+		meta := describeDatabaseTable(pool.profile.Engine, table)
+		meta.TriggerDetails, err = databaseTriggerDetails(r.Context(), pool, target)
+		meta.Triggers = []string{}
+		for _, trigger := range meta.TriggerDetails {
+			meta.Triggers = append(meta.Triggers, trigger.Name)
+		}
+		if err != nil {
+			meta.TriggerError = err.Error()
+		}
+		writeJSON(w, 200, meta)
 		return nil
 	}
 	// Views may not be exposed by the schema inspector. An empty SELECT still
@@ -248,33 +358,64 @@ type databaseRowChange struct {
 	Values    map[string]any `json:"values"`
 }
 
+type databaseChangeBatch struct {
+	Target  databaseTarget      `json:"target"`
+	Changes []databaseRowChange `json:"changes"`
+}
+
 func handleDatabaseChanges(w http.ResponseWriter, r *http.Request, pool *databasePool, target databaseTarget) error {
 	var req struct {
-		Changes []databaseRowChange `json:"changes"`
+		Changes []databaseRowChange   `json:"changes"`
+		Batches []databaseChangeBatch `json:"batches"`
 	}
 	if err := decodeDatabaseRequest(w, r, &req); err != nil {
 		return err
 	}
-	if len(req.Changes) == 0 || len(req.Changes) > 500 {
+	if len(req.Batches) != 0 && len(req.Changes) != 0 {
+		return errors.New("choose changes or batches")
+	}
+	batches := req.Batches
+	if len(batches) == 0 {
+		batches = []databaseChangeBatch{{Target: target, Changes: req.Changes}}
+	}
+	count := 0
+	for _, batch := range batches {
+		count += len(batch.Changes)
+	}
+	if count == 0 || count > 500 || len(batches) > 500 {
 		return errors.New("submit between 1 and 500 row changes")
 	}
 	driver, err := databaseAtlas(pool.db, pool.profile.Engine)
 	if err != nil {
 		return err
 	}
-	table, err := inspectDatabaseTable(r.Context(), driver, pool.profile.Engine, target)
-	if err != nil {
-		return err
-	}
-	columns := map[string]*schema.Column{}
-	for _, c := range table.Columns {
-		columns[c.Name] = c
-	}
-	primary := []string{}
-	if table.PrimaryKey != nil {
-		for _, p := range table.PrimaryKey.Parts {
-			if p.C != nil {
-				primary = append(primary, p.C.Name)
+	tables := make([]*schema.Table, len(batches))
+	// Inspect every destination before opening a transaction (SQLite may use a
+	// single connection). A batch cannot redirect writes to another connection.
+	for i := range batches {
+		dest := &batches[i].Target
+		if dest.ID == "" {
+			dest.ID = target.ID
+		}
+		if dest.Database == "" {
+			dest.Database = target.Database
+		}
+		if dest.ID != target.ID || dest.Database != target.Database || dest.Table == "" {
+			return errors.New("all batches must target tables in the selected database")
+		}
+		tables[i], err = inspectDatabaseTable(r.Context(), driver, pool.profile.Engine, *dest)
+		if err != nil {
+			return err
+		}
+
+		if pool.profile.Engine == "mysql" {
+			var transactional string
+			err = pool.db.QueryRowContext(r.Context(), "SELECT e.TRANSACTIONS FROM information_schema.TABLES t JOIN information_schema.ENGINES e ON e.ENGINE=t.ENGINE WHERE t.TABLE_SCHEMA=? AND t.TABLE_NAME=?", dest.Database, dest.Table).Scan(&transactional)
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(transactional, "YES") {
+				return fmt.Errorf("table %q does not support transactional edits", dest.Table)
 			}
 		}
 	}
@@ -284,127 +425,143 @@ func handleDatabaseChanges(w http.ResponseWriter, r *http.Request, pool *databas
 	}
 	defer tx.Rollback()
 	var affected int64
-	for _, change := range req.Changes {
-		args := []any{}
-		bind := func(value any) (string, error) {
-			v, e := databaseValue(value)
-			if e != nil {
-				return "", e
-			}
-			args = append(args, v)
-			return databasePlaceholder(pool.profile.Engine, len(args)), nil
+	for i, batch := range batches {
+		target, table := batch.Target, tables[i]
+		columns := map[string]*schema.Column{}
+		for _, c := range table.Columns {
+			columns[c.Name] = c
 		}
-		names := make([]string, 0, len(change.Values))
-		for name := range change.Values {
-			if columns[name] == nil {
-				return fmt.Errorf("unknown column %q", name)
-			}
-			for _, a := range columns[name].Attrs {
-				if _, ok := a.(*schema.GeneratedExpr); ok {
-					return fmt.Errorf("generated column %q is read-only", name)
+		primary := []string{}
+		if table.PrimaryKey != nil {
+			for _, p := range table.PrimaryKey.Parts {
+				if p.C != nil {
+					primary = append(primary, p.C.Name)
 				}
 			}
-			names = append(names, name)
 		}
-		sort.Strings(names)
-		statement := ""
-		qualified := databaseTableName(pool.profile.Engine, target)
-		if change.Operation == "insert" {
-			quoted := []string{}
-			slots := []string{}
-			for _, name := range names {
-				slot, e := bind(change.Values[name])
+		for _, change := range batch.Changes {
+			args := []any{}
+			bind := func(value any) (string, error) {
+				v, e := databaseValue(value)
 				if e != nil {
-					return e
+					return "", e
 				}
-				quoted = append(quoted, databaseQuote(pool.profile.Engine, name))
-				slots = append(slots, slot)
+				args = append(args, v)
+				return databasePlaceholder(pool.profile.Engine, len(args)), nil
 			}
-			if len(names) == 0 {
-				if pool.profile.Engine == "mysql" {
-					statement = "INSERT INTO " + qualified + " () VALUES ()"
-				} else {
-					statement = "INSERT INTO " + qualified + " DEFAULT VALUES"
+			names := make([]string, 0, len(change.Values))
+			for name := range change.Values {
+				if columns[name] == nil {
+					return fmt.Errorf("unknown column %q", name)
 				}
-			} else {
-				statement = "INSERT INTO " + qualified + " (" + strings.Join(quoted, ",") + ") VALUES (" + strings.Join(slots, ",") + ")"
-			}
-		} else {
-			if len(primary) == 0 || len(change.Key) != len(primary) {
-				return errors.New("editing and deleting rows requires a complete primary key")
-			}
-			set := []string{}
-			if change.Operation == "update" {
-				if len(names) == 0 {
-					continue
-				}
-				for _, name := range names {
-					if _, ok := change.Original[name]; !ok {
-						return errors.New("missing original cell value")
+				for _, a := range columns[name].Attrs {
+					if _, ok := a.(*schema.GeneratedExpr); ok {
+						return fmt.Errorf("generated column %q is read-only", name)
 					}
+				}
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			statement := ""
+			qualified := databaseTableName(pool.profile.Engine, target)
+			if change.Operation == "insert" {
+				quoted := []string{}
+				slots := []string{}
+				for _, name := range names {
 					slot, e := bind(change.Values[name])
 					if e != nil {
 						return e
 					}
-					set = append(set, databaseQuote(pool.profile.Engine, name)+"="+slot)
+					quoted = append(quoted, databaseQuote(pool.profile.Engine, name))
+					slots = append(slots, slot)
 				}
-			} else if change.Operation != "delete" {
-				return errors.New("invalid row operation")
-			}
-			where := []string{}
-			condition := func(name string, value any) error {
-				if columns[name] == nil {
-					return fmt.Errorf("unknown column %q", name)
+				if len(names) == 0 {
+					if pool.profile.Engine == "mysql" {
+						statement = "INSERT INTO " + qualified + " () VALUES ()"
+					} else {
+						statement = "INSERT INTO " + qualified + " DEFAULT VALUES"
+					}
+				} else {
+					statement = "INSERT INTO " + qualified + " (" + strings.Join(quoted, ",") + ") VALUES (" + strings.Join(slots, ",") + ")"
 				}
-				name = databaseQuote(pool.profile.Engine, name)
-				if value == nil {
-					where = append(where, name+" IS NULL")
+			} else {
+				if len(primary) == 0 || len(change.Key) != len(primary) {
+					return errors.New("editing and deleting rows requires a complete primary key")
+				}
+				set := []string{}
+				if change.Operation == "update" {
+					if len(names) == 0 {
+						continue
+					}
+					for _, name := range names {
+						if _, ok := change.Original[name]; !ok {
+							return errors.New("missing original cell value")
+						}
+						slot, e := bind(change.Values[name])
+						if e != nil {
+							return e
+						}
+						set = append(set, databaseQuote(pool.profile.Engine, name)+"="+slot)
+					}
+				} else if change.Operation != "delete" {
+					return errors.New("invalid row operation")
+				}
+				where := []string{}
+				condition := func(name string, value any) error {
+					if columns[name] == nil {
+						return fmt.Errorf("unknown column %q", name)
+					}
+					name = databaseQuote(pool.profile.Engine, name)
+					if value == nil {
+						where = append(where, name+" IS NULL")
+						return nil
+					}
+					slot, e := bind(value)
+					if e != nil {
+						return e
+					}
+					where = append(where, name+"="+slot)
 					return nil
 				}
-				slot, e := bind(value)
-				if e != nil {
-					return e
+				for _, name := range primary {
+					value, ok := change.Key[name]
+					if !ok || value == nil {
+						return errors.New("missing primary key value")
+					}
+					if err = condition(name, value); err != nil {
+						return err
+					}
 				}
-				where = append(where, name+"="+slot)
-				return nil
-			}
-			for _, name := range primary {
-				value, ok := change.Key[name]
-				if !ok || value == nil {
-					return errors.New("missing primary key value")
+				originalNames := make([]string, 0, len(change.Original))
+				for name := range change.Original {
+					originalNames = append(originalNames, name)
 				}
-				if err = condition(name, value); err != nil {
-					return err
+				sort.Strings(originalNames)
+				for _, name := range originalNames {
+					if err = condition(name, change.Original[name]); err != nil {
+						return err
+					}
 				}
-			}
-			originalNames := make([]string, 0, len(change.Original))
-			for name := range change.Original {
-				originalNames = append(originalNames, name)
-			}
-			sort.Strings(originalNames)
-			for _, name := range originalNames {
-				if err = condition(name, change.Original[name]); err != nil {
-					return err
+				if change.Operation == "delete" {
+					statement = "DELETE FROM " + qualified + " WHERE " + strings.Join(where, " AND ")
+				} else {
+					statement = "UPDATE " + qualified + " SET " + strings.Join(set, ",") + " WHERE " + strings.Join(where, " AND ")
 				}
 			}
-			if change.Operation == "delete" {
-				statement = "DELETE FROM " + qualified + " WHERE " + strings.Join(where, " AND ")
-			} else {
-				statement = "UPDATE " + qualified + " SET " + strings.Join(set, ",") + " WHERE " + strings.Join(where, " AND ")
+			res, e := tx.ExecContext(r.Context(), statement, args...)
+			if e != nil {
+				return e
 			}
+			n, e := res.RowsAffected()
+			if e != nil {
+				return e
+			}
+			if n != 1 {
+				return errors.New("record changed or no longer exists; reload the table (the entire batch was rolled back)")
+			}
+			affected += n
 		}
-		res, e := tx.ExecContext(r.Context(), statement, args...)
-		if e != nil {
-			return e
-		}
-		n, e := res.RowsAffected()
-		if e != nil {
-			return e
-		}
-		if n != 1 {
-			return errors.New("record changed or no longer exists; reload the table (the entire batch was rolled back)")
-		}
-		affected += n
+
 	}
 	if err = tx.Commit(); err != nil {
 		return err
@@ -422,6 +579,7 @@ type databaseColumnSpec struct {
 	Auto     bool    `json:"auto"`
 }
 type databaseSchemaRequest struct {
+	Comment string               `json:"comment"`
 	Action  string               `json:"action"`
 	Name    string               `json:"name"`
 	OldName string               `json:"oldName"`
@@ -506,6 +664,23 @@ func buildDatabaseSchemaPlan(ctx context.Context, pool *databasePool, target dat
 			return nil, "", e
 		}
 		switch req.Action {
+		case "setComment":
+			if engine == "sqlite" {
+				return nil, "", errors.New("SQLite does not support native table comments")
+			}
+			if len(req.Comment) > 8192 || strings.ContainsRune(req.Comment, 0) {
+				return nil, "", errors.New("invalid table comment")
+			}
+			attrs := make([]schema.Attr, 0, len(to.Attrs)+1)
+			for _, attr := range to.Attrs {
+				if _, ok := attr.(*schema.Comment); !ok {
+					attrs = append(attrs, attr)
+				}
+			}
+			if req.Comment != "" {
+				attrs = append(attrs, &schema.Comment{Text: req.Comment})
+			}
+			to.Attrs = attrs
 		case "renameTable":
 			if req.Name == "" {
 				return nil, "", errors.New("new table name is required")

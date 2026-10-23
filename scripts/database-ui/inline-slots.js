@@ -1,3 +1,4 @@
+import { uniqueSlotGroup } from './slot-scope.js';
 import { StateEffect, StateField } from '@codemirror/state';
 import { Decoration, EditorView } from '@codemirror/view';
 
@@ -33,18 +34,18 @@ export function expandTemplate(template, values, labels) {
   return { sql: sql + template.slice(end), slots };
 }
 
-export function replaceSlotValues(state, values, groupId) {
-  const slots = state.field(inlineSlots), edits = slots.filter(slot => (groupId === undefined || slot.template?.id === groupId) && values[slot.kind] !== undefined).map(slot => ({ from: slot.from, to: slot.to, insert: values[slot.kind] }));
+export function replaceSlotValues(state, values, groupId, allowedIds) {
+  const slots = state.field(inlineSlots), edits = slots.filter(slot => (groupId === undefined || slot.template?.id === groupId) && (!allowedIds || allowedIds.has(slot.id)) && values[slot.kind] !== undefined).map(slot => ({ from: slot.from, to: slot.to, insert: values[slot.kind] }));
   if (!edits.length) return null;
   const changes = state.changes(edits), next = slots.map(slot => ({ ...slot, from: changes.mapPos(slot.from, -1), to: changes.mapPos(slot.to, 1) }));
   return { changes, effects: setSlots.of(next) };
 }
 
 // Keep the operator selectable while its argument remains ordinary editable SQL.
-export function replacePredicate(state, operator, operand, label, groupId) {
-  const slots = state.field(inlineSlots), current = slots.find(slot => slot.kind === 'operator' && (groupId === undefined || slot.template?.id === groupId));
+export function replacePredicate(state, operator, operand, label, groupId, operatorId) {
+  const slots = state.field(inlineSlots), current = slots.find(slot => slot.kind === 'operator' && (operatorId === undefined || slot.id === operatorId) && (groupId === undefined || slot.template?.id === groupId));
   if (!current) return null;
-  const argument = slots.find(slot => slot.kind === 'filterValue' && slot.template?.id === current.template?.id);
+  const argument = slots.find(slot => slot.kind === 'filterValue' && slot.template?.id === current.template?.id && slot.from >= current.to && /^\s*$/.test(state.sliceDoc(current.to, slot.from)));
   const to = argument && /^\s*$/.test(state.sliceDoc(current.to, argument.from)) ? argument.to : current.to;
   const insert = operator + (operand ? ' ' + operand : '');
   const changes = state.changes({ from: current.from, to, insert });
@@ -54,14 +55,13 @@ export function replacePredicate(state, operator, operand, label, groupId) {
   return { changes, effects: setSlots.of(next.sort((a, b) => a.from - b.from)) };
 }
 
-let templateSequence = 0;
 // Insert on a blank line; otherwise replace only the statement at the cursor.
 export function applyTemplate(state, template, values, labels, metadata = {}, statement = null) {
   const line = state.doc.lineAt(state.selection.main.head), blank = !line.text.trim();
   const from = blank ? line.from : statement?.from ?? line.from;
   const to = blank ? line.to : statement?.to ?? line.to;
   const result = expandTemplate(template, values, labels);
-  const group = { ...metadata, id: 'template-' + ++templateSequence };
+  const group = { ...metadata, id: uniqueSlotGroup('template') };
   const changes = state.changes({ from, to, insert: result.sql });
   const remaining = state.field(inlineSlots).filter(slot => slot.to <= from || slot.from >= to)
     .map(slot => ({ ...slot, from: changes.mapPos(slot.from, 1), to: changes.mapPos(slot.to, -1) }));

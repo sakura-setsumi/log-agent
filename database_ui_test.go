@@ -135,7 +135,14 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 		run(chromedp.Click(`#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]`, chromedp.ByQuery), chromedp.WaitVisible(`#db-query-grid .tabulator-editing input`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText(value).Do(ctx) }), chromedp.KeyEvent(kb.Enter))
 	}
 	editResultNote("result edit")
-	wait(`document.querySelector('#db-query-summary .db-query-edit-status').textContent.includes('Saved:') && document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]').textContent==='result edit' && !document.querySelector('#db-query-grid').inert`, "query result cell saved")
+	wait(`!document.querySelector('#db-query-commit').disabled`, "result edit staged")
+	resultPendingWestPool, _ := databases.pool(context.Background(), databaseTarget{ID: "west", Database: "main"})
+	var pendingWestNote any
+	if err := resultPendingWestPool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&pendingWestNote); err != nil || pendingWestNote != nil {
+		t.Fatalf("result edited before commit: %v %v", pendingWestNote, err)
+	}
+	run(chromedp.Click(`#db-query-commit`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-query-summary .db-query-edit-status').textContent.includes('Committed') && document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]').textContent==='result edit' && !document.querySelector('#db-query-grid').inert`, "query result cell saved")
 	resultEastPool, _ := databases.pool(context.Background(), databaseTarget{ID: "east", Database: "main"})
 	resultWestPool, _ := databases.pool(context.Background(), databaseTarget{ID: "west", Database: "main"})
 	var resultEastNote, resultWestNote any
@@ -147,6 +154,8 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	}
 	run(chromedp.Evaluate(`(() => { const cell=document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]'), r=cell.getBoundingClientRect();cell.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2,clientX:r.x+10,clientY:r.y+10})); })()`, nil), chromedp.WaitVisible(`.tabulator-menu-item`, chromedp.ByQuery), chromedp.Click(`.tabulator-menu-item`, chromedp.ByQuery))
 	wait(`!document.querySelector('#db-query-grid').inert && !!document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"] .db-cell-null')`, "query result set to NULL")
+	run(chromedp.Click(`#db-query-commit`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-query-commit').disabled && !document.querySelector('#db-query-grid').inert`, "query result NULL committed")
 	if err := resultWestPool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&resultWestNote); err != nil || resultWestNote != nil {
 		t.Fatalf("result NULL was not saved: %v %v", resultWestNote, err)
 	}
@@ -154,10 +163,12 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	editResultNote("stale edit")
-	wait(`document.querySelector('#db-query-summary .db-query-edit-status.db-error')?.textContent.includes('record changed') && !document.querySelector('#db-query-grid').inert && !!document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"] .db-cell-null')`, "failed result edit restores the displayed value")
+	run(chromedp.Click(`#db-query-commit`, chromedp.ByQuery))
+	wait(`document.querySelector('#db-query-summary .db-query-edit-status.db-error')?.textContent.includes('record changed') && !document.querySelector('#db-query-grid').inert && document.querySelector('#db-query-grid .tabulator-row:nth-child(3) [tabulator-field="v2"]').textContent==='stale edit' && !document.querySelector('#db-query-commit').disabled`, "failed result edit retains pending changes")
 	if err := resultWestPool.db.QueryRow("SELECT note FROM orders WHERE id=1").Scan(&resultWestNote); err != nil || resultWestNote != "external edit" {
 		t.Fatalf("stale result overwrote live data: %v %v", resultWestNote, err)
 	}
+	run(chromedp.Click(`#db-query-rollback`, chromedp.ByQuery))
 	if _, err := resultWestPool.db.Exec("UPDATE orders SET note=NULL WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
@@ -234,8 +245,24 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	setSQL("SELECT * FROM orders ORDER BY id")
 	run(chromedp.Click(`[data-db-database='["east","main"]']`, chromedp.ByQuery))
 	wait(`!!document.querySelector('[data-db-table]')`, "table tree")
+	run(chromedp.Evaluate(`window.__treeFetch=window.fetch;window.__treeDataRequests=0;window.fetch=(url,options)=>{if(String(url).includes('/api/database/table?'))window.__treeDataRequests++;return window.__treeFetch(url,options);}`, nil), chromedp.Click(`[data-db-table-toggle='["east","main"]']`, chromedp.ByQuery))
+	wait(`document.querySelectorAll('[data-db-structure-group]').length===5`, "five structure groups without opening table")
+	var structureOpenedTable bool
+	run(chromedp.Evaluate(`window.__treeDataRequests!==0`, &structureOpenedTable))
+	if structureOpenedTable {
+		t.Fatal("expanding structure fetched table data")
+	}
+	run(chromedp.Click(`[data-db-structure-group][data-group="columns"]`, chromedp.ByQuery))
+	wait(`document.querySelectorAll('[data-db-structure-node]').length===3`, "fields group")
+	run(chromedp.Click(`[data-db-table-toggle='["east","main"]']`, chromedp.ByQuery))
+	wait(`document.querySelectorAll('[data-db-structure-group]').length===0`, "arrow collapses table")
 	run(chromedp.Click(`[data-db-table='["east","main"]']`, chromedp.ByQuery))
 	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===2`, "editable table")
+	var tableClickExpanded bool
+	run(chromedp.Evaluate(`document.querySelectorAll('[data-db-structure-group]').length!==0`, &tableClickExpanded), chromedp.Evaluate(`window.fetch=window.__treeFetch`, nil))
+	if tableClickExpanded {
+		t.Fatal("clicking a table label expanded structure")
+	}
 	run(chromedp.Evaluate(`(() => { const s=document.querySelector('#db-page-size');s.add(new Option('1','1'));s.value='1';s.dispatchEvent(new Event('change', {bubbles:true})); })()`, nil))
 	wait(`document.querySelectorAll('#db-data-grid .tabulator-row').length===1 && !document.querySelector('#db-page-last').disabled`, "single-row pages")
 	run(chromedp.Evaluate(`window.__firstPageId=document.querySelector('#db-data-grid .tabulator-row [tabulator-field="v0"]').textContent`, nil), chromedp.Click(`#db-page-last`, chromedp.ByQuery))
@@ -350,9 +377,9 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	// anchored to editable marks inside the SQL document.
 	run(chromedp.Evaluate(`document.querySelector('#db-single-target').value='["east","main"]';document.querySelector('#db-single-target').dispatchEvent(new Event('change', {bubbles:true}))`, nil))
 	run(chromedp.Evaluate(`window.__templateQueries=0;const templateFetch=window.fetch;window.fetch=(url,...args)=>{if(String(url).includes('/api/database/query'))window.__templateQueries++;return templateFetch(url,...args);}`, nil), chromedp.Click(`#db-toggle-templates`, chromedp.ByQuery))
-	wait(`document.querySelectorAll('#db-template-panel [data-db-template]').length===9 && !document.querySelector('#db-template-panel select, #db-template-panel input')`, "templates-only right rail")
+	wait(`document.querySelectorAll('#db-template-panel [data-db-template]').length===7 && !document.querySelector('#db-template-panel select, #db-template-panel input')`, "templates-only right rail")
 	var floatingTemplates bool
-	run(chromedp.Evaluate(`(() => { const p=document.querySelector('#db-template-panel'), e=document.querySelector('#db-sql-editor'), before=e.getBoundingClientRect().width;document.querySelector('#db-close-templates').click();const after=e.getBoundingClientRect().width;document.querySelector('#db-toggle-templates').click();return getComputedStyle(p).position==='fixed' && !p.closest('#db-panel-sql') && Math.abs(before-after)<1 && p.getBoundingClientRect().bottom>e.getBoundingClientRect().bottom; })()`, &floatingTemplates))
+	run(chromedp.Evaluate(`(() => { const p=document.querySelector('#db-template-panel'), e=document.querySelector('#db-sql-editor'), before=e.getBoundingClientRect().width;document.querySelector('#db-close-templates').click();const after=e.getBoundingClientRect().width;document.querySelector('#db-toggle-templates').click();return getComputedStyle(p).position==='fixed' && !p.closest('#db-panel-sql') && Math.abs(before-after)<1 && p.getBoundingClientRect().bottom<=innerHeight; })()`, &floatingTemplates))
 	if !floatingTemplates {
 		t.Fatal("template overlay changed the editor width or was constrained by the SQL pane")
 	}
@@ -370,16 +397,26 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	chooseInlineTable("orders")
 	run(chromedp.Click(`[data-db-slot-kind="columns"]`, chromedp.ByQuery), chromedp.Click(`#db-inline-none`, chromedp.ByQuery), chromedp.Click(`#db-inline-body [name="inline-column"][value="id"]`, chromedp.ByQuery), chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
 	wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes('SELECT "id"') && !document.querySelector('#db-sql-editor .cm-content').textContent.includes('amount')`, "selected fields filled inside SQL")
-	for _, template := range []struct{ id, fragment string }{{"where", "IS NOT NULL"}, {"order", "ORDER BY"}, {"count", "COUNT(*)"}, {"distinct", "DISTINCT"}, {"group", "GROUP BY"}, {"insert", "INSERT INTO"}, {"update", "UPDATE"}, {"delete", "DELETE FROM"}} {
+	for _, template := range []struct{ id, fragment string }{{"insert", "INSERT INTO"}, {"update", "UPDATE"}, {"delete", "DELETE FROM"}} {
 		run(chromedp.Click(`[data-db-template="`+template.id+`"]`, chromedp.ByQuery))
 		fragment, _ := json.Marshal(template.fragment)
 		wait(`document.querySelector('#db-sql-editor .cm-content').textContent.includes(`+string(fragment)+`)`, template.id+" template")
 	}
-	// Templates add a new statement on blank lines and replace the occupied line.
-	run(chromedp.Click(`[data-db-template="where"]`, chromedp.ByQuery), chromedp.Evaluate(`window.__firstTemplateSQL=document.querySelector('#db-sql-editor .cm-line').textContent`, nil), chromedp.Focus(`#db-sql-editor .cm-content`, chromedp.ByQuery), chromedp.KeyEvent(kb.Control+kb.End), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("\n").Do(ctx) }), chromedp.Click(`[data-db-template="order"]`, chromedp.ByQuery))
-	wait(`(() => {const lines=[...document.querySelectorAll('#db-sql-editor .cm-line')].filter(line=>line.textContent.trim());return lines.length===2 && lines[0].textContent===window.__firstTemplateSQL && lines[1].textContent.includes('ORDER BY');})()`, "blank line inserts a second template")
-	run(chromedp.Click(`[data-db-template="count"]`, chromedp.ByQuery))
-	wait(`(() => {const lines=[...document.querySelectorAll('#db-sql-editor .cm-line')].filter(line=>line.textContent.trim());return lines.length===2 && lines[0].textContent===window.__firstTemplateSQL && lines[1].textContent.includes('COUNT(*)') && !lines[1].textContent.includes('ORDER BY');})()`, "occupied line replaces only its template")
+	fillWhere := func() {
+		t.Helper()
+		setSQL("SELECT * FROM orders ")
+		run(chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("WHERE").Do(ctx) }))
+		wait(`!document.querySelector('#db-inline-picker').classList.contains('hidden') && document.querySelector('#db-inline-title').textContent==='Filter non-empty values' && !!document.querySelector('#db-inline-body [name="inline-column"]:checked') && !document.querySelector('#db-inline-apply').disabled`, "incremental WHERE fields")
+		run(chromedp.Click(`#db-inline-apply`, chromedp.ByQuery))
+		wait(`!!document.querySelector('#db-inline-operator')`, "incremental WHERE operator")
+		run(chromedp.Click(`#db-inline-close`, chromedp.ByQuery), chromedp.Focus(`#db-sql-editor .cm-content`, chromedp.ByQuery), chromedp.KeyEvent(kb.Control+kb.End), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText(";").Do(ctx) }))
+	}
+	// Base templates still add on blank lines and replace only an occupied statement.
+	fillWhere()
+	run(chromedp.Evaluate(`window.__firstTemplateSQL=document.querySelector('#db-sql-editor .cm-line').textContent`, nil), chromedp.Focus(`#db-sql-editor .cm-content`, chromedp.ByQuery), chromedp.KeyEvent(kb.Control+kb.End), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("\n").Do(ctx) }), chromedp.Click(`[data-db-template="select"]`, chromedp.ByQuery))
+	wait(`(() => {const lines=[...document.querySelectorAll('#db-sql-editor .cm-line')].filter(line=>line.textContent.trim());return lines.length===2 && lines[0].textContent===window.__firstTemplateSQL && lines[1].textContent.includes('SELECT');})()`, "blank line inserts a second template")
+	run(chromedp.Click(`[data-db-template="delete"]`, chromedp.ByQuery))
+	wait(`(() => {const lines=[...document.querySelectorAll('#db-sql-editor .cm-line')].filter(line=>line.textContent.trim());return lines.length===2 && lines[0].textContent===window.__firstTemplateSQL && lines[1].textContent.includes('DELETE FROM');})()`, "occupied line replaces only its template")
 	run(chromedp.Click(`#db-sql-editor .cm-line:nth-child(2) [data-db-slot-kind="table"]`, chromedp.ByQuery))
 	wait(`!!document.querySelector('#db-inline-table') && !document.querySelector('#db-inline-apply').disabled`, "second statement table picker")
 	chooseInlineTable("orders")
@@ -390,7 +427,8 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	if !noAutomaticQuery {
 		t.Fatal("filling templates executed SQL or changed query targets")
 	}
-	run(chromedp.Click(`[data-db-template="where"]`, chromedp.ByQuery), chromedp.Click(`[data-db-slot-kind="table"]`, chromedp.ByQuery))
+	fillWhere()
+	run(chromedp.Click(`[data-db-slot-kind="table"]`, chromedp.ByQuery))
 	wait(`!!document.querySelector('#db-inline-source')`, "inline schema source")
 	run(chromedp.Evaluate(`document.querySelector('#db-inline-source').value='["west","main"]';document.querySelector('#db-inline-source').dispatchEvent(new Event('change', {bubbles:true}))`, nil))
 	wait(`!document.querySelector('#db-inline-apply').disabled`, "second database metadata")
@@ -431,8 +469,8 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	// A copied statement keeps selectable slots, and its operator/value picker
 	// edits only the pasted copy.
 	run(chromedp.Evaluate(`window.__tabsBefore=document.querySelectorAll('#db-sql-tabs .db-session-tab').length;window.newDatabaseQuery()`, nil))
-	wait(`!!document.querySelector('[data-db-template="where"]') && document.querySelectorAll('#db-sql-tabs .db-session-tab').length===window.__tabsBefore+1`, "paste test new tab")
-	run(chromedp.Click(`[data-db-template="where"]`, chromedp.ByQuery))
+	wait(`!!document.querySelector('[data-db-template="select"]') && document.querySelectorAll('#db-sql-tabs .db-session-tab').length===window.__tabsBefore+1`, "paste test new tab")
+	fillWhere()
 	wait(`!!document.querySelector('[data-db-slot-kind="table"]')`, "paste test where template")
 	run(chromedp.Click(`[data-db-slot-kind="table"]`, chromedp.ByQuery))
 	wait(`!!document.querySelector('#db-inline-source')`, "paste test source")
@@ -607,8 +645,8 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	}
 	// A restart restores the SQL text and its picker slots, not just plain text.
 	run(chromedp.Evaluate(`window.newDatabaseQuery()`, nil))
-	wait(`!!document.querySelector('[data-db-template="where"]')`, "template list for reload test")
-	run(chromedp.Evaluate(`document.querySelector('[data-db-template="where"]').click()`, nil))
+	wait(`!!document.querySelector('[data-db-template="select"]')`, "template list for reload test")
+	fillWhere()
 	wait(`!!document.querySelector('#db-sql-editor [data-db-slot-kind="table"]')`, "template slots before reload")
 	run(chromedp.Evaluate(`window.dispatchEvent(new Event('beforeunload'))`, nil), chromedp.Reload(), chromedp.WaitVisible(`.nav-item[data-view="database"]`, chromedp.ByQuery), chromedp.Click(`.nav-item[data-view="database"]`, chromedp.ByQuery))
 	wait(`!!document.querySelector('#db-sql-editor [data-db-slot-kind="table"]')`, "slots restored after reload")

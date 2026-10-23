@@ -43,6 +43,8 @@ button { color: inherit; cursor: pointer; }
 .nav-item { position: relative; width: 100%; min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 8px 2px; border: 0; border-radius: 10px; color: var(--muted); background: transparent; font-size: 11px; line-height: 1.2; text-align: center; transition: .18s ease; }.nav-item > span:not(.nav-icon):not(.nav-count) { display: block; max-width: 100%; overflow-wrap: break-word; }
 .nav-item:hover { color: var(--text); background: rgba(255,255,255,.04); }.nav-item.active { color: var(--text); background: #252a30; }
 .nav-icon { width: auto; color: var(--orange); font-size:22px; line-height: 1; }.nav-item:not(.active) .nav-icon { color: var(--muted-2); }.nav-count { position: absolute; top: 4px; right: 4px; max-width: calc(100% - 8px); overflow: hidden; text-overflow: clip; color: var(--orange); font-size:10px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.commands-nav-icon { display: block; width: 24px; height: 26px; background: var(--muted-2); -webkit-mask: url("commands-icon.svg") center / contain no-repeat; mask: url("commands-icon.svg") center / contain no-repeat; }
+.server-nav-icon { display: block; width: 22px; height: 26px; background: var(--muted-2); -webkit-mask: url("server-icon.svg") center / contain no-repeat; mask: url("server-icon.svg") center / contain no-repeat; }
 /* The 10px under the label is the gap to the node list, so it belongs to the row
    rather than to the label: as a padding-bottom on the label it also shifted the
    text up by half of it (align-items:center centers boxes), which left

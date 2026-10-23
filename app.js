@@ -4317,12 +4317,13 @@ function setView(view) {
   // The breadcrumb label comes from the same table the sidebar uses, so the two
   // cannot drift apart in either language.
   $('#view-breadcrumb').textContent = t(`nav.${view}`);
-  Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view', commands: '#commands-view', terminal: '#terminal-view', database: '#database-view' }).forEach(([name, selector]) => {
+  Object.entries({ overview: '#overview-view', rules: '#rules-view', connections: '#connections-view', commands: '#commands-view', terminal: '#terminal-view', database: '#database-view', redis: '#redis-view' }).forEach(([name, selector]) => {
     $(selector).classList.toggle('hidden', name !== view);
   });
   if (view === 'rules') syncRuleButtons();
   if (view === 'terminal' && typeof renderTerminalView === 'function') renderTerminalView({ shown: true });
   if (view === 'database' && typeof renderDatabaseView === 'function') renderDatabaseView();
+  if (view === 'redis' && typeof renderRedisView === 'function') renderRedisView();
   if (view === 'connections') renderConnectionsView();
   if (view === 'rules') showToast(t('view.toast.rules'));
   if (view === 'connections') showToast(t('view.toast.connections'));

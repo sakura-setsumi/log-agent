@@ -3,9 +3,10 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "test": "node --test statements.test.mjs inline-slots.test.mjs slot-recognizer.test.mjs"
+    "test": "node --test statements.test.mjs inline-slots.test.mjs slot-recognizer.test.mjs result-drafts.test.mjs template-input.test.mjs slot-scope.test.mjs incremental.test.mjs join.test.mjs"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "6.20.3",
     "@codemirror/lang-sql": "6.10.0",
     "@codemirror/language": "^6.13.1",
     "@codemirror/legacy-modes": "^6.5.5",

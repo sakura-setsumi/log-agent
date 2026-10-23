@@ -2893,11 +2893,11 @@ func TestE2ETerminalPage(t *testing.T) {
 
 	// The old page is "指令集组" now and the SSH client is "服务器".
 	var labels string
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll('.rail .nav-item')).map((b) => b.dataset.view + '=' + b.textContent.replace(/[0-9]+$/, '').trim()).join('|')`, &labels)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll('.rail .nav-item')).map((b) => b.dataset.view + '=' + b.querySelector('[data-i18n^="nav."]').textContent.trim()).join('|')`, &labels)); err != nil {
 		t.Fatal(err)
 	}
 	// The browser here runs in English; the Chinese UI says 指令集组 / 服务器.
-	if !strings.Contains(labels, "commands=▤Command Groups") || !strings.Contains(labels, "terminal=>_Servers") {
+	if !strings.Contains(labels, "commands=Command Groups") || !strings.Contains(labels, "terminal=Servers") {
 		t.Fatalf("rail labels = %q, want Command Groups for commands and Servers for terminal", labels)
 	}
 	var commandsTitle string

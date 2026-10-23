@@ -235,6 +235,43 @@ func (s *server) handleDatabase(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	r = r.WithContext(ctx)
 	action := strings.TrimPrefix(r.URL.Path, "/api/database/")
+	if action == "progress" {
+		handleDatabaseProgress(w, r)
+		return
+	}
+	if id := r.URL.Query().Get("request_id"); id != "" && (action == "query" || action == "table") {
+		progress, err := beginDatabaseProgress(id)
+		if err != nil {
+			databaseError(w, 400, err)
+			return
+		}
+		defer finishDatabaseProgress(progress)
+		ctx = context.WithValue(ctx, databaseProgressKey{}, progress)
+		r = r.WithContext(ctx)
+	}
+
+	if action == "password" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		databases.mu.Lock()
+		defer databases.mu.Unlock()
+		profiles, err := readDatabaseProfiles()
+		if err != nil {
+			databaseError(w, 500, err)
+			return
+		}
+		for _, p := range profiles {
+			if p.ID == r.URL.Query().Get("id") {
+				writeJSON(w, 200, map[string]string{"password": p.Password})
+				return
+			}
+		}
+		databaseError(w, 404, fmt.Errorf("connection not found"))
+		return
+	}
 	if action == "profiles" {
 		handleDatabaseProfiles(w, r)
 		return
@@ -479,7 +516,7 @@ type databaseResult struct {
 	Truncated bool             `json:"truncated"`
 }
 
-func readDatabaseRows(rows *sql.Rows, limit int) (databaseResult, error) {
+func readDatabaseRows(rows *sql.Rows, limit int, progress ...*databaseLoadProgress) (databaseResult, error) {
 	defer rows.Close()
 	result := databaseResult{Columns: []databaseColumn{}, Rows: [][]any{}}
 	types, err := rows.ColumnTypes()
@@ -529,6 +566,9 @@ func readDatabaseRows(rows *sql.Rows, limit int) (databaseResult, error) {
 			break
 		}
 		result.Rows = append(result.Rows, values)
+		if len(progress) > 0 && progress[0] != nil {
+			progress[0].rows.Add(1)
+		}
 	}
 	return result, rows.Err()
 }
@@ -539,7 +579,7 @@ func queryDatabase(ctx context.Context, q interface {
 	if err != nil {
 		return databaseResult{}, err
 	}
-	return readDatabaseRows(rows, limit)
+	return readDatabaseRows(rows, limit, databaseProgressFromContext(ctx))
 }
 
 type databaseSourceResult struct {

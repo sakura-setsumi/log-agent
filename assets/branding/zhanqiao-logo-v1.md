@@ -1,0 +1,9 @@
+# 栈桥品牌 Logo v1
+
+生成方式：内置 image_gen，透明背景 PNG。
+
+设计概念：将桥梁的连接意象与技术栈的层叠结构结合，使用深蓝与青绿色。左侧图形可作为后续应用图标的设计基础，右侧为「栈桥」字标。
+
+## 最终生成提示词
+
+Use case: logo-brand. Create one polished original brand logo for a Chinese desktop developer and operations workspace named 栈桥 (Zhanqiao), which unifies logs, SSH terminals, file management and database tools. A single isolated horizontal brand lockup on a truly transparent background, generous clear margins. Symbol on the left: a bold distinctive abstract bridge constructed from three stacked horizontal architectural bars and two stable supports, with a clean central span formed by negative space. Subtly evoke technology stacks and connecting systems, without drawing literal servers or database cylinders. Balanced compact silhouette that remains legible as a small application icon. Flat vector-like geometric artwork, crisp contours, slight optical corner rounding, confident and restrained, premium developer-tool identity. Color palette: deep midnight navy #183247 with a single restrained teal #16B8A6 accent in the connecting bridge segment. On the right place only the exact Chinese wordmark “栈桥”, large beautifully typeset modern Chinese sans serif, medium-bold, refined proportions and letter spacing, in the same deep navy. The symbol and wordmark should feel optically balanced, emblem about the height of the characters or slightly larger. No English lettering, no tagline, no gradients, no 3D, no shadows, no mockup, no framing, no background rectangle, no presentation board, no additional copies or alternate versions, no watermark. Output a single usable transparent brand logo.

@@ -41,7 +41,9 @@ var (
 	procIsIconic            = user32.NewProc("IsIconic")
 	procMessageBox          = user32.NewProc("MessageBoxW")
 	procSendMessage         = user32.NewProc("SendMessageW")
-	procExtractIcon         = shell32.NewProc("ExtractIconW")
+	procLoadImage           = user32.NewProc("LoadImageW")
+	procGetSystemMetrics    = user32.NewProc("GetSystemMetrics")
+	procGetModuleHandle     = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetModuleHandleW")
 )
 
 func init() {
@@ -92,6 +94,11 @@ func runDesktop(handler http.Handler) error {
 	defer w.Destroy()
 	w.SetSize(1440, 900, webview2.HintNone)
 	setWindowIcon(uintptr(w.Window()))
+	pin, err := installCaptionPin(uintptr(w.Window()))
+	if err != nil {
+		return err
+	}
+	defer pin.close()
 
 	if err := serveFrontend(w, handler); err != nil {
 		return err
@@ -199,19 +206,25 @@ func focusRunningWindow() {
 	procSetForegroundWindow.Call(hwnd)
 }
 
-// setWindowIcon uses the icon compiled into the executable's resources.
+// Load each window icon directly from resource ID 1 (go-winres simply),
+// at its system size. Shared resource handles live for the application lifetime.
 func setWindowIcon(hwnd uintptr) {
-	executable, err := os.Executable()
-	if err != nil {
+	module, _, _ := procGetModuleHandle.Call(0)
+	if module == 0 {
 		return
 	}
-	const wmSetIcon, iconSmall, iconBig = 0x0080, 0, 1
-	icon, _, _ := procExtractIcon.Call(0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(executable))), 0)
-	if icon <= 1 { // 0: no icon, 1: not an executable
-		return
+	const wmSetIcon, imageIcon, lrShared = 0x0080, 1, 0x8000
+	for _, spec := range []struct{ kind, widthMetric, heightMetric uintptr }{
+		{1, 11, 12}, // ICON_BIG, SM_CXICON, SM_CYICON
+		{0, 49, 50}, // ICON_SMALL, SM_CXSMICON, SM_CYSMICON
+	} {
+		width, _, _ := procGetSystemMetrics.Call(spec.widthMetric)
+		height, _, _ := procGetSystemMetrics.Call(spec.heightMetric)
+		icon, _, _ := procLoadImage.Call(module, 1, imageIcon, width, height, lrShared)
+		if icon != 0 {
+			procSendMessage.Call(hwnd, wmSetIcon, spec.kind, icon)
+		}
 	}
-	procSendMessage.Call(hwnd, wmSetIcon, iconBig, icon)
-	procSendMessage.Call(hwnd, wmSetIcon, iconSmall, icon)
 }
 
 func showError(message string) {
