@@ -134,6 +134,36 @@ func handleRedisProfiles(w http.ResponseWriter, r *http.Request) {
 		p.HasPassword = p.Password != ""
 		p.Password = ""
 		writeJSON(w, 200, p)
+	case http.MethodPut:
+		var req struct {
+			Order []string `json:"order"`
+		}
+		if err = decodeDatabaseRequest(w, r, &req); err != nil {
+			redisAPIError(w, 400, err)
+			return
+		}
+		byID := make(map[string]redisProfile, len(profiles))
+		for _, p := range profiles {
+			byID[p.ID] = p
+		}
+		ordered := make([]redisProfile, 0, len(profiles))
+		for _, id := range req.Order {
+			if p, ok := byID[id]; ok {
+				ordered = append(ordered, p)
+				delete(byID, id)
+			}
+		}
+		// Preserve profiles added since the client loaded the list.
+		for _, p := range profiles {
+			if _, ok := byID[p.ID]; ok {
+				ordered = append(ordered, p)
+			}
+		}
+		if err = writeJSONFile(redisProfilesPath(), ordered); err != nil {
+			redisAPIError(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"ok": true})
 	case http.MethodDelete:
 		id := r.URL.Query().Get("id")
 		found := false
@@ -416,7 +446,7 @@ func (s *server) handleRedis(w http.ResponseWriter, r *http.Request) {
 		handleRedisProfiles(w, r)
 		return
 	}
-	methods := map[string]string{"test": "POST", "catalog": "GET", "scan": "GET", "value": "GET", "write": "POST"}
+	methods := map[string]string{"test": "POST", "catalog": "GET", "scan": "GET", "value": "GET", "write": "POST", "namespace": "POST"}
 	method, ok := methods[action]
 	if !ok {
 		w.WriteHeader(404)
@@ -522,6 +552,13 @@ func (s *server) handleRedis(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		pattern := r.URL.Query().Get("pattern")
+		if prefix := r.URL.Query().Get("prefix"); prefix != "" {
+			pattern, err = redisNamespacePattern(prefix)
+			if err != nil {
+				redisAPIError(w, 400, err)
+				return
+			}
+		}
 		if pattern == "" {
 			pattern = "*"
 		}
@@ -535,6 +572,12 @@ func (s *server) handleRedis(w http.ResponseWriter, r *http.Request) {
 		result = map[string]any{"keys": keys, "cursor": strconv.FormatUint(next, 10)}
 	case "value":
 		result, err = readRedisValue(ctx, c, r.URL.Query().Get("key"))
+	case "namespace":
+		var req redisNamespaceRequest
+		err = decodeDatabaseRequest(w, r, &req)
+		if err == nil {
+			result, err = redisNamespaceAction(ctx, c, p.ID, db, req)
+		}
 	case "write":
 		var req redisWrite
 		err = decodeDatabaseRequest(w, r, &req)

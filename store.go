@@ -486,9 +486,8 @@ func (c *configStore) saveNodesLocked() error {
 	if err := c.ensureDir(); err != nil {
 		return err
 	}
-	sorted := append([]storedNode{}, c.nodes...)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
-	return writeJSONFile(nodesFilePath(), sorted)
+	// Array order is the user-selected node order, including after edits and additions.
+	return writeJSONFile(nodesFilePath(), c.nodes)
 }
 
 func (c *configStore) saveModelsLocked() error {

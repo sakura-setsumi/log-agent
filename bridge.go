@@ -36,6 +36,7 @@ type bridge struct {
 	emit func(script string)
 
 	mu      sync.Mutex
+	closed  bool
 	bodies  map[string]*bytes.Buffer
 	cancels map[string]context.CancelFunc
 }
@@ -58,6 +59,9 @@ func (b *bridge) body(id, chunk string) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
 	buf := b.bodies[id]
 	if buf == nil {
 		buf = &bytes.Buffer{}
@@ -70,6 +74,10 @@ func (b *bridge) body(id, chunk string) {
 // through emit, so a slow handler never stalls the window's message loop.
 func (b *bridge) request(id, method, target string, headers map[string]string) {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
 	buf := b.bodies[id]
 	delete(b.bodies, id)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -113,6 +121,16 @@ func (b *bridge) cancel(id string) {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (b *bridge) close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	for _, cancel := range b.cancels {
+		cancel()
+	}
+	clear(b.bodies)
 }
 
 func newBridgeRequest(ctx context.Context, method, target string, headers map[string]string, payload []byte) (*http.Request, error) {

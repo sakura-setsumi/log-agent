@@ -2539,6 +2539,31 @@ function renderLogs({ reuseFiltered = false, preserveScroll = false, renderLimit
   syncLogFlowVisibility(stream);
 }
 
+function applyNodeOrder(order) {
+  const rank = new Map(order.map((id, index) => [id, index]));
+  nodes.sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity));
+  renderNodes(); renderNodeManagerList();
+}
+async function reorderNodes(from, to, after) {
+  const ordered = [...nodes];
+  if (!moveConnectionItem(ordered, from, to, after)) return;
+  const order = ordered.map(node => node.id);
+  if (isBrowserStorageMode()) {
+    const previous = nodes.map(node => node.id);
+    applyNodeOrder(order);
+    if (!persistBrowserNodes()) applyNodeOrder(previous);
+    return;
+  }
+  try {
+    const response = await fetch('/api/nodes', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ order }) });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(apiErrorMessage(payload, `HTTP ${response.status}`));
+    applyNodeOrder(payload.order);
+  } catch (error) {
+    showToast(t('modal.toast.orderFailed', { error: error.message }));
+  }
+}
+
 function renderNodeManagerList() {
   const modal = $('#add-node-modal');
   if (!modal || modal.classList.contains('hidden') || modal.dataset.manage !== 'true') return;
@@ -2553,8 +2578,8 @@ function renderNodeManagerList() {
   list.dataset.renderKey = renderKey;
   $('#node-manager-count').textContent = String(nodes.length);
   list.innerHTML = nodes.length ? nodes.map((node) => `
-    <button class="node-manager-item ${node.id === nodeId ? 'active' : ''}" type="button" data-manage-node-id="${escapeHtml(node.id)}" aria-pressed="${node.id === nodeId}">
-      <strong>${escapeHtml(node.name)}</strong><span title="${escapeHtml(node.url)}">${escapeHtml(node.url)}</span>
+    <button class="node-manager-item ${node.id === nodeId ? 'active' : ''}" type="button" draggable="true" data-manage-node-id="${escapeHtml(node.id)}" aria-pressed="${node.id === nodeId}">
+      <i class="connection-order-handle" title="${t('commands.dragToReorder')}" aria-hidden="true">⁙</i><strong>${escapeHtml(node.name)}</strong><span title="${escapeHtml(node.url)}">${escapeHtml(node.url)}</span>
     </button>
   `).join('') : `<p class="node-manager-empty">${t('modal.noNodes')}</p>`;
 }
@@ -2863,8 +2888,10 @@ function persistBrowserNodes() {
       style: node.style,
       initial: node.initial,
     }))));
+    return true;
   } catch (error) {
     showToast(t('modal.toast.storageUnavailable'));
+    return false;
   }
 }
 
@@ -3497,6 +3524,57 @@ async function addCommandServer() {
   await openServerManager(server.id);
 }
 
+// Shared ordering for connection managers; each manager owns persistence and rollback.
+function moveConnectionItem(items, from, to, after) {
+  const source = items.findIndex(item => item.id === from);
+  if (from === to || source < 0 || !items.some(item => item.id === to)) return false;
+  const [item] = items.splice(source, 1);
+  items.splice(items.findIndex(item => item.id === to) + (after ? 1 : 0), 0, item);
+  return true;
+}
+function bindConnectionReorder(container, selector, idOf, onMove, blocked = () => false) {
+  let dragged = null, saving = false, suppressClick = false;
+  const clear = () => container.querySelectorAll('.drop-before, .drop-after, .dragging').forEach(row => row.classList.remove('drop-before', 'drop-after', 'dragging'));
+  const after = (event, row) => { const rect = row.getBoundingClientRect(); return event.clientY > rect.top + rect.height / 2; };
+  container.addEventListener('click', event => {
+    if (suppressClick || event.target.closest?.('.connection-order-handle')) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  container.addEventListener('dragstart', event => {
+    const row = event.target.closest?.(selector);
+    if (!row) return;
+    const action = event.target.closest?.('button, input, select, a');
+    if (saving || blocked() || (action && action !== row)) { event.preventDefault(); return; }
+    dragged = idOf(row); suppressClick = true;
+    event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', dragged);
+    row.classList.add('dragging');
+  });
+  container.addEventListener('dragover', event => {
+    const row = event.target.closest?.(selector);
+    if (dragged === null || !row) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = 'move';
+    container.querySelectorAll('.drop-before, .drop-after').forEach(item => item.classList.remove('drop-before', 'drop-after'));
+    if (idOf(row) !== dragged) row.classList.add(after(event, row) ? 'drop-after' : 'drop-before');
+    const rect = container.getBoundingClientRect();
+    if (event.clientY < rect.top + 32) container.scrollTop -= 12;
+    else if (event.clientY > rect.bottom - 32) container.scrollTop += 12;
+  });
+  container.addEventListener('drop', async event => {
+    const row = event.target.closest?.(selector);
+    if (dragged === null || !row) return;
+    event.preventDefault();
+    const from = dragged, to = idOf(row), placeAfter = after(event, row);
+    dragged = null; clear();
+    setTimeout(() => { suppressClick = false; }, 0);
+    if (from === to || saving || blocked()) return;
+    saving = true; container.setAttribute('aria-busy', 'true');
+    try { await onMove(from, to, placeAfter); }
+    finally { saving = false; container.removeAttribute('aria-busy'); }
+  });
+  container.addEventListener('dragend', () => {
+    dragged = null; clear(); setTimeout(() => { suppressClick = false; }, 0);
+  });
+}
+
 function renderServerManagerList() {
   const modal = $('#server-settings-modal');
   if (!modal || modal.classList.contains('hidden')) return;
@@ -3506,7 +3584,7 @@ function renderServerManagerList() {
   if (list.dataset.renderKey === key) return;
   list.dataset.renderKey = key;
   $('#server-manager-count').textContent = String(state.commandServers.length);
-  list.innerHTML = state.commandServers.length ? state.commandServers.map((server) => `<button class="server-manager-item ${server.id === state.managedCommandServerId ? 'active' : ''}" type="button" data-manage-server-id="${escapeHtml(server.id)}" aria-pressed="${server.id === state.managedCommandServerId}"><strong>${escapeHtml(server.name || t('commands.unnamedServer'))}</strong><span>${escapeHtml(server.host || '—')}:${escapeHtml(server.port || '22')}</span></button>`).join('') : `<p class="server-manager-empty">${t('commands.noServerYet')}</p>`;
+  list.innerHTML = state.commandServers.length ? state.commandServers.map((server) => `<button class="server-manager-item ${server.id === state.managedCommandServerId ? 'active' : ''}" type="button" draggable="true" data-manage-server-id="${escapeHtml(server.id)}" aria-pressed="${server.id === state.managedCommandServerId}"><i class="connection-order-handle" title="${t('commands.dragToReorder')}" aria-hidden="true">⁙</i><strong>${escapeHtml(server.name || t('commands.unnamedServer'))}</strong><span>${escapeHtml(server.host || '—')}:${escapeHtml(server.port || '22')}</span></button>`).join('') : `<p class="server-manager-empty">${t('commands.noServerYet')}</p>`;
 }
 
 function renderCommandServerEditor() {
@@ -4252,6 +4330,11 @@ function bindCommandEvents() {
   $('#command-flow-name')?.addEventListener('input', (event) => { const flow = activeCommandFlow(); flow.name = event.target.value; saveCommandFlows(); $('#commands-editor-title').textContent = flow.name || t('commands.editor'); renderCommandFlows(); });
   $('#commands-add-server')?.addEventListener('click', addCommandServer);
   $('#server-manager-add').addEventListener('click', addCommandServer);
+  bindConnectionReorder($('#server-manager-list'), '[data-manage-server-id]', row => row.dataset.manageServerId, (from, to, after) => {
+    if (!moveConnectionItem(state.commandServers, from, to, after)) return;
+    saveCommandFlows(); renderCommandServers();
+    if (typeof renderTerminalView === 'function') renderTerminalView();
+  });
   $('#server-manager-list').addEventListener('click', (event) => {
     const item = event.target.closest('[data-manage-server-id]');
     if (!item) return;
@@ -4561,6 +4644,7 @@ function bindEvents() {
   bindCommandEvents();
   $('#rules-add-rule').addEventListener('click', () => showToast(t('rules.toast.templatesSoon')));
   $('#connections-add-node').addEventListener('click', () => openNodeModal());
+  bindConnectionReorder($('#node-manager-list'), '[data-manage-node-id]', row => row.dataset.manageNodeId, reorderNodes, () => !state.storageMode);
   $('#node-manager-list').addEventListener('click', (event) => {
     const item = event.target.closest('[data-manage-node-id]');
     const node = item && getNode(item.dataset.manageNodeId);

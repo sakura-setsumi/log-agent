@@ -6,6 +6,20 @@
 
   const calls = new Map();
   let seq = 0;
+  const viewCalls = new Map();
+  window.__lbViewResult = (id, error) => {
+    const call = viewCalls.get(id);
+    if (!call) return;
+    viewCalls.delete(id);
+    if (error) call.reject(new Error(error)); else call.resolve();
+  };
+  window.__lbOpenView = (view, x, y) => new Promise((resolve, reject) => {
+    const id = `view-${++seq}`;
+    viewCalls.set(id, { resolve, reject });
+    window.__lbOpenViewRequest(id, view, x, y).catch(error => {
+      viewCalls.delete(id); reject(error);
+    });
+  });
   const CHUNK = 512 * 1024;
 
   const toBase64 = (bytes) => {

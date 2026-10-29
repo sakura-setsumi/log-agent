@@ -1350,3 +1350,18 @@ tr[data-name] .term-name svg { stroke: var(--muted-2); }
 .server-manager-editor .secret-field { margin-top: 16px; }
 .server-manager-editor .secret-field .reusable-server-secret { margin-top: 0; }
 .server-manager-editor .secret-toggle { margin-top: 0; font-size: 12px; }
+
+/* Dragging a navigation page out opens an independent desktop window. */
+.rail .nav-item.nav-detaching { opacity: .5; }
+body.nav-detaching, body.nav-detaching * { cursor: grabbing !important; user-select: none !important; }
+#nav-detach-preview { position: fixed; z-index: 10000; pointer-events: none; padding: 10px 16px; border: 1px solid var(--orange); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 8px 24px #0003; font-size: 12px; white-space: nowrap; }
+
+/* Connection manager ordering */
+.connection-order-handle { flex: 0 0 16px; color: var(--muted); font-style: normal; text-align: center; cursor: grab; user-select: none; }
+:is(.node-manager-item, .server-manager-item, .db-manager-row, .redis-manager-row)[draggable="true"] { cursor: grab; }
+:is(.node-manager-item, .server-manager-item, .db-manager-row, .redis-manager-row).dragging { opacity: .45; cursor: grabbing; }
+:is(.node-manager-item, .server-manager-item, .db-manager-row, .redis-manager-row).drop-before { box-shadow: inset 0 2px 0 var(--orange); }
+:is(.node-manager-item, .server-manager-item, .db-manager-row, .redis-manager-row).drop-after { box-shadow: inset 0 -2px 0 var(--orange); }
+:is(.node-manager-item, .server-manager-item) { position: relative; padding-left: 32px; }
+:is(.node-manager-item, .server-manager-item) .connection-order-handle { position: absolute; left: 10px; top: 12px; }
+.db-manager-row > span:first-of-type { flex: 1; min-width: 0; }

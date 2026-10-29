@@ -71,6 +71,31 @@ func TestE2EDatabaseWorkspace(t *testing.T) {
 	}
 	run(chromedp.Navigate(web.URL), chromedp.WaitVisible(`.nav-item[data-view="database"]`, chromedp.ByQuery), chromedp.Click(`.nav-item[data-view="database"]`, chromedp.ByQuery))
 	wait(`!!document.querySelector('[data-db-connect="east"]')`, "connections")
+	for _, width := range []int64{1440, 1280, 1100} {
+		run(chromedp.EmulateViewport(width, 950))
+		var fits bool
+		run(chromedp.Evaluate(`(() => { const bar=document.querySelector('.db-query-bar'), r=bar.getBoundingClientRect(); return bar.scrollWidth<=bar.clientWidth && [...bar.children].every(node=>{const c=node.getBoundingClientRect();return c.left>=r.left-1 && c.right<=r.right+1 && Math.abs(c.top+c.height/2-r.top-r.height/2)<2;}); })()`, &fits))
+		if !fits {
+			t.Fatalf("SQL toolbar must fit on one row without scrolling at viewport width %d", width)
+		}
+	}
+	run(chromedp.EmulateViewport(1600, 1000))
+	// The full-width separator must resize from its left, middle and right.
+	for _, fraction := range []float64{0.05, 0.5, 0.95} {
+		var bounds struct{ X, Y, Width, Height, PaneHeight float64 }
+		run(chromedp.Evaluate(`(() => { const r=document.querySelector('#db-sql-splitter').getBoundingClientRect(); return {X:r.x,Y:r.y,Width:r.width,Height:r.height,PaneHeight:document.querySelector('#db-panel-sql').getBoundingClientRect().height}; })()`, &bounds))
+		x, y := bounds.X+bounds.Width*fraction, bounds.Y+bounds.Height/2
+		run(chromedp.MouseEvent(input.MousePressed, x, y, chromedp.ButtonLeft),
+			chromedp.MouseEvent(input.MouseMoved, x, y+30, chromedp.ButtonLeft),
+			chromedp.MouseEvent(input.MouseReleased, x, y+30, chromedp.ButtonLeft))
+		var resized float64
+		var dragging bool
+		run(chromedp.Evaluate(`document.querySelector('#db-panel-sql').getBoundingClientRect().height`, &resized),
+			chromedp.Evaluate(`document.body.classList.contains('db-sql-resizing')`, &dragging))
+		if resized < bounds.PaneHeight+29 || resized > bounds.PaneHeight+31 || dragging {
+			t.Fatalf("separator drag at %.0f%%: height %v -> %v, dragging=%v", fraction*100, bounds.PaneHeight, resized, dragging)
+		}
+	}
 	toggleDatabase := func(id string) {
 		t.Helper()
 		value, _ := json.Marshal(id)

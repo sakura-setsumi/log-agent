@@ -11,6 +11,7 @@
   const $v = (selector) => view.querySelector(selector);
   const sessions = [];
   let active = null;
+  let connectingSession = null;
   let pane = 'files';
   let sequence = 0;
 
@@ -53,6 +54,7 @@
       pending: '',
       sending: false,
       abort: null,
+      connectAbort: new AbortController(),
       cwd: '',
       entries: [],
       selected: new Set(),
@@ -103,6 +105,7 @@
 
   async function openServerSession(server, session) {
     const request = () => api('open', {
+      signal: session.connectAbort.signal,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -118,6 +121,10 @@
     });
     let response = await request();
     let payload = await response.json().catch(() => ({}));
+    if (session.closed) {
+      if (payload.id) api(`close?id=${encodeURIComponent(payload.id)}`, { method: 'POST' }).catch(() => {});
+      return false;
+    }
     if (response.status === 428 && payload.fingerprint) {
       if (!window.confirm(t('commands.confirmFingerprint', { fingerprint: payload.fingerprint }))) return false;
       server.hostFingerprint = payload.fingerprint;
@@ -128,19 +135,30 @@
       payload = await response.json().catch(() => ({}));
     }
     if (!response.ok) throw new Error(apiErrorMessage(payload, t('terminal.connectFailed')));
+    if (session.closed) {
+      if (payload.id) api(`close?id=${encodeURIComponent(payload.id)}`, { method: 'POST' }).catch(() => {});
+      return false;
+    }
     session.sid = payload.id;
     return true;
   }
 
+  function renderConnectButton() {
+    const button = $v('#term-connect');
+    button.disabled = !!connectingSession || !(state.commandServers || []).length;
+    button.textContent = t(connectingSession ? 'terminal.connecting' : 'terminal.connect');
+    $v('#term-cancel-connect').classList.toggle('hidden', !connectingSession);
+  }
+
   async function connect() {
+    if (connectingSession) return;
     const server = (state.commandServers || []).find((item) => item.id === $v('#term-server-select').value);
     if (!server) { showToast(t('terminal.pickServer')); return; }
-    const button = $v('#term-connect');
-    button.disabled = true;
-    button.textContent = t('terminal.connecting');
     const session = createSession(server);
+    connectingSession = session;
+    renderConnectButton();
     try {
-      if (!(await openServerSession(session.server, session))) { disposeSession(session); return; }
+      if (!(await openServerSession(session.server, session)) || session.closed) { disposeSession(session); return; }
       session.status = 'open';
       renderTabs();
       fitActive();
@@ -148,11 +166,14 @@
       sendInput(session, '');
       loadDir(session, '');
     } catch (error) {
+      const cancelled = session.closed || error.name === 'AbortError';
       disposeSession(session);
-      showToast(error.message || t('terminal.connectFailed'));
+      if (!cancelled) showToast(error.message || t('terminal.connectFailed'));
     } finally {
-      button.disabled = false;
-      button.textContent = t('terminal.connect');
+      if (connectingSession === session) {
+        connectingSession = null;
+        renderConnectButton();
+      }
     }
   }
 
@@ -205,10 +226,16 @@
   }
 
   function disposeSession(session) {
+    if (session.closed) return;
     const documents = textDocuments.filter(doc => doc.session === session);
     if (documents.some(doc => doc.saving)) return false;
     if (documents.some(doc => doc.dirty) && !window.confirm(et('discard'))) return false;
     for (const doc of documents) removeTextDocument(doc, true);
+    if (connectingSession === session) {
+      connectingSession = null;
+      renderConnectButton();
+    }
+    session.connectAbort.abort();
     session.closed = true;
     clearTimeout(session.resizeTimer);
     session.abort?.abort();
@@ -496,7 +523,7 @@
       ? servers.map((server) => `<option value="${escapeHtml(server.id)}">${escapeHtml(`${server.name || server.host} · ${server.user || ''}@${server.host || ''}`)}</option>`).join('')
       : `<option value="">${escapeHtml(t('terminal.noServers'))}</option>`;
     if (servers.some((server) => server.id === previous)) select.value = previous;
-    $v('#term-connect').disabled = !servers.length;
+    renderConnectButton();
   }
 
   function setPane(name) {
@@ -517,6 +544,7 @@
 
   function bind() {
     $v('#term-connect').addEventListener('click', connect);
+    $v('#term-cancel-connect').addEventListener('click', () => { if (connectingSession) disposeSession(connectingSession); });
     $v('#term-manage-servers').addEventListener('click', () => openServerManager());
     $v('#term-tabs').addEventListener('click', (event) => {
       const close = event.target.closest('[data-close]');

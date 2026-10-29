@@ -16,6 +16,35 @@ type bridgeRecorder struct {
 	changed chan struct{}
 }
 
+func TestBridgeCloseCancelsWindowRequests(t *testing.T) {
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	b := newBridge(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(cancelled)
+	}), func(string) {})
+	b.request("stream", "GET", "/api/stream", nil)
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("request did not start")
+	}
+	b.body("upload", base64.StdEncoding.EncodeToString([]byte("pending")))
+	b.close()
+	select {
+	case <-cancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("window close did not cancel its stream")
+	}
+	b.body("late-upload", base64.StdEncoding.EncodeToString([]byte("ignored")))
+	b.request("late-request", "GET", "/api/stream", nil)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.closed || len(b.bodies) != 0 {
+		t.Fatal("closed bridge retained uploads or accepted a late request")
+	}
+}
+
 func newBridgeRecorder() *bridgeRecorder { return &bridgeRecorder{changed: make(chan struct{}, 64)} }
 
 func (r *bridgeRecorder) emit(script string) {

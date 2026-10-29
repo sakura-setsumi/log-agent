@@ -33,7 +33,7 @@ import (
 
 // The frontend is embedded so the whole dashboard can be shipped as one Go binary.
 //
-//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js menubar.js terminal.js server-icon.svg commands-icon.svg database.js database.css database-icon.svg table-icon.svg warehouse-icon.svg redis.js redis.css redis-icon.svg third_party/database/* third_party/xterm/xterm.js third_party/xterm/xterm.css third_party/xterm/addon-fit.js favicon.png brand-logo.png ai-icon.png loading.gif
+//go:embed index.html styles.css app.js i18n.js assistant-ui.js bootstrap.js menubar.js terminal.js detached.js server-icon.svg commands-icon.svg database.js database.css database-icon.svg table-icon.svg warehouse-icon.svg redis.js redis.css redis-icon.svg third_party/database/* third_party/xterm/xterm.js third_party/xterm/xterm.css third_party/xterm/addon-fit.js favicon.png brand-logo.png ai-icon.png loading.gif
 var frontend embed.FS
 
 const (
@@ -428,7 +428,7 @@ func (s *server) handleCommandConnectionTest(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_user"})
 		return
 	}
-	if strings.TrimSpace(request.Secret) == "" {
+	if request.Auth != "password" && strings.TrimSpace(request.Secret) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_secret"})
 		return
 	}
@@ -453,6 +453,10 @@ func dialCommandSSH(request commandConnectionRequest) error {
 }
 
 func newCommandSSHClient(request commandConnectionRequest) (*ssh.Client, error) {
+	return newCommandSSHClientContext(context.Background(), request)
+}
+
+func newCommandSSHClientContext(ctx context.Context, request commandConnectionRequest) (*ssh.Client, error) {
 	var authMethod ssh.AuthMethod
 	if request.Auth == "password" {
 		authMethod = ssh.Password(request.Secret)
@@ -473,9 +477,27 @@ func newCommandSSHClient(request commandConnectionRequest) (*ssh.Client, error) 
 		}
 		return nil
 	}
-	return ssh.Dial("tcp", net.JoinHostPort(request.Host, request.Port), &ssh.ClientConfig{
-		User: request.User, Auth: []ssh.AuthMethod{authMethod}, HostKeyCallback: hostKeyCallback, Timeout: 5 * time.Second,
+	address := net.JoinHostPort(request.Host, request.Port)
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	sshConn, channels, requests, err := ssh.NewClientConn(conn, address, &ssh.ClientConfig{
+		User: request.User, Auth: []ssh.AuthMethod{authMethod}, HostKeyCallback: hostKeyCallback,
 	})
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if !stop() || ctx.Err() != nil {
+		_ = sshConn.Close()
+		return nil, ctx.Err()
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return ssh.NewClient(sshConn, channels, requests), nil
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
@@ -531,7 +553,7 @@ func (s *server) handleCommandFileUpload(w http.ResponseWriter, r *http.Request)
 	if request.Port == "" {
 		request.Port = "22"
 	}
-	if request.Host == "" || request.User == "" || request.Secret == "" || request.Fingerprint == "" {
+	if request.Host == "" || request.User == "" || (request.Auth != "password" && strings.TrimSpace(request.Secret) == "") || request.Fingerprint == "" {
 		fail(http.StatusBadRequest, map[string]string{"error": "incomplete_connection"})
 		return
 	}
@@ -969,7 +991,7 @@ func (s *server) handleCommandExecute(w http.ResponseWriter, r *http.Request) {
 	if request.Port == "" {
 		request.Port = "22"
 	}
-	if request.Host == "" || request.User == "" || request.Secret == "" || request.Fingerprint == "" || request.Command == "" {
+	if request.Host == "" || request.User == "" || (request.Auth != "password" && strings.TrimSpace(request.Secret) == "") || request.Fingerprint == "" || request.Command == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "incomplete_execution"})
 		return
 	}
@@ -2578,6 +2600,10 @@ func requireFileBackend(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *server) handleNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPut {
+		s.reorderNodes(w, r)
+		return
+	}
 	if r.Method == http.MethodDelete {
 		s.unbindNode(w, r.URL.Query().Get("id"))
 		return

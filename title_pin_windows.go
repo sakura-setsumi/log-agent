@@ -5,6 +5,9 @@ package main
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -29,15 +32,16 @@ var (
 	pinEndPaint        = user32.NewProc("EndPaint")
 	pinFillRect        = user32.NewProc("FillRect")
 	pinCreateBrush     = pinGDI.NewProc("CreateSolidBrush")
-	pinCreatePen       = pinGDI.NewProc("CreatePen")
+	pinCreateFont      = pinGDI.NewProc("CreateFontW")
+	pinSetTextColor    = pinGDI.NewProc("SetTextColor")
+	pinSetBkMode       = pinGDI.NewProc("SetBkMode")
+	pinDrawText        = user32.NewProc("DrawTextW")
 	pinSelectObject    = pinGDI.NewProc("SelectObject")
 	pinDeleteObject    = pinGDI.NewProc("DeleteObject")
-	pinMoveTo          = pinGDI.NewProc("MoveToEx")
-	pinLineTo          = pinGDI.NewProc("LineTo")
 	pinGetCaptionColor = windows.NewLazySystemDLL("dwmapi.dll").NewProc("DwmGetWindowAttribute")
 	pinOwnerCallback   uintptr
 	pinButtonCallback  uintptr
-	captionPins        = map[uintptr]*captionPin{}
+	captionPins        sync.Map
 )
 
 func init() {
@@ -93,7 +97,8 @@ func installCaptionPin(owner uintptr) (*captionPin, error) {
 	if p.button == 0 {
 		return nil, fmt.Errorf("create title-bar pin button")
 	}
-	captionPins[owner], captionPins[p.button] = p, p
+	captionPins.Store(owner, p)
+	captionPins.Store(p.button, p)
 	ok, _, _ := pinSetSubclass.Call(owner, pinOwnerCallback, 1, 0)
 	if ok == 0 {
 		p.close()
@@ -128,8 +133,8 @@ func (p *captionPin) close() {
 	p.closed = true
 	pinRemoveSubclass.Call(p.owner, pinOwnerCallback, 1)
 	pinRemoveSubclass.Call(p.button, pinButtonCallback, 1)
-	delete(captionPins, p.owner)
-	delete(captionPins, p.button)
+	captionPins.Delete(p.owner)
+	captionPins.Delete(p.button)
 	if p.tooltip != 0 {
 		pinDestroyWindow.Call(p.tooltip)
 	}
@@ -151,7 +156,8 @@ func (p *captionPin) position() {
 	procSendMessage.Call(p.owner, 0x033F, 0, uintptr(unsafe.Pointer(&info))) // WM_GETTITLEBARINFOEX
 	minimize := info.Rects[2]
 	if minimize.Right <= minimize.Left || minimize.Bottom <= minimize.Top {
-		procShowWindow.Call(p.button, 0)
+		// Caption bounds can be transiently unavailable during a frame change.
+		// Keep the last valid position instead of hiding the button.
 		return
 	}
 	dpi, _, _ := pinGetDPI.Call(p.owner)
@@ -160,7 +166,7 @@ func (p *captionPin) position() {
 		width = 40
 	}
 	pinSetWindowPos.Call(p.button, 0, uintptr(minimize.Left-width), uintptr(minimize.Top),
-		uintptr(width), uintptr(minimize.Bottom-minimize.Top), 0x0054) // NOZORDER | NOACTIVATE | SHOWWINDOW
+		uintptr(width), uintptr(minimize.Bottom-minimize.Top), 0x0250) // HWND_TOP; NOOWNERZORDER | NOACTIVATE | SHOWWINDOW
 }
 
 func (p *captionPin) toggle() {
@@ -182,12 +188,14 @@ func (p *captionPin) toggle() {
 		tool := p.toolInfo()
 		procSendMessage.Call(p.tooltip, 0x0439, 0, uintptr(unsafe.Pointer(&tool))) // TTM_UPDATETIPTEXTW
 	}
-	// The glyph angle indicates state; the background only changes on hover.
-	pinInvalidate.Call(p.button, 0, 0)
+	// Restore placement and stacking after Windows changes the owner topmost band.
+	p.position()
+	user32.NewProc("RedrawWindow").Call(p.button, 0, 0, 0x0101) // INVALIDATE | UPDATENOW
 }
 
 func captionPinOwnerProc(hwnd, msg, wp, lp, id, data uintptr) uintptr {
-	p := captionPins[hwnd]
+	value, _ := captionPins.Load(hwnd)
+	p, _ := value.(*captionPin)
 	if p != nil && msg == 0x0082 {
 		p.close()
 	} // WM_NCDESTROY
@@ -207,7 +215,8 @@ func captionPinOwnerProc(hwnd, msg, wp, lp, id, data uintptr) uintptr {
 }
 
 func captionPinButtonProc(hwnd, msg, wp, lp, id, data uintptr) uintptr {
-	p := captionPins[hwnd]
+	value, _ := captionPins.Load(hwnd)
+	p, _ := value.(*captionPin)
 	if p != nil {
 		switch msg {
 		case 0x0318: // WM_PRINTCLIENT: support native previews and paint verification.
@@ -271,7 +280,7 @@ func (p *captionPin) paint() {
 func (p *captionPin) draw(dc uintptr) {
 	var rect pinRect
 	pinGetClientRect.Call(p.button, uintptr(unsafe.Pointer(&rect)))
-	background, foreground := uint32(0xF3F3F3), uint32(0x444444)
+	background, foreground := uint32(0xF3F3F3), uint32(0x000000)
 	var captionColor uint32
 	result, _, _ := pinGetCaptionColor.Call(p.owner, 35, uintptr(unsafe.Pointer(&captionColor)), 4)
 	if result == 0 && captionColor < 0x1000000 {
@@ -280,7 +289,7 @@ func (p *captionPin) draw(dc uintptr) {
 	var dark int32
 	pinGetCaptionColor.Call(p.owner, 20, uintptr(unsafe.Pointer(&dark)), 4)
 	if dark != 0 {
-		background, foreground = 0x202020, 0xEEEEEE
+		background, foreground = 0x202020, 0xFFFFFF
 	}
 	if p.hovered {
 		if dark != 0 {
@@ -291,40 +300,44 @@ func (p *captionPin) draw(dc uintptr) {
 	}
 	style, _, _ := pinGetWindowLong.Call(p.owner, ^uintptr(19))
 	if style&8 != 0 {
-		foreground = 0x1677C4 // #c47716, COLORREF uses BGR byte order.
+		foreground = 0x1677C4 // Selected: original orange, in COLORREF (BGR) order.
 		if dark != 0 {
 			foreground = 0x37A6F6
-		} // #f6a637
+		}
 	}
 	brush, _, _ := pinCreateBrush.Call(uintptr(background))
 	pinFillRect.Call(dc, uintptr(unsafe.Pointer(&rect)), brush)
 	pinDeleteObject.Call(brush)
+	// Use Microsoft's stock Pin/Pinned glyphs, rendered by the system icon font.
+	// Windows 10 provides the same glyphs through Segoe MDL2 Assets.
 	scale := float64(rect.Bottom) / 30
-	penWidth := uintptr(math.Max(1, math.Round(scale)))
-	pen, _, _ := pinCreatePen.Call(0, penWidth, uintptr(foreground))
-	old, _, _ := pinSelectObject.Call(dc, pen)
-	// A small outlined pushpin. Coordinates are relative to the button centre.
-	points := [][2]float64{{-4, -6}, {4, -6}, {4, -4}, {2, -4}, {2, 0}, {5, 3}, {-5, 3}, {-2, 0}, {-2, -4}, {-4, -4}, {-4, -6}}
-	angle := math.Pi / 6
+	height := int32(math.Max(1, math.Round(16*0.9*scale)))
+	font, _, _ := pinCreateFont.Call(uintptr(-height), 0, 0, 0, 400, 0, 0, 0,
+		1, 0, 0, 3, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(captionPinIconFont)))) // NONANTIALIASED_QUALITY: match the native caption strokes
+	if font == 0 {
+		return
+	}
+	oldFont, _, _ := pinSelectObject.Call(dc, font)
+	defer func() {
+		pinSelectObject.Call(dc, oldFont)
+		pinDeleteObject.Call(font)
+	}()
+	oldColor, _, _ := pinSetTextColor.Call(dc, uintptr(foreground))
+	defer pinSetTextColor.Call(dc, oldColor)
+	oldMode, _, _ := pinSetBkMode.Call(dc, 1) // TRANSPARENT
+	defer pinSetBkMode.Call(dc, oldMode)
+	glyph := uint16(0xE718) // Pin
 	if style&8 != 0 {
-		angle = 0
+		glyph = 0xE840 // Pinned
 	}
-	coord := func(x, y float64) (uintptr, uintptr) {
-		rx, ry := x*math.Cos(angle)-y*math.Sin(angle), x*math.Sin(angle)+y*math.Cos(angle)
-		return uintptr(int32(math.Round(float64(rect.Right)/2 + rx*scale))), uintptr(int32(math.Round(float64(rect.Bottom)/2 + ry*scale)))
-	}
-	for i, point := range points {
-		x, y := coord(point[0], point[1])
-		if i == 0 {
-			pinMoveTo.Call(dc, x, y, 0)
-		} else {
-			pinLineTo.Call(dc, x, y)
-		}
-	}
-	x, y := coord(0, 3)
-	pinMoveTo.Call(dc, x, y, 0)
-	x, y = coord(0, 8)
-	pinLineTo.Call(dc, x, y)
-	pinSelectObject.Call(dc, old)
-	pinDeleteObject.Call(pen)
+	pinDrawText.Call(dc, uintptr(unsafe.Pointer(&glyph)), 1, uintptr(unsafe.Pointer(&rect)),
+		0x0001|0x0004|0x0020|0x0800) // CENTER | VCENTER | SINGLELINE | NOPREFIX
 }
+
+// Prefer Windows 11's Fluent library, with the Windows 10 icon library as fallback.
+var captionPinIconFont = func() string {
+	if _, err := os.Stat(filepath.Join(os.Getenv("SystemRoot"), "Fonts", "SegoeIcons.ttf")); err == nil {
+		return "Segoe Fluent Icons"
+	}
+	return "Segoe MDL2 Assets"
+}()

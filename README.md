@@ -99,6 +99,10 @@ The editor recognizes queries, writes and DDL separated by semicolons (the last 
 
 Table and SQL-result edits and deletions are staged locally until Commit; Roll back restores the loaded values. Result rows can be selected for deletion. Commit all submits pending changes from every open result/table page, grouping all tables in each source database into one transaction. Conflicting edits to the same row across pages must be resolved before submission. Successful source databases stay committed if another source fails, and failed drafts remain pending. Data edits use one transaction for each source database: successful changes commit together and a failed statement or conflicting update rolls the batch back. MySQL tables must use a transactional engine such as InnoDB; nontransactional tables are rejected before applying edits. There is no manually held editing transaction or distributed transaction spanning connections.
 
+Drag a page in the left navigation away from the navigation rail and release to open it in an independent window. All windows share the backend and saved local configuration; closing one leaves the others running. Each new window initializes its own page session; unsaved SQL drafts and active terminal sessions remain in their original window. Press Escape while dragging to cancel.
+
+左侧功能页签可按住并拖离导航栏，松开后打开独立窗口；拖动时按 Esc 可取消。各窗口共用后端和已保存的本地配置，关闭一个窗口不会关闭其他窗口。新窗口会初始化独立页面会话，未保存的 SQL 草稿及现有终端会话仍留在原窗口。
+
 The editor and grids use CodeMirror 6 and Tabulator; schema inspection and migration planning use Atlas, with go-sql-driver/mysql, pgx and modernc SQLite drivers. All browser assets are embedded and work offline. To rebuild the pinned browser dependencies (Node.js and pnpm required):
 
 ```bash
@@ -111,15 +115,19 @@ node scripts/database-ui/build.mjs
 
 The **Redis** sidebar tab uses the official `go-redis/v9` client and the bundled CodeMirror 6 editor. The top **Redis** menu provides **New connection** and **Manage connections…**; the manager lists connections with Connect, Edit and Delete actions. Create a connection with host, port, optional ACL username/password and optional TLS with certificate verification. Connection profiles are stored in `data/redis.json`; passwords are omitted from API listings, and leaving the password blank when editing retains it. Use the clear-password checkbox to remove it.
 
-Choose a DB number and click Open. Search uses Redis glob patterns (`biz:*`); keys are grouped by colons. SCAN loads keys in batches without KEYS, up to 10,000 loaded keys per search. A batch may contain no matching keys while more batches remain. Refresh restarts the scan. INFO keyspace supplies optional DB counts; browsing still works when INFO is unavailable.
+The top toolbar provides connection selection, key search and refresh. Connections open DB 0. Search uses Redis glob patterns (`biz:*`); keys are grouped by colons. SCAN loads keys in batches without KEYS, up to 10,000 loaded keys per search. A batch may contain no matching keys while more batches remain. Refresh restarts the scan.
 
 Hover or select a key to reveal Copy value and Delete buttons on its row. Copy exports the loaded string exactly, or a collection as JSON; incomplete/binary previews cannot be copied in full. Ctrl+C outside text fields copies the selected key's value while preserving normal editor/text-selection copy. Deletion asks for confirmation and deleting another row preserves the current editor.
+
+Namespace folders provide Reload namespace (Ctrl+R), Add key and Delete namespace actions. Reload scans the full exact prefix, including keys not loaded in the global key list. Prefix characters such as `*`, `?`, `[` and `]` are matched literally. Namespace deletion first previews the exact key count, asks for confirmation, and rejects a changed key list before deleting only confirmed key names in batches. Operations are limited to 10,000 keys; a failed batch reports how many keys were deleted so the remaining keys can be verified by reloading.
+
+Add key opens a dialog prefilled with the folder prefix. Choose String, Hash, List, Set or Sorted Set, set TTL, edit plain text/JSON, or import a UTF-8 file up to 2 MiB. Existing key names are rejected rather than overwritten. Opening/cancelling the dialog preserves pending edits in the main value editor.
 
 String, Hash, List, Set and Sorted Set values can be created and edited. Strings support exact text or JSON validation/formatting; collections use JSON. Sorted Sets use `[{"Score":1,"Member":"value"}]`. Save preserves the original expiry by default; TTL accepts positive seconds, `-1` for no expiry, and `-2` to preserve expiry. Delete asks for confirmation. Writes use WATCH/MULTI to reject changes made since the loaded preview; reload a conflicting key before retrying.
 
 Collection previews are limited to about 500 entries and 2 MiB of serialized content. Incomplete previews, binary values and Streams are read-only; supported previews can still be deleted or have their TTL changed. This workspace connects directly to standalone Redis or a compatible single endpoint; Sentinel discovery, Cluster topology and SSH tunnels are not configured here. Like the database workspace, Redis APIs are available only to the local file-backed client. `redis.json` contains credentials in plain text and should not be committed or shared.
 
-“Redis”页签位于左侧“数据库”下方，支持连接管理、ACL 认证、TLS、DB 切换、冒号分组键树、SCAN 分批搜索、键值新增/编辑/删除及 TTL 管理。值编辑复用 CodeMirror；String、Hash、List、Set、ZSet 支持编辑，Stream、大集合和二进制数据仅预览。连接保存在本地 `data/redis.json`。
+“Redis”页签位于左侧“数据库”下方，顶部工具栏提供连接选择、键名搜索和刷新，连接默认打开 DB 0。支持连接管理、ACL 认证、TLS、冒号分组键树、SCAN 分批搜索、键值新增/编辑/删除及 TTL 管理。值编辑复用 CodeMirror；String、Hash、List、Set、ZSet 支持编辑，Stream、大集合和二进制数据仅预览。连接保存在本地 `data/redis.json`。
 
 ## Development and tests
 

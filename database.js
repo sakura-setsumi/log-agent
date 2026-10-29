@@ -1,6 +1,7 @@
 // Database workspace. Mature editor/grid components are bundled locally; all
 // database traffic goes through the existing in-process Go bridge.
 const databaseLabels = {
+  resizeSQL: ['Resize SQL editor', '调整 SQL 编辑区高度'],
   insertValues: ['Edit inserted values', '编辑插入值'], addValueRow: ['Add row', '添加一行'], bulkValues: ['Paste multiple rows (CSV / spreadsheet)', '粘贴批量值（CSV / 表格）'], bulkValuesHint: ['Column order matches the selected fields. Paste tab-separated or comma-separated rows. Unquoted NULL means database NULL.', '列顺序与已选字段一致；支持粘贴表格或逗号分隔的多行数据，未加引号的 NULL 表示数据库空值。'], importValues: ['Add pasted rows', '添加批量值'], invalidValues: ['Check the value format and number of selected columns.', '请检查值的格式，每行列数须与已选字段数一致。'],
 
   commitAll: ['Commit all pending changes', '提交全部待提交修改'], resultPending: ['{count} pending row change(s) · Commit to save', '{count} 行待提交 · 点击提交后生效'], pendingPages: ['{count} page(s) with pending changes', '{count} 个页面有待提交修改'], transactionDone: ['Committed {count} row change(s)', '已提交 {count} 行修改'], transactionPartial: ['Some source databases failed; their pending changes are retained. Successful transactions remain committed.', '部分来源数据库提交失败，其修改仍保留待提交；成功事务已提交。'], conflictingDrafts: ['The same row has conflicting changes across pages. Resolve them or roll back one page before committing.', '同一行在多个页面有冲突的修改，请先调整或回滚其中一页。'],
@@ -1435,7 +1436,7 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
   function renderConnectionManager() {
     const list = el('db-manager-list'), search = el('db-manager-search').value.trim().toLowerCase();
     const profiles = ui.profiles.filter(p => [p.name, p.engine, p.host, p.user, p.database, p.file].some(value => String(value || '').toLowerCase().includes(search)));
-    list.innerHTML = profiles.length ? profiles.map(p => `<button type="button" class="db-manager-row" data-db-manager-edit="${escaped(p.id)}"><span><strong>${escaped(p.name)}</strong><small>${escaped(p.engine === 'sqlite' ? p.file : `${p.host}:${p.port} · ${p.user}${p.database ? ` / ${p.database}` : ''}`)}</small></span><span class="db-manager-engine">${escaped(p.engine)}</span><span>${text('editConnection')} ›</span></button>`).join('') : `<p class="db-manager-empty">${text(ui.profiles.length ? 'noConnectionMatches' : 'emptyConnections')}</p>`;
+    list.innerHTML = profiles.length ? profiles.map(p => `<button type="button" class="db-manager-row" draggable="true" data-db-manager-edit="${escaped(p.id)}"><i class="connection-order-handle" title="${t('commands.dragToReorder')}" aria-hidden="true">⁙</i><span><strong>${escaped(p.name)}</strong><small>${escaped(p.engine === 'sqlite' ? p.file : `${p.host}:${p.port} · ${p.user}${p.database ? ` / ${p.database}` : ''}`)}</small></span><span class="db-manager-engine">${escaped(p.engine)}</span><span>${text('editConnection')} ›</span></button>`).join('') : `<p class="db-manager-empty">${text(ui.profiles.length ? 'noConnectionMatches' : 'emptyConnections')}</p>`;
   }
   window.openDatabaseManager = async () => {
     setView('database'); initialize(); el('db-manager-search').value = ''; renderConnectionManager();
@@ -1629,9 +1630,43 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     catch (error) { clearPlan(); dialogStatus('schema', error.message, true); }
   }
 
+  function initializeSQLSplitter() {
+    const splitter = el('db-sql-splitter'), pane = el('db-panel-sql');
+    let drag = null, frame = 0;
+    const setHeight = height => {
+      const style = getComputedStyle(pane), min = parseFloat(style.minHeight), max = parseFloat(style.maxHeight);
+      const next = Math.max(min, Math.min(max, height));
+      pane.style.height = `${next}px`;
+      splitter.setAttribute('aria-valuenow', String(Math.round(next)));
+      splitter.setAttribute('aria-valuemin', String(Math.round(min)));
+      splitter.setAttribute('aria-valuemax', String(Math.round(max)));
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; resizeGrids(); });
+    };
+    splitter.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || drag) return;
+      drag = { id: event.pointerId, y: event.clientY, height: pane.getBoundingClientRect().height };
+      splitter.setPointerCapture(event.pointerId);
+      splitter.classList.add('dragging'); document.body.classList.add('db-sql-resizing');
+      event.preventDefault();
+    });
+    splitter.addEventListener('pointermove', event => {
+      if (drag?.id === event.pointerId) setHeight(drag.height + event.clientY - drag.y);
+    });
+    const stop = event => {
+      if (drag?.id !== event.pointerId) return;
+      drag = null; splitter.classList.remove('dragging'); document.body.classList.remove('db-sql-resizing');
+      if (splitter.hasPointerCapture(event.pointerId)) splitter.releasePointerCapture(event.pointerId);
+    };
+    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) splitter.addEventListener(name, stop);
+    splitter.addEventListener('keydown', event => {
+      if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+      event.preventDefault(); setHeight(pane.getBoundingClientRect().height + (event.key === 'ArrowUp' ? -10 : 10));
+    });
+  }
   function initialize() {
     if (ui.initialized) return; ui.initialized = true;
     ui.editor = DatabaseUI.createEditor(el('db-sql-editor'), () => runSQL(), (scope, sql) => runSQL('run', { scope, sql }), editorChanged, slot => openInlinePicker(slot), slotLabels());
+    initializeSQLSplitter();
     if (!restoreSQLTabs()) createSQLTab();
     const theme = () => ui.editor.theme(document.documentElement.dataset.theme === 'dark'); theme(); new MutationObserver(theme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     loadProfiles().catch(error => status(error.message, true));
@@ -1733,6 +1768,19 @@ i18n.en['nav.database'] = 'Database'; i18n.zh['nav.database'] = '数据库';
     el('db-delete-row').addEventListener('click', async () => { await Promise.all((ui.grids.data?.getSelectedRows() || []).filter(row => row.getData().__new || ui.tableResponse?.editable).map(row => row.getData().__new ? row.delete() : row.update({ __delete: true }))); updateDirty(); });
     el('db-page-prev').addEventListener('click', () => ui.table && openTable(ui.table, { page: Math.max(0, ui.page - 1) })); el('db-page-next').addEventListener('click', () => ui.table && openTable(ui.table, { page: ui.page + 1 })); el('db-page-last').addEventListener('click', () => ui.table && openTable(ui.table, { last: true })); el('db-page-size').addEventListener('change', () => ui.table && openTable(ui.table, { page: 0, pageSize: el('db-page-size').value, reload: true }));
     for (const [id, action] of [['db-create-table', 'createTable'], ['db-add-column', 'addColumn'], ['db-alter-column', 'alterColumn'], ['db-create-index', 'createIndex'], ['db-drop-index', 'dropIndex']]) el(id).addEventListener('click', () => openDesigner(action));
+    bindConnectionReorder(el('db-manager-list'), '.db-manager-row', row => row.dataset.dbManagerEdit, async (from, to, after) => {
+      const previous = [...ui.profiles];
+      if (!moveConnectionItem(ui.profiles, from, to, after)) return;
+      renderTree(); renderTargets(); renderConnectionManager();
+      dialogStatus('manager', text('loading'));
+      try {
+        await api('profiles', { method: 'PUT', body: { order: ui.profiles.map(profile => profile.id) } });
+        dialogStatus('manager', '');
+      } catch (error) {
+        ui.profiles = previous; renderTree(); renderTargets(); renderConnectionManager();
+        dialogStatus('manager', error.message, true);
+      }
+    });
     el('db-manager-search').addEventListener('input', renderConnectionManager);
     el('db-manager-new').addEventListener('click', () => window.openDatabaseConnection());
     el('db-manager-list').addEventListener('click', event => { const button = event.target.closest('[data-db-manager-edit]'); if (button) window.openDatabaseConnection(button.dataset.dbManagerEdit); });

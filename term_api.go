@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -215,7 +216,7 @@ func (s *server) handleTermOpen(w http.ResponseWriter, r *http.Request) {
 	case request.User == "":
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_user"})
 		return
-	case strings.TrimSpace(request.Secret) == "":
+	case request.Auth != "password" && strings.TrimSpace(request.Secret) == "":
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_secret"})
 		return
 	}
@@ -226,7 +227,7 @@ func (s *server) handleTermOpen(w http.ResponseWriter, r *http.Request) {
 		request.Rows = termDefaultRows
 	}
 
-	client, err := newCommandSSHClient(request.commandConnectionRequest)
+	client, err := newCommandSSHClientContext(r.Context(), request.commandConnectionRequest)
 	if err != nil {
 		var hostKeyError *commandHostKeyError
 		if errors.As(err, &hostKeyError) {
@@ -236,6 +237,8 @@ func (s *server) handleTermOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "connect_failed", "detail": err.Error()})
 		return
 	}
+	stopSetup := context.AfterFunc(r.Context(), func() { _ = client.Close() })
+	defer stopSetup()
 	session, err := client.NewSession()
 	if err != nil {
 		_ = client.Close()
@@ -265,6 +268,16 @@ func (s *server) handleTermOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "shell_failed", "detail": err.Error()})
 		return
 	}
+	if !stopSetup() || r.Context().Err() != nil {
+		t.close()
+		return
+	}
+	defer func() {
+		if r.Context().Err() != nil {
+			termSessions.remove(t.id)
+			t.close()
+		}
+	}()
 	if !termSessions.add(t) {
 		t.close()
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too_many_sessions"})

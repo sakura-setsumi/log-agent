@@ -23,6 +23,10 @@ import (
 // answers a PTY shell by echoing what it is sent, and serves an in-memory SFTP
 // file system. It returns the address and the fingerprint of its host key.
 func startFakeSSHServer(t *testing.T) (host, port, fingerprint string) {
+	return startFakeSSHServerWithPassword(t, "pw")
+}
+
+func startFakeSSHServerWithPassword(t *testing.T, acceptedPassword string) (host, port, fingerprint string) {
 	t.Helper()
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -33,7 +37,7 @@ func startFakeSSHServer(t *testing.T) (host, port, fingerprint string) {
 		t.Fatal(err)
 	}
 	config := &ssh.ServerConfig{PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-		if conn.User() == "tester" && string(password) == "pw" {
+		if conn.User() == "tester" && string(password) == acceptedPassword {
 			return nil, nil
 		}
 		return nil, io.ErrUnexpectedEOF

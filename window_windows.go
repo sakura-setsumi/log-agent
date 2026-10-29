@@ -15,6 +15,9 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"unsafe"
 
 	webview2 "github.com/jchv/go-webview2"
@@ -74,13 +77,93 @@ func runDesktop(handler http.Handler) error {
 	if err := os.MkdirAll(dataPath, 0o755); err != nil {
 		return fmt.Errorf("webview data folder: %w", err)
 	}
+	manager := &desktopWindows{handler: handler, dataPath: dataPath, done: make(chan struct{}), active: 1}
+	err = manager.run("", 0, 0, nil)
+	manager.release()
+	<-manager.done
+	return err
+}
+
+// Each WebView owns an STA thread and message loop. Closing one window only
+// quits that thread; keep the shared backend alive until the last window closes.
+type desktopWindows struct {
+	handler  http.Handler
+	dataPath string
+	mu       sync.Mutex
+	active   int
+	closed   bool
+	done     chan struct{}
+	handles  map[uintptr]string
+}
+
+var detachedViewTitles = map[string]string{
+	"overview": "实时日志流", "rules": "加工规则", "connections": "连接管理",
+	"commands": "指令集组", "terminal": "服务器", "database": "数据库", "redis": "Redis",
+}
+
+func (m *desktopWindows) release() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.active--
+	if m.active == 0 {
+		m.closed = true
+		close(m.done)
+	}
+}
+
+func (m *desktopWindows) open(view string, x, y int) error {
+	ready, err := m.start(view, x, y)
+	if err != nil {
+		return err
+	}
+	return <-ready
+}
+
+func (m *desktopWindows) start(view string, x, y int) (<-chan error, error) {
+	if _, ok := detachedViewTitles[view]; !ok {
+		return nil, fmt.Errorf("unknown view: %s", view)
+	}
+	if x < -100000 || x > 100000 || y < -100000 || y > 100000 {
+		return nil, errors.New("invalid window position")
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, errors.New("application has closed")
+	}
+	m.active++
+	m.mu.Unlock()
+	ready := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		defer m.release()
+		if err := m.run(view, x, y, ready); err != nil {
+			ready <- err
+		}
+	}()
+	return ready, nil
+}
+
+func (m *desktopWindows) run(view string, x, y int, ready chan<- error) error {
+	// The library initializes COM only on its package-init thread.
+	ole32 := windows.NewLazySystemDLL("ole32.dll")
+	hr, _, _ := ole32.NewProc("CoInitializeEx").Call(0, 2)
+	if int32(hr) < 0 {
+		return fmt.Errorf("initialize window COM: %08x", hr)
+	}
+	defer ole32.NewProc("CoUninitialize").Call()
+	title := windowTitle
+	if view != "" {
+		title += " · " + detachedViewTitles[view]
+	}
 	debug := strings.TrimSpace(os.Getenv("LOG_AGENT_DEBUG")) == "1"
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     debug,
-		DataPath:  dataPath,
+		DataPath:  m.dataPath,
 		AutoFocus: true,
 		WindowOptions: webview2.WindowOptions{
-			Title:  windowTitle,
+			Title:  title,
 			Width:  1440,
 			Height: 900,
 			Center: true,
@@ -92,7 +175,19 @@ func runDesktop(handler http.Handler) error {
 		return errors.New("WebView2 runtime is not available")
 	}
 	defer w.Destroy()
+	defer closeDesktopBrowser(w)
+	hwnd := uintptr(w.Window())
+	m.mu.Lock()
+	if m.handles == nil {
+		m.handles = make(map[uintptr]string)
+	}
+	m.handles[hwnd] = view
+	m.mu.Unlock()
+	defer func() { m.mu.Lock(); delete(m.handles, hwnd); m.mu.Unlock() }()
 	w.SetSize(1440, 900, webview2.HintNone)
+	if view != "" {
+		pinSetWindowPos.Call(uintptr(w.Window()), 0, uintptr(x-40), uintptr(y-16), 0, 0, 0x0015)
+	}
 	setWindowIcon(uintptr(w.Window()))
 	pin, err := installCaptionPin(uintptr(w.Window()))
 	if err != nil {
@@ -100,19 +195,46 @@ func runDesktop(handler http.Handler) error {
 	}
 	defer pin.close()
 
-	if err := serveFrontend(w, handler); err != nil {
+	if err := serveFrontend(w, m.handler); err != nil {
 		return err
 	}
 
-	b := newBridge(handler, func(script string) {
-		w.Dispatch(func() { w.Eval(script) })
-	})
+	var alive atomic.Bool
+	alive.Store(true)
+	emit := func(script string) {
+		if alive.Load() {
+			w.Dispatch(func() {
+				if alive.Load() {
+					w.Eval(script)
+				}
+			})
+		}
+	}
+	b := newBridge(m.handler, emit)
+	defer func() { alive.Store(false); b.close() }()
 	bindings := map[string]interface{}{
 		"__lbBody":         func(id, chunk string) { b.body(id, chunk) },
 		"__lbRequest":      func(id, method, target string, headers map[string]string) { b.request(id, method, target, headers) },
 		"__lbCancel":       func(id string) { b.cancel(id) },
 		"__lbOpenExternal": openExternal,
 		"__lbQuit":         func() { w.Destroy() },
+		// WebMessageReceived runs on the caller's STA. Never wait for another
+		// WebView to initialize inside that callback: the shared runtime needs
+		// the original STA to keep pumping messages during window creation.
+		"__lbOpenViewRequest": func(token, view string, x, y int) error {
+			ready, err := m.start(view, x, y)
+			if err != nil {
+				return err
+			}
+			go func() {
+				message := ""
+				if err := <-ready; err != nil {
+					message = err.Error()
+				}
+				emit(fmt.Sprintf("window.__lbViewResult(%s,%s)", jsonString(token), jsonString(message)))
+			}()
+			return nil
+		},
 	}
 	for name, fn := range bindings {
 		if err := w.Bind(name, fn); err != nil {
@@ -121,7 +243,14 @@ func runDesktop(handler http.Handler) error {
 	}
 	w.Init(bridgeScript)
 
-	w.Navigate(bridgeOrigin + "/")
+	target := bridgeOrigin + "/"
+	if view != "" {
+		target += "?detached=" + view
+	}
+	w.Navigate(target)
+	if ready != nil {
+		ready <- nil
+	}
 	w.Run()
 	return nil
 }
@@ -136,15 +265,47 @@ func instanceName() string {
 // serveFrontend answers requests for the virtual origin from the embedded
 // files. go-webview2 does not expose the underlying browser, so it is read from
 // the unexported field; the library version is pinned in go.mod.
-func serveFrontend(w webview2.WebView, handler http.Handler) error {
+func desktopBrowser(w webview2.WebView) (*edge.Chromium, error) {
 	field := reflect.ValueOf(w).Elem().FieldByName("browser")
 	if !field.IsValid() {
-		return errors.New("unsupported go-webview2 version: no browser field")
+		return nil, errors.New("unsupported go-webview2 version: no browser field")
 	}
 	browser := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Interface()
 	chromium, ok := browser.(*edge.Chromium)
 	if !ok {
-		return fmt.Errorf("unsupported go-webview2 version: browser is %T", browser)
+		return nil, fmt.Errorf("unsupported go-webview2 version: browser is %T", browser)
+	}
+	return chromium, nil
+}
+
+// The pinned wrapper does not close its controller or release its COM objects
+// when Destroy posts WM_CLOSE. Release them on the owning STA after Run returns.
+func closeDesktopBrowser(w webview2.WebView) {
+	chromium, err := desktopBrowser(w)
+	if err != nil {
+		return
+	}
+	call := func(object reflect.Value, method string) {
+		if object.IsNil() {
+			return
+		}
+		fn := object.Elem().FieldByName("vtbl").Elem().FieldByName(method).Uint()
+		syscall.SyscallN(uintptr(fn), object.Pointer())
+	}
+	value := reflect.ValueOf(chromium).Elem()
+	controller, view, environment := value.FieldByName("controller"), value.FieldByName("webview"), value.FieldByName("environment")
+	call(controller, "Close")
+	// GetCoreWebView2 and the wrapper's extra AddRef each hold a reference.
+	call(view, "Release")
+	call(view, "Release")
+	call(controller, "Release")
+	call(environment, "Release")
+}
+
+func serveFrontend(w webview2.WebView, handler http.Handler) error {
+	chromium, err := desktopBrowser(w)
+	if err != nil {
+		return err
 	}
 
 	chromium.WebResourceRequestedCallback = func(request *edge.ICoreWebView2WebResourceRequest, args *edge.ICoreWebView2WebResourceRequestedEventArgs) {
@@ -198,7 +359,19 @@ func focusRunningWindow() {
 		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(windowTitle))),
 	)
 	if hwnd == 0 {
-		return
+		// The main window may have closed while detached pages are still open.
+		for _, label := range detachedViewTitles {
+			hwnd, _, _ = procFindWindow.Call(
+				uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(windowClass))),
+				uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(windowTitle+" · "+label))),
+			)
+			if hwnd != 0 {
+				break
+			}
+		}
+		if hwnd == 0 {
+			return
+		}
 	}
 	if minimized, _, _ := procIsIconic.Call(hwnd); minimized != 0 {
 		procShowWindow.Call(hwnd, uintptr(windows.SW_RESTORE))

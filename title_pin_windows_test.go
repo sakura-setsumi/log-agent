@@ -69,11 +69,47 @@ func TestCaptionPinNativeWindow(t *testing.T) {
 	if rect.Right != info.Rects[2].Left || rect.Top != info.Rects[2].Top || rect.Bottom != info.Rects[2].Bottom {
 		t.Fatalf("pin overlaps caption buttons: pin=%+v minimise=%+v", rect, info.Rects[2])
 	}
+	// Repeated real click messages must leave the caption button visible above
+	// its owner in both the normal and topmost bands.
+	for i := 0; i < 20; i++ {
+		procSendMessage.Call(p.button, 0x0201, 1, 10|(10<<16))
+		procSendMessage.Call(p.button, 0x0202, 0, 10|(10<<16))
+		if visible, _, _ := pinIsVisible.Call(p.button); visible == 0 {
+			t.Fatalf("pin disappeared after click %d", i+1)
+		}
+		found := false
+		for window := owner; window != 0; {
+			window, _, _ = user32.NewProc("GetWindow").Call(window, 3) // GW_HWNDPREV
+			if window == p.button {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("pin fell behind owner after click %d", i+1)
+		}
+	}
 	before := captureCaptionPin(t, p)
+	ink := 0
+	background := before.RGBAAt(0, 0)
+	for y := 0; y < before.Bounds().Dy(); y++ {
+		for x := 0; x < before.Bounds().Dx(); x++ {
+			pixel := before.RGBAAt(x, y)
+			if pixel != background {
+				if pixel != (color.RGBA{A: 255}) {
+					t.Fatalf("unselected pin has faded stroke at (%d,%d): %v", x, y, pixel)
+				}
+				ink++
+			}
+		}
+	}
+	if ink == 0 {
+		t.Fatal("unselected pin has no visible strokes")
+	}
 	procSendMessage.Call(p.button, 0x00F5, 0, 0)
 	after := captureCaptionPin(t, p)
 	if slices.Equal(before.Pix, after.Pix) {
-		t.Fatal("pin angle did not change while topmost")
+		t.Fatal("pin glyph did not change while topmost")
 	}
 	if before.RGBAAt(0, 0) != after.RGBAAt(0, 0) {
 		t.Fatal("topmost state highlights the background")
@@ -140,7 +176,7 @@ func TestCaptionPinNativeWindow(t *testing.T) {
 	button := p.button
 	p.close()
 	p.close()
-	if _, exists := captionPins[owner]; exists {
+	if _, exists := captionPins.Load(owner); exists {
 		t.Fatal("owner subclass state was not released")
 	}
 	if valid, _, _ := user32.NewProc("IsWindow").Call(button); valid != 0 {

@@ -53,8 +53,7 @@ func TestE2ERedisWorkspace(t *testing.T) {
 	run(chromedp.Navigate(web.URL), chromedp.WaitReady(`.nav-item[data-view="redis"]`, chromedp.ByQuery), chromedp.Evaluate(`setLanguage('zh')`, nil), chromedp.Click(`#menubar .menu-title[data-i18n="nav.redis"]`, chromedp.ByQuery), chromedp.Click(`#redis-add`, chromedp.ByQuery))
 	wait(`document.querySelector('#redis-connection-dialog').open`)
 	run(chromedp.Click(`#redis-close-dialog`, chromedp.ByQuery))
-	wait(`document.querySelectorAll('#redis-profile option').length===2 && !document.querySelector('#redis-profile').disabled`)
-	run(chromedp.Evaluate(`document.querySelector('#redis-profile').value='test';document.querySelector('#redis-profile').dispatchEvent(new Event('change'))`, nil))
+	wait(`document.querySelectorAll('#redis-profile option').length===1 && document.querySelector('#redis-profile').value==='test' && !document.querySelector('#redis-profile').disabled`)
 	wait(`document.querySelectorAll('[data-redis-key]').length===4 && !document.querySelector('#redis-profile').disabled`)
 	var expandedGroups int
 	run(chromedp.Evaluate(`document.querySelectorAll('#redis-tree details[open]').length`, &expandedGroups))
@@ -82,7 +81,9 @@ func TestE2ERedisWorkspace(t *testing.T) {
 	}
 	run(chromedp.Evaluate(`document.querySelector('#redis-ttl').value='120';document.querySelector('#redis-ttl').dispatchEvent(new Event('input'))`, nil), chromedp.Click(`#redis-expire`, chromedp.ByQuery))
 	wait(`document.querySelector('#redis-current-ttl').textContent.includes('120') && !document.querySelector('#redis-save').disabled`)
-	run(chromedp.Click(`#redis-new-key`, chromedp.ByQuery), chromedp.Evaluate(`document.querySelector('#redis-key').value='new:key';document.querySelector('#redis-key').dispatchEvent(new Event('input'))`, nil), chromedp.Focus(`#redis-editor .cm-content`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("新值").Do(ctx) }), chromedp.Click(`#redis-save`, chromedp.ByQuery))
+	run(chromedp.Click(`#redis-new-key`, chromedp.ByQuery))
+	wait(`document.querySelector('#redis-new-key-dialog').open && !!document.querySelector('#redis-new-key-editor .cm-content')`)
+	run(chromedp.Evaluate(`document.querySelector('#redis-new-key-name').value='new:key'`, nil), chromedp.Focus(`#redis-new-key-editor .cm-content`, chromedp.ByQuery), chromedp.ActionFunc(func(ctx context.Context) error { return input.InsertText("新值").Do(ctx) }), chromedp.Click(`#redis-new-key-save`, chromedp.ByQuery))
 	wait(`document.querySelector('#redis-status').textContent==='已保存' && document.querySelector('#redis-key').value==='new:key'`)
 	if c.Get(context.Background(), "new:key").Val() != "新值" {
 		t.Fatal("new key not persisted")
@@ -105,6 +106,41 @@ func TestE2ERedisWorkspace(t *testing.T) {
 	wait(`document.querySelector('#redis-status').textContent==='键已删除' && !document.querySelector('[data-redis-key="new:key"]')`)
 	if c.Exists(context.Background(), "new:key").Val() != 0 {
 		t.Fatal("row deletion did not remove key")
+	}
+	run(chromedp.Evaluate(`window.confirm=window.__redisOriginalConfirm`, nil))
+	// Namespace reload discovers server-side changes without losing other keys.
+	c.Set(context.Background(), "biz:wx:fresh", "fresh", 0)
+	run(chromedp.Evaluate(`document.querySelector('[data-namespace-action="reload"][data-prefix="biz:wx:"]').click()`, nil))
+	wait(`!!document.querySelector('[data-redis-key="biz:wx:fresh"]') && !document.querySelector('#redis-profile').disabled`)
+	c.Del(context.Background(), "biz:wx:fresh")
+	run(chromedp.Evaluate(`document.querySelector('[data-namespace-action="reload"][data-prefix="biz:wx:"]').click()`, nil))
+	wait(`!document.querySelector('[data-redis-key="biz:wx:fresh"]') && !document.querySelector('#redis-profile').disabled`)
+	run(chromedp.Evaluate(`document.querySelector('[data-namespace-action="add"][data-prefix="biz:wx:"]').click()`, nil))
+	wait(`document.querySelector('#redis-new-key-dialog').open && document.querySelector('#redis-new-key-name').value==='biz:wx:'`)
+	importPath := filepathJoinTemp(t, "redis-value.txt", "从文件导入的值")
+	run(chromedp.Evaluate(`document.querySelector('#redis-new-key-name').value='biz:wx:temp:imported'`, nil), chromedp.SetUploadFiles(`#redis-new-key-file`, []string{importPath}, chromedp.ByQuery))
+	wait(`document.querySelector('#redis-new-key-editor .cm-content').textContent.includes('从文件导入的值')`)
+	if os.Getenv("LOG_AGENT_REDIS_SCREENSHOT") != "" {
+		var png []byte
+		run(chromedp.CaptureScreenshot(&png))
+		if err := os.WriteFile("redis-new-key-dialog.png", png, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(chromedp.Click(`#redis-new-key-save`, chromedp.ByQuery))
+	wait(`!document.querySelector('#redis-new-key-dialog').open && !!document.querySelector('[data-redis-key="biz:wx:temp:imported"]') && !document.querySelector('#redis-profile').disabled`)
+	if c.Get(context.Background(), "biz:wx:temp:imported").Val() != "从文件导入的值" {
+		t.Fatal("file import not saved")
+	}
+	run(chromedp.Evaluate(`window.confirm=message=>{window.__namespaceConfirm=message;return false;};document.querySelector('[data-namespace-action="delete"][data-prefix="biz:wx:temp:"]').click()`, nil))
+	wait(`!!window.__namespaceConfirm && !document.querySelector('#redis-profile').disabled`)
+	if c.Exists(context.Background(), "biz:wx:temp:imported").Val() != 1 {
+		t.Fatal("cancelled namespace deletion removed data")
+	}
+	run(chromedp.Evaluate(`window.confirm=()=>true;document.querySelector('[data-namespace-action="delete"][data-prefix="biz:wx:temp:"]').click()`, nil))
+	wait(`!document.querySelector('[data-redis-key="biz:wx:temp:imported"]') && !document.querySelector('#redis-profile').disabled`)
+	if c.Exists(context.Background(), "biz:wx:temp:imported").Val() != 0 || c.HGet(context.Background(), "biz:wx:member:plans", "vip").Val() != "365" {
+		t.Fatal("namespace deletion did not preserve other namespaces")
 	}
 	run(chromedp.Evaluate(`window.confirm=window.__redisOriginalConfirm`, nil))
 	run(chromedp.Evaluate(`document.querySelector('#redis-pattern').value='biz:*'`, nil), chromedp.Click(`#redis-search-form button`, chromedp.ByQuery))
